@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a voice AI pipeline project with a WebSocket-based ASR (Automatic Speech Recognition) service. Currently a minimal viable product (MVP) with a mock ASR engine.
+Voice AI pipeline with WebSocket-based ASR (Automatic Speech Recognition) service. Modular architecture with VAD (Voice Activity Detection) and Qwen3-ASR integration.
 
 ## Setup & Running
 
@@ -13,39 +13,53 @@ This is a voice AI pipeline project with a WebSocket-based ASR (Automatic Speech
 git clone https://github.com/markkobo/voice-ai-pipeline.git
 cd voice-ai-pipeline
 
-# Install dependencies (if needed)
-pip install fastapi uvicorn pydantic websockets
+# Install dependencies
+pip install -r requirements.txt
 
-# Run the server
-python asr_server.py
+# Run with Qwen3-ASR (default, requires model download)
+python -m app.main
+
+# Or run with MockASR for testing
+USE_QWEN_ASR=false python -m app.main
 ```
 
-The server runs on `http://0.0.0.0:8000` with hot reload enabled.
-
-This starts the FastAPI server on `http://0.0.0.0:8000` with hot reload enabled.
+Server runs on `http://0.0.0.0:8000` with hot reload.
 
 ## Architecture
 
-- **asr_server.py**: FastAPI WebSocket server exposing `/ws/asr` endpoint
-  - Accepts WebSocket connections with JSON config messages and binary audio frames
-  - Returns partial and final ASR results via WebSocket
-  - Includes telemetry (latency tracking) in responses
-  - Currently uses a mock ASR engine (placeholder for Qwen3-ASR)
+```
+app/
+├── main.py                 # FastAPI app setup
+├── api/
+│   └── ws_asr.py          # WebSocket /ws/asr endpoint
+├── core/
+│   └── state_manager.py   # Session state, audio buffers, utterance tracking
+└── services/
+    ├── vad_engine.py       # BaseVAD + EnergyVAD (RMS-based speech detection)
+    └── asr_engine.py      # BaseASR + Qwen3ASR + MockASR
+tests/
+├── conftest.py            # pytest fixtures
+└── test_ws_asr.py         # Unit and integration tests
+```
 
-- **litellm_config.yaml**: LiteLLM configuration for unified LLM API routing
+## Protocol
 
-## WebSocket Protocol
+**Client sends (Text frames - JSON):**
+- `{"type": "config", "audio": {"sample_rate": 24000, "channels": 1, "format": "pcm"}}`
+- `{"type": "control", "action": "commit_utterance"}`
 
-Clients must send:
-1. A `config` message first (JSON with `type: "config"`)
-2. Binary audio frames after config
+**Client sends (Binary frames):** PCM 16-bit audio chunks
 
-Server returns:
-- `asr_result` messages with `is_final: false` (partial results)
-- `asr_result` messages with `is_final: true` (final results)
+**Server returns:**
+- `{"type": "asr_result", "utterance_id": "...", "is_final": false, "text": "...", ...}` (partial)
+- `{"type": "asr_result", "utterance_id": "...", "is_final": true, "text": "...", "extensions": {"emotion": {...}}, "telemetry": {...}}` (final)
 
-## Future Integrations (Not Yet Implemented)
+## Testing
 
-- Qwen3-ASR inference engine (replacing mock)
-- VAD module (Voice Activity Detection - WebRTC or Silero)
-- SER module (Speech Emotion Recognition)
+```bash
+# Run tests (uses MockASR)
+USE_QWEN_ASR=false pytest tests/ -v
+
+# Run specific test
+USE_QWEN_ASR=false pytest tests/test_ws_asr.py::TestWebSocketIntegration -v
+```
