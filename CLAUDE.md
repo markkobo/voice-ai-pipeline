@@ -6,11 +6,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a voice AI pipeline project with a WebSocket-based ASR (Automatic Speech Recognition) service. Currently a minimal viable product (MVP) with a mock ASR engine.
 
-## Running the Server
+## Setup & Running
 
 ```bash
+# Clone the repo
+git clone https://github.com/markkobo/voice-ai-pipeline.git
+cd voice-ai-pipeline
+
+# Install dependencies (if needed)
+pip install fastapi uvicorn pydantic websockets
+
+# Run the server
 python asr_server.py
 ```
+
+The server runs on `http://0.0.0.0:8000` with hot reload enabled.
 
 This starts the FastAPI server on `http://0.0.0.0:8000` with hot reload enabled.
 
