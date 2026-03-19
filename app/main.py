@@ -2,6 +2,12 @@
 from fastapi import FastAPI
 from app.api import ws_asr
 
+# Import telemetry - start metrics server
+from telemetry import TelemetryCollector
+
+# Start Prometheus metrics server on port 9090
+telemetry_collector = TelemetryCollector(port=9090, enable_at_start=True)
+
 app = FastAPI(title="Voice AI Pipeline ASR Service", version="1.0.0")
 
 # Include WebSocket router
