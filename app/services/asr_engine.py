@@ -1,8 +1,10 @@
 """ASR (Automatic Speech Recognition) engine module."""
 import asyncio
+import os
 import time
 import numpy as np
 import struct
+import torch
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
 
@@ -30,7 +32,7 @@ class Qwen3ASR(BaseASR):
     Requires model to be loaded via from_pretrained().
     """
 
-    def __init__(self, model_name: str = "Qwen/Qwen2-Audio-7B-Instruct", latency_ms: int = 0):
+    def __init__(self, model_name: str = "Qwen/Qwen3-ASR-1.7B", latency_ms: int = 0):
         """
         Initialize Qwen3 ASR.
 
@@ -45,10 +47,22 @@ class Qwen3ASR(BaseASR):
 
     def load_model(self) -> None:
         """Load the Qwen3-ASR model."""
+        import torch
         from qwen_asr import Qwen3ASRModel
         print(f"Loading Qwen3-ASR model: {self.model_name}...")
+
+        # Determine device
+        if torch.cuda.is_available():
+            device_map = "cuda:0"
+            dtype = torch.bfloat16
+        else:
+            device_map = "cpu"
+            dtype = torch.float32
+
         self._model = Qwen3ASRModel.from_pretrained(
             self.model_name,
+            dtype=dtype,
+            device_map=device_map,
             max_inference_batch_size=1,
             max_new_tokens=512
         )
