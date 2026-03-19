@@ -1,0 +1,28 @@
+model_list:
+  - model_name: claude-3-5-sonnet-20241022
+    litellm_params:
+      model:  minimax/minimax-m2.5
+      api_base: "https://api.minimax.io"
+      api_key: "sk-cp-bdaf8sYn6w87XxOCStGtMDQphNK5raath68ftqFVK6gSQ-1SxOZXnaO8KO0UaSCDjJla1XwxahrxA-sr7VdQiULybYxFI65wITq25a1zq7gfl68i44aWkdc"
+
+  - model_name: anthropic/claude-sonnet-4-6
+    litellm_params:
+      model:  anthropic/minimax-m2.5
+      api_base: "https://api.minimaxi.com/anthropic" # "https://api.minimax.io"
+      api_key: "sk-cp-bdaf8sYn6w87XxOCStGtMDQphNK5raath68ftqFVK6gSQ-1SxOZXnaO8KO0UaSCDjJla1XwxahrxA-sr7VdQiULybYxFI65wITq25a1zq7gfl68i44aWkdc"
+
+  - model_name: claude-sonnet-4-6
+    litellm_params:
+      model:  anthropic/minimax-m2.5
+      api_base: "https://api.minimaxi.com/anthropic" # "https://api.minimax.io"
+      api_key: "sk-cp-bdaf8sYn6w87XxOCStGtMDQphNK5raath68ftqFVK6gSQ-1SxOZXnaO8KO0UaSCDjJla1XwxahrxA-sr7VdQiULybYxFI65wITq25a1zq7gfl68i44aWkdc"
+
+  - model_name: claude-3-7-sonnet-20250219
+    litellm_params:
+      model: openai/abab6.5s-chat
+      api_base: https://api.minimax.chat/v1
+      api_key: sk-cp-bdaf8sYn6w87XxOCStGtMDQphNK5raath68ftqFVK6gSQ-1SxOZXnaO8KO0UaSCDjJla1XwxahrxA-sr7VdQiULybYxFI65wITq25a1zq7gfl68i44aWkdc
+
+litellm_settings:
+  drop_params: true # 忽略 Minimax 不支援的 Anthropic 專屬參數
+  set_completed_by: true

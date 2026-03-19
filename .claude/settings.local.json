@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip3 list:*)",
+      "Bash(python3:*)",
+      "Bash(apt-get update:*)",
+      "Bash(apt-get install:*)",
+      "Bash(gh auth:*)",
+      "Bash(gh repo:*)",
+      "Bash(git init:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git config:*)"
+    ]
+  }
+}
