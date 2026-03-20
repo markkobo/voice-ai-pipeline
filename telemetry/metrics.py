@@ -27,6 +27,14 @@ asr_latency = Histogram(
     labelnames=["component", "model"],
 )
 
+# RAG Retrieval Latency
+rag_retrieval_seconds = Histogram(
+    "rag_retrieval_seconds",
+    "RAG knowledge base retrieval latency",
+    buckets=[0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0],
+    labelnames=["component", "index_name"],
+)
+
 # LLM Time to First Token
 llm_ttft = Histogram(
     "llm_ttft_seconds",

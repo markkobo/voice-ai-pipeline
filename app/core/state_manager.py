@@ -1,14 +1,13 @@
-"""State manager for WebSocket sessions, audio buffers, and utterance tracking."""
+"""State manager for WebSocket sessions, audio buffers, utterance tracking, and LLM tasks."""
+import asyncio
 import uuid
 import time
 from typing import Optional, Dict, Any
-from dataclasses import dataclass, field
 
-from app.services.vad_engine import BaseVAD
-from app.services.asr_engine import BaseASR
+from app.services.asr import BaseVAD, EnergyVAD, BaseASR, MockASR, Qwen3ASR
+from telemetry import metrics
 
 
-@dataclass
 class AudioConfig:
     """Audio configuration for a session."""
     sample_rate: int = 24000
@@ -16,7 +15,6 @@ class AudioConfig:
     format: str = "pcm"
 
 
-@dataclass
 class SessionState:
     """State for a single WebSocket session."""
     session_id: str
@@ -24,14 +22,38 @@ class SessionState:
     audio_config: AudioConfig
     vad: BaseVAD
     asr: BaseASR
-    audio_buffer: bytearray = field(default_factory=bytearray)
-    is_configured: bool = False
-    start_time: float = field(default_factory=time.time)
-    vad_latency_ms: int = 0
+    audio_buffer: bytearray
+    is_configured: bool
+    start_time: float
+    vad_latency_ms: int
+
+    # Milestone 2.1: LLM and speaker tracking
+    speaker_id: Optional[str]  # From client config or future voice-print
+    llm_cancellation_event: Optional[asyncio.Event]  # Set to cancel ongoing LLM stream
+    llm_task: Optional[asyncio.Task]  # Active LLM streaming task
+
+    def __init__(
+        self,
+        session_id: str,
+        vad: BaseVAD,
+        asr: BaseASR,
+    ):
+        self.session_id = session_id
+        self.utterance_id = str(uuid.uuid4())
+        self.audio_config = AudioConfig()
+        self.vad = vad
+        self.asr = asr
+        self.audio_buffer = bytearray()
+        self.is_configured = False
+        self.start_time = time.time()
+        self.vad_latency_ms = 0
+        self.speaker_id = None
+        self.llm_cancellation_event = None
+        self.llm_task = None
 
 
 class StateManager:
-    """Manages WebSocket sessions and audio buffer state."""
+    """Manages WebSocket sessions, audio buffers, utterance tracking, and LLM tasks."""
 
     def __init__(self, vad: Optional[BaseVAD] = None, asr: Optional[BaseASR] = None, use_qwen: bool = True):
         """
@@ -42,9 +64,6 @@ class StateManager:
             asr: ASR engine instance (defaults to Qwen3ASR or MockASR)
             use_qwen: If True and no asr provided, use Qwen3ASR
         """
-        from app.services.vad_engine import EnergyVAD
-        from app.services.asr_engine import MockASR, Qwen3ASR
-
         self._sessions: Dict[str, SessionState] = {}
         self._default_vad = vad or EnergyVAD()
 
@@ -70,43 +89,34 @@ class StateManager:
         """
         state = SessionState(
             session_id=session_id,
-            utterance_id=str(uuid.uuid4()),
-            audio_config=AudioConfig(),
             vad=vad or self._default_vad,
-            asr=asr or self._default_asr
+            asr=asr or self._default_asr,
         )
         self._sessions[session_id] = state
         return state
 
     def get_session(self, session_id: str) -> Optional[SessionState]:
-        """
-        Get session state by ID.
-
-        Args:
-            session_id: Session identifier
-
-        Returns:
-            SessionState if found, None otherwise
-        """
+        """Get session state by ID."""
         return self._sessions.get(session_id)
 
     def remove_session(self, session_id: str) -> None:
-        """Remove a session."""
+        """Remove a session after cancelling any active LLM task."""
+        state = self._sessions.get(session_id)
+        if state:
+            self.cancel_llm_task(session_id)
         self._sessions.pop(session_id, None)
 
     def update_config(self, session_id: str, config: Dict[str, Any]) -> bool:
         """
-        Update session audio configuration.
+        Update session audio configuration and speaker identity.
 
         Args:
             session_id: Session identifier
-            config: Config dict with audio settings
+            config: Config dict with audio settings and optional speaker_id
 
         Returns:
             True if config was applied, False otherwise
         """
-        from app.services.vad_engine import EnergyVAD
-
         state = self._sessions.get(session_id)
         if not state:
             return False
@@ -118,6 +128,10 @@ class StateManager:
 
         # Recreate VAD with new sample rate
         state.vad = EnergyVAD(sample_rate=state.audio_config.sample_rate)
+
+        # Accept speaker_id from client config (Milestone 2.1)
+        if "speaker_id" in config:
+            state.speaker_id = config.get("speaker_id")
 
         state.is_configured = True
         return True
@@ -141,16 +155,27 @@ class StateManager:
         if not state.is_configured:
             raise RuntimeError("Session not configured")
 
+        # Cancel any ongoing LLM task when new speech is detected (barge-in)
+        is_speaking, energy = state.vad.detect(audio_chunk)
+        if is_speaking:
+            self.cancel_llm_task(session_id)
+
         # Accumulate audio
         state.audio_buffer.extend(audio_chunk)
 
-        # VAD detection
+        # VAD detection telemetry
         vad_start = time.perf_counter()
         is_speaking, energy = state.vad.detect(audio_chunk)
         vad_end = time.perf_counter()
-        state.vad_latency_ms = int((vad_end - vad_start) * 1000)
+        vad_latency = vad_end - vad_start
+        state.vad_latency_ms = int(vad_latency * 1000)
 
-        # If speech detected, return partial (in real impl, would stream)
+        metrics.vad_latency.labels(
+            component="vad",
+            model="energy"
+        ).observe(vad_latency)
+
+        # If speech detected, return partial
         if is_speaking:
             return {
                 "type": "asr_result",
@@ -180,7 +205,6 @@ class StateManager:
             raise ValueError(f"Session {session_id} not found")
 
         if not state.audio_buffer:
-            # Empty buffer - return empty result
             result = {
                 "type": "asr_result",
                 "utterance_id": state.utterance_id,
@@ -194,11 +218,19 @@ class StateManager:
             self._reset_utterance(session_id)
             return result
 
-        # Run ASR on accumulated audio
+        # Run ASR on accumulated audio with telemetry
         audio_data = bytes(state.audio_buffer)
+        asr_start = time.perf_counter()
         asr_result = await state.asr.recognize(audio_data)
+        asr_end = time.perf_counter()
+        asr_latency = asr_end - asr_start
 
-        # Build final response
+        model_name = getattr(state.asr, 'model_name', 'mock')
+        metrics.asr_latency.labels(
+            component="asr",
+            model=model_name
+        ).observe(asr_latency)
+
         result = {
             "type": "asr_result",
             "utterance_id": state.utterance_id,
@@ -212,6 +244,56 @@ class StateManager:
 
         self._reset_utterance(session_id)
         return result
+
+    def cancel_llm_task(self, session_id: str) -> bool:
+        """
+        Cancel any ongoing LLM streaming task for a session (barge-in).
+
+        Args:
+            session_id: Session identifier
+
+        Returns:
+            True if a task was cancelled, False otherwise
+        """
+        state = self._sessions.get(session_id)
+        if not state:
+            return False
+
+        if state.llm_cancellation_event is not None and not state.llm_cancellation_event.is_set():
+            state.llm_cancellation_event.set()
+            return True
+
+        if state.llm_task is not None and not state.llm_task.done():
+            state.llm_task.cancel()
+            return True
+
+        return False
+
+    def set_llm_task(
+        self,
+        session_id: str,
+        task: asyncio.Task,
+        cancellation_event: asyncio.Event,
+    ) -> None:
+        """
+        Register an active LLM streaming task for a session.
+
+        Args:
+            session_id: Session identifier
+            task: The asyncio.Task running the LLM stream
+            cancellation_event: Event to set when cancelling
+        """
+        state = self._sessions.get(session_id)
+        if state:
+            state.llm_task = task
+            state.llm_cancellation_event = cancellation_event
+
+    def clear_llm_task(self, session_id: str) -> None:
+        """Clear LLM task references after completion or cancellation."""
+        state = self._sessions.get(session_id)
+        if state:
+            state.llm_task = None
+            state.llm_cancellation_event = None
 
     def _reset_utterance(self, session_id: str) -> None:
         """Reset utterance state for next sentence."""

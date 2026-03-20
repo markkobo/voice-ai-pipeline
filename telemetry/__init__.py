@@ -8,6 +8,7 @@ from .metrics import (
     # Latency metrics
     vad_latency,
     asr_latency,
+    rag_retrieval_seconds,
     llm_ttft,
     tts_ttfb,
     e2e_latency,
@@ -37,6 +38,7 @@ __all__ = [
     # Latency
     "vad_latency",
     "asr_latency",
+    "rag_retrieval_seconds",
     "llm_ttft",
     "tts_ttfb",
     "e2e_latency",
