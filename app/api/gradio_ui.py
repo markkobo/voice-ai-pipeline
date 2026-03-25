@@ -449,7 +449,7 @@ CSS = """
 def build_ui() -> gr.Blocks:
     """Build the Gradio UI blocks."""
 
-    with gr.Blocks(title="Voice AI — Streaming Chat", css=CSS) as ui:
+    with gr.Blocks(title="Voice AI — Streaming Chat") as ui:
         gr.Markdown("## 🎙️ Voice AI — Streaming Chat")
         gr.Markdown("*小S 語音助理 — 選擇你的對象，開始對話吧！*")
 
@@ -527,7 +527,8 @@ def build_ui() -> gr.Blocks:
             )
 
         # Debug panel
-        with gr.Group(visible=False) as debug_section:
+        # Debug panel (JS toggles visibility via debug_mode checkbox)
+        with gr.Group() as debug_section:
             gr.Markdown("### 🔍 Debug Panel")
             gr.HTML(
                 '<div id="debug-panel" style="background:#f0f0f0;border-radius:8px;padding:8px;'
@@ -537,7 +538,7 @@ def build_ui() -> gr.Blocks:
             )
 
         # Log viewer
-        with gr.Group(visible=False) as log_section:
+        with gr.Group() as log_section:
             gr.Markdown("### 📋 Log Viewer")
             gr.HTML(
                 '<div id="log-viewer" style="background:#1e1e1e;color:#ddd;border-radius:8px;padding:8px;'
@@ -546,13 +547,6 @@ def build_ui() -> gr.Blocks:
                 '</div>',
                 elem_id="log-viewer"
             )
-
-        # Debug mode toggle
-        debug_mode.change(
-            fn=lambda show: gr.update(visible=show),
-            inputs=[debug_mode],
-            outputs=[debug_section],
-        )
 
         # Inject WebSocket JS
         gr.HTML(f'<script>{WEBSOCKET_JS}</script>')
