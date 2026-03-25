@@ -9,3 +9,6 @@ qwen-asr>=0.0.6
 torch>=2.4.0
 prometheus-client>=0.19.0
 openai>=1.0.0
+gradio>=4.0.0
+faster-qwen3-tts
+pydub>=0.25.0

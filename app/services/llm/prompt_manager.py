@@ -1,28 +1,34 @@
 """
 Prompt manager with speaker-aware persona system.
 
-Provides contextual system prompts based on speaker identity (speaker_id)
-for future voice-print recognition integration. Currently supports
-configurable persona types with fallback for unknown speakers.
+Provides contextual system prompts based on persona_id and listener_id.
+Persona definitions are loaded from JSON files in app/resources/personas/.
 """
+import json
+import os
+from pathlib import Path
 from typing import Optional, Dict, Any
 
 
+# ============================================================================
+# Built-in Persona Types (fallback if JSON not available)
+# ============================================================================
+
 class PersonaType:
     """Persona type constants."""
-    CAREGIVER = "caregiver"      # Default caring assistant for family use
-    ELDER_GENTLE = "elder_gentle"  # Warm, patient tone for elderly family members
-    ELDER_PLAYFUL = "elder_playful"  # Slightly witty, respectful for elders
-    CHILD = "child"            # Educational, encouraging for children
-    EXTERNAL = "external"       # Sarcastic, witty (小S mode) for non-family users
-    DEFAULT = "default"         # Neutral helpful assistant
+    CAREGIVER = "caregiver"
+    ELDER_GENTLE = "elder_gentle"
+    ELDER_PLAYFUL = "elder_playful"
+    CHILD = "child"
+    EXTERNAL = "external"
+    DEFAULT = "default"
 
 
 # ============================================================================
-# Persona Prompt Templates
+# Built-in Persona Prompts (used when JSON loading fails or for development)
 # ============================================================================
 
-_PERSONA_PROMPTS: Dict[PersonaType, str] = {
+_BUILTIN_PERSONA_PROMPTS: Dict[str, str] = {
     PersonaType.CAREGIVER: (
         "你是一個貼心的家庭照護 AI 語音助理。你的主要使用者是家庭照護者。 "
         "請用溫暖、耐心、專業的口吻回應。提供實用建議，適時提醒健康注意事項。"
@@ -48,113 +54,194 @@ _PERSONA_PROMPTS: Dict[PersonaType, str] = {
     ),
 }
 
-# Fallback prompts when speaker_id is unknown
-_DEFAULT_FALLBACK_PROMPT = (
-    "你是一個有用的語音 AI 助理。請用清晰、簡潔的方式回覆。"
-)
 
-# Speaker ID to PersonaType mapping
-# In the future, this will be populated dynamically via voice-print recognition
-_SPEAKER_PERSONA_MAP: Dict[str, PersonaType] = {
-    # Example mappings - expand as needed
-    # "dad": PersonaType.ELDER_GENTLE,
-    # "mom": PersonaType.ELDER_GENTLE,
-    # "grandpa": PersonaType.ELDER_GENTLE,
-    # "child_name": PersonaType.CHILD,
-}
+# ============================================================================
+# Persona Manager
+# ============================================================================
 
-
-class PromptManager:
+class PersonaManager:
     """
-    Manages system prompts with speaker-aware persona support.
+    Manages persona definitions loaded from JSON files.
 
     Usage:
-        pm = PromptManager()
-        system_prompt = pm.get_prompt(PersonaType.ELDER_GENTLE, speaker_id="dad")
+        pm = PersonaManager()
+        system_prompt = pm.get_prompt("xiao_s", listener_id="child")
     """
 
-    def __init__(self, custom_personas: Optional[Dict[str, str]] = None):
+    def __init__(
+        self,
+        persona_dir: Optional[str] = None,
+        custom_personas: Optional[Dict[str, str]] = None,
+    ):
         """
-        Initialize PromptManager.
+        Initialize PersonaManager.
 
         Args:
+            persona_dir: Directory containing persona JSON files.
+                        Defaults to app/resources/personas/
             custom_personas: Optional dict of {persona_type: prompt_string}
-                             to override default personas.
+                            to override builtin personas.
         """
-        self._personas: Dict[str, str] = {**_PERSONA_PROMPTS}
-        if custom_personas:
-            for key, val in custom_personas.items():
-                self._personas[key] = val
-        self._speaker_map: Dict[str, str] = dict(_SPEAKER_PERSONA_MAP)
+        if persona_dir is None:
+            # Find app/resources/personas relative to this file
+            base_dir = Path(__file__).parent.parent.parent
+            persona_dir = base_dir / "resources" / "personas"
+
+        self.persona_dir = Path(persona_dir)
+        self._cache: Dict[str, Dict[str, Any]] = {}
+        self._custom_personas = custom_personas or {}
+
+    def _load_persona_json(self, persona_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Load persona definition from JSON file.
+
+        Args:
+            persona_id: Persona identifier (e.g., "xiao_s")
+
+        Returns:
+            Persona dict or None if not found
+        """
+        if persona_id in self._cache:
+            return self._cache[persona_id]
+
+        persona_file = self.persona_dir / f"{persona_id}.json"
+
+        if not persona_file.exists():
+            return None
+
+        try:
+            with open(persona_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self._cache[persona_id] = data
+            return data
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"[PromptManager] Failed to load persona {persona_id}: {e}")
+            return None
+
+    def _get_builtin_prompt(self, persona_type: str) -> str:
+        """Get built-in prompt for a persona type."""
+        return _BUILTIN_PERSONA_PROMPTS.get(persona_type, _BUILTIN_PERSONA_PROMPTS[PersonaType.DEFAULT])
 
     def get_prompt(
         self,
-        persona_type: str = PersonaType.DEFAULT,
-        speaker_id: Optional[str] = None,
+        persona_id: str,
+        listener_id: Optional[str] = None,
         extra_context: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
-        Get system prompt for the given persona type and speaker.
+        Get system prompt for the given persona + listener.
 
         Args:
-            persona_type: PersonaType constant (str for serialization compat)
-            speaker_id: Optional speaker identifier; if provided and a mapping
-                       exists, persona_type is overridden by the mapping.
+            persona_id: Persona identifier (e.g., "xiao_s")
+            listener_id: Optional listener identifier (e.g., "child", "mom")
             extra_context: Optional dict of context variables to inject
-                            (e.g., {"user_name": "爸爸", "time_of_day": "morning"})
 
         Returns:
-            System prompt string
+            System prompt string ready to send to LLM
         """
-        # Resolve speaker_id to persona_type if a mapping exists
-        if speaker_id is not None and speaker_id in self._speaker_map:
-            persona_type = self._speaker_map[speaker_id]
+        # Check custom personas first
+        if persona_id in self._custom_personas:
+            base_prompt = self._custom_personas[persona_id]
+        else:
+            # Try to load from JSON
+            persona_data = self._load_persona_json(persona_id)
 
-        # Get base prompt
-        base_prompt = self._personas.get(persona_type, _DEFAULT_FALLBACK_PROMPT)
+            if persona_data:
+                # Build prompt from JSON structure
+                parts = []
 
-        # Inject extra context if provided
+                # Base personality
+                base = persona_data.get("base_personality", "")
+                if base:
+                    parts.append(base)
+
+                # Relationship modifier
+                relationships = persona_data.get("relationships", {})
+                if listener_id and listener_id in relationships:
+                    rel = relationships[listener_id]
+                else:
+                    rel = relationships.get(
+                        persona_data.get("default_relationship", "default"),
+                        ""
+                    )
+                if rel:
+                    parts.append(f"\n\n與對方說話時：{rel}")
+
+                # Emotion instruction
+                emotion_instr = persona_data.get("emotion_instruction", "")
+                if emotion_instr:
+                    parts.append(f"\n\n{emotion_instr}")
+
+                base_prompt = "\n".join(parts)
+            else:
+                # Fallback to built-in
+                base_prompt = self._get_builtin_prompt(persona_id)
+
+        # Inject extra context
         if extra_context:
-            context_lines = []
+            context_parts = []
             for key, val in extra_context.items():
-                context_lines.append(f"[Context: {key} = {val}]")
-            if context_lines:
-                base_prompt += "\n" + "\n".join(context_lines)
+                context_parts.append(f"[Context: {key} = {val}]")
+            if context_parts:
+                base_prompt += "\n" + "\n".join(context_parts)
 
         return base_prompt
 
-    def register_speaker(
-        self,
-        speaker_id: str,
-        persona_type: str,
-    ) -> None:
+    def get_available_personas(self) -> list[str]:
+        """Get list of available persona IDs."""
+        personas = set(self._custom_personas.keys())
+
+        if self.persona_dir.exists():
+            for f in self.persona_dir.glob("*.json"):
+                personas.add(f.stem)
+
+        # Add built-in personas
+        personas.update(_BUILTIN_PERSONA_PROMPTS.keys())
+
+        return sorted(personas)
+
+    def get_available_listeners(self, persona_id: str) -> list[str]:
         """
-        Register a speaker ID with a persona type.
+        Get list of available listener IDs for a persona.
 
         Args:
-            speaker_id: Unique speaker identifier
-            persona_type: PersonaType constant to assign
-        """
-        self._speaker_map[speaker_id] = persona_type
-
-    def unregister_speaker(self, speaker_id: str) -> bool:
-        """
-        Unregister a speaker ID.
-
-        Args:
-            speaker_id: Speaker identifier to remove
+            persona_id: Persona identifier
 
         Returns:
-            True if removed, False if not found
+            List of listener IDs
         """
-        return self._speaker_map.pop(speaker_id, None) is not None
+        if persona_id in self._custom_personas:
+            return []
 
-    def set_persona_prompt(self, persona_type: str, prompt: str) -> None:
+        persona_data = self._load_persona_json(persona_id)
+        if persona_data:
+            return list(persona_data.get("relationships", {}).keys())
+
+        return []
+
+    def reload(self, persona_id: Optional[str] = None):
         """
-        Override or set a persona prompt.
+        Reload persona data from disk.
 
         Args:
-            persona_type: Persona type key
-            prompt: New prompt string
+            persona_id: Specific persona to reload, or None for all
         """
-        self._personas[persona_type] = prompt
+        if persona_id:
+            self._cache.pop(persona_id, None)
+        else:
+            self._cache.clear()
+
+
+# ============================================================================
+# Legacy PromptManager for backward compatibility
+# ============================================================================
+
+class PromptManager(PersonaManager):
+    """
+    Legacy PromptManager — kept for backward compatibility.
+
+    Use PersonaManager for new code.
+    """
+
+    def __init__(self, custom_personas: Optional[Dict[str, str]] = None):
+        super().__init__(custom_personas=custom_personas)
