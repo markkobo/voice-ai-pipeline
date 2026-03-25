@@ -32,6 +32,8 @@ import io
 import json
 import os
 import re
+import struct
+import subprocess
 import time
 import uuid
 from typing import Optional
@@ -52,6 +54,10 @@ router = APIRouter()
 use_qwen = os.getenv("USE_QWEN_ASR", "true").lower() == "true"
 use_mock_llm = os.getenv("USE_MOCK_LLM", "false").lower() == "true"
 state_manager = StateManager(use_qwen=use_qwen)
+
+# OpenAI config
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 
 # LLM clients
 llm_client: Optional[OpenAIClient | MockLLMClient] = None
@@ -77,39 +83,68 @@ def _get_audio_decoder():
 
 def decode_webm_to_pcm(webm_bytes: bytes, target_sample_rate: int = 24000) -> Optional[bytes]:
     """
-    Decode WebM/Opus audio to PCM 16-bit mono.
+    Decode WebM/Opus or Ogg/Opus audio to PCM 16-bit mono using ffmpeg subprocess.
+
+    Detects format from magic bytes:
+      1a45dfa3 = WebM/Matroska
+      4f676753 = Ogg
+      52494646 = RIFF (WAV)
 
     Args:
-        webm_bytes: Raw WebM audio bytes from MediaRecorder
+        webm_bytes: Raw audio bytes from MediaRecorder
         target_sample_rate: Target sample rate (default 24kHz)
 
     Returns:
         PCM 16-bit mono bytes, or None if decode fails
     """
-    decoder = _get_audio_decoder()
+    if len(webm_bytes) < 100:
+        log.debug(f"Audio chunk too small ({len(webm_bytes)} bytes), skipping")
+        return None
 
-    if decoder == "none":
-        # Fallback: assume raw PCM (no decode)
-        return webm_bytes
+    magic = webm_bytes[:4].hex()
+
+    # Detect format from magic bytes
+    if magic.startswith('1a45dfa3'):
+        input_format = 'webm'
+    elif magic.startswith('4f676753'):
+        input_format = 'ogg'
+    elif magic.startswith('52494646'):
+        input_format = 'wav'
+    else:
+        log.debug(f"Unknown audio format magic: {magic}, skipping chunk")
+        return None
 
     try:
-        from pydub import AudioSegment
-
-        audio = AudioSegment.from_file(
-            io.BytesIO(webm_bytes),
-            format="webm"
+        proc = subprocess.Popen(
+            [
+                '/usr/bin/ffmpeg', '-y',
+                '-hide_banner', '-loglevel', 'quiet',
+                '-f', input_format, '-i', 'pipe:0',
+                '-f', 's16le', '-acodec', 'pcm_s16le',
+                '-ac', '1', '-ar', str(target_sample_rate),
+                'pipe:1'
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
+        pcm_out, ffmpeg_err = proc.communicate(input=webm_bytes, timeout=5)
 
-        # Convert to mono 24kHz PCM 16-bit
-        audio = audio.set_channels(1)
-        audio = audio.set_frame_rate(target_sample_rate)
-        audio = audio.set_sample_width(2)
+        if proc.returncode != 0:
+            log.debug(f"ffmpeg {input_format} decode failed (code {proc.returncode}) "
+                      f"for {len(webm_bytes)}B chunk, magic={magic}")
+            return None
 
-        return audio.raw_data
+        log.debug(f"Decoded {input_format} -> PCM: {len(webm_bytes)}B in, {len(pcm_out)}B out, "
+                  f"{len(pcm_out)//2} samples, magic={magic}")
+        return pcm_out
 
+    except subprocess.TimeoutExpired:
+        log.warning("ffmpeg decode timed out")
+        return None
     except Exception as e:
-        log.warning(f"Audio decode failed: {e}, returning raw bytes")
-        return webm_bytes
+        log.warning(f"Audio decode failed: {e}")
+        return None
 
 
 def get_llm_client() -> OpenAIClient | MockLLMClient:
@@ -121,11 +156,11 @@ def get_llm_client() -> OpenAIClient | MockLLMClient:
             log.info("Using MockLLMClient")
         else:
             llm_client = OpenAIClient(
-                model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                model=OPENAI_MODEL,
                 api_key=os.getenv("OPENAI_API_KEY"),
-                base_url=os.getenv("OPENAI_BASE_URL"),
+                base_url=OPENAI_BASE_URL,
             )
-            log.info("Using OpenAIClient")
+            log.info(f"Using OpenAIClient: model={OPENAI_MODEL}, base={OPENAI_BASE_URL}")
     return llm_client
 
 
@@ -166,6 +201,7 @@ async def run_llm_stream(
     first_token_sent = False
     ttft_seconds: Optional[float] = None
     tts_notified = False
+    tts_url_sent = False  # Only send tts_ready URL once per utterance
 
     # Emotion mapper for this turn
     emotion_mapper = EmotionMapper()
@@ -194,7 +230,8 @@ async def run_llm_stream(
                 new_emotion, cleaned_content = emotion_mapper.update(event.content)
 
                 if new_emotion and not tts_notified:
-                    # First emotion detected — notify client to fetch TTS
+                    # First emotion detected — mark state but DON'T send tts_ready yet
+                    # Wait until we have actual text content before notifying client
                     tts_notified = True
                     current_emotion = new_emotion
                     current_instruct = get_tts_instruct(new_emotion)
@@ -202,14 +239,7 @@ async def run_llm_stream(
                     # Next tokens will have actual text
                     tts_text_parts = []  # Start fresh after tag
 
-                    await websocket.send_text(json.dumps({
-                        "type": "tts_ready",
-                        "text": "",  # No text yet, emotion only
-                        "emotion": current_emotion,
-                        "instruct": current_instruct,
-                        "stream_url": f"/api/tts/stream?emotion={current_emotion}&model=0.6B",
-                    }))
-
+                    # Send llm_token (emotion detected) but don't notify TTS yet
                     await websocket.send_text(json.dumps({
                         "type": "llm_token",
                         "content": cleaned_content,
@@ -222,27 +252,28 @@ async def run_llm_stream(
                         first_token_sent = True
 
                 elif tts_notified:
-                    # TTS already notified — accumulate text for TTS
+                    # Emotion already detected — accumulate text for TTS
                     if cleaned_content:
                         tts_text_parts.append(cleaned_content)
                         tts_text = "".join(tts_text_parts)
 
-                        # Update TTS with new text (client can fetch updated text)
-                        import urllib.parse
-                        params = urllib.parse.urlencode({
-                            "text": tts_text,
-                            "emotion": current_emotion,
-                            "model": "0.6B",
-                        })
-                        stream_url = f"/api/tts/stream?{params}"
-
-                        await websocket.send_text(json.dumps({
-                            "type": "tts_ready",
-                            "text": tts_text,
-                            "emotion": current_emotion,
-                            "instruct": current_instruct,
-                            "stream_url": stream_url,
-                        }))
+                        # Only send tts_ready ONCE — when text first becomes non-empty
+                        if not tts_url_sent:
+                            tts_url_sent = True
+                            import urllib.parse
+                            params = urllib.parse.urlencode({
+                                "text": tts_text,
+                                "emotion": current_emotion,
+                                "model": "0.6B",
+                            })
+                            stream_url = f"/api/tts/stream?{params}"
+                            await websocket.send_text(json.dumps({
+                                "type": "tts_ready",
+                                "text": tts_text,
+                                "emotion": current_emotion,
+                                "instruct": current_instruct,
+                                "stream_url": stream_url,
+                            }))
 
                     await websocket.send_text(json.dumps({
                         "type": "llm_token",
@@ -347,6 +378,8 @@ async def websocket_endpoint(websocket: WebSocket):
 
                     elif msg_type == "control" and payload.get("action") == "commit_utterance":
                         state = state_manager.get_session(session_id)
+                        log.info(f"[{session_id}] commit_utterance received: configured={state and state.is_configured}, "
+                                 f"buffer_size={len(state.audio_buffer) if state else 0}")
                         if not state or not state.is_configured:
                             await websocket.close(code=1003, reason="Config must be sent first")
                             return
@@ -354,6 +387,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         # VAD commit — finalize audio and run ASR
                         asr_result = await state_manager.commit_utterance(session_id)
                         await websocket.send_text(json.dumps(asr_result))
+                        log.info(f"[{session_id}] ASR done: {asr_result.get('text', '')[:50]}")
 
                         # Skip LLM if ASR returned empty
                         if not asr_result.get("text"):
@@ -390,41 +424,47 @@ async def websocket_endpoint(websocket: WebSocket):
                         state_manager.cancel_llm_task(session_id)
                         log.info(f"[{session_id}] Explicit cancel")
 
+                    elif msg_type == "control" and payload.get("action") == "start_speech":
+                        # Client is starting to speak — cancel any ongoing LLM (barge-in)
+                        # and reset audio buffer
+                        state_manager.cancel_llm_task(session_id)
+                        state_manager.cancel_tts_task(session_id)
+                        state = state_manager.get_session(session_id)
+                        if state:
+                            state.audio_buffer.clear()
+                            if hasattr(state.vad, 'reset'):
+                                state.vad.reset()
+                        log.info(f"[{session_id}] start_speech: cancelled LLM, cleared buffer")
+
                 except json.JSONDecodeError:
                     log.warning(f"[{session_id}] Invalid JSON")
 
-            # Handle Binary (WebM audio) messages
+            # Handle Binary audio messages (accumulated Int16 PCM from client)
             elif "bytes" in message:
                 state = state_manager.get_session(session_id)
                 if not state or not state.is_configured:
                     await websocket.close(code=1003, reason="Config must be sent before audio data")
                     return
 
-                webm_bytes = message["bytes"]
-
-                # Decode WebM → PCM
-                pcm_bytes = decode_webm_to_pcm(
-                    webm_bytes,
-                    target_sample_rate=state.audio_config.sample_rate
-                )
+                audio_bytes = message["bytes"]
+                audio_len = len(audio_bytes)
+                log.debug(f"Received binary audio: {audio_len} bytes")
 
                 metrics.audio_chunks_total.labels(
                     component="ws",
                     session_id=session_id,
                 ).inc()
 
-                # Process through VAD
-                vad_result = state_manager.process_audio(session_id, pcm_bytes)
+                # Validate: Int16 PCM, 2 bytes per sample
+                if audio_len % 2 != 0:
+                    log.debug(f"Skipping odd-length audio chunk: {audio_len}")
+                    continue
 
-                if vad_result:
-                    # VAD committed — send signal to client
-                    await websocket.send_text(json.dumps(vad_result))
+                num_samples = audio_len // 2
+                log.debug(f"Int16 PCM: {num_samples} samples, {audio_len} bytes")
 
-                    # Cancel any active LLM (new speech started)
-                    llm_cancelled = state_manager.cancel_llm_task(session_id)
-                    if llm_cancelled:
-                        await websocket.send_text(json.dumps({"type": "llm_cancelled"}))
-                        log.info(f"[{session_id}] LLM cancelled due to new speech")
+                # Just accumulate audio — VAD/ASR runs only on commit_utterance
+                state_manager.add_audio(session_id, audio_bytes)
 
     except WebSocketDisconnect:
         log.info(f"[{session_id}] Client disconnected")
@@ -435,6 +475,8 @@ async def websocket_endpoint(websocket: WebSocket):
             error_type="exception",
             model="",
         ).inc()
+        # Don't re-raise — exit cleanly
+        return
     finally:
         metrics.ws_connections_total.labels(component="ws", status="disconnected").inc()
         metrics.active_sessions.labels(component="pipeline").dec()

@@ -129,7 +129,15 @@ class EnergyVAD(BaseVAD):
 
         # Convert bytes to 16-bit signed integers
         num_samples = len(audio_chunk) // self._bytes_per_sample
-        samples = struct.unpack(f"{num_samples}h", audio_chunk)
+        # Only use complete sample pairs — drop trailing byte if odd length
+        num_samples = num_samples * 2 // 2  # ensure even
+        if num_samples == 0:
+            return False, 0.0
+        try:
+            samples = struct.unpack(f"{num_samples}h", audio_chunk[:num_samples * 2])
+        except struct.error:
+            # Defensive: skip chunks that can't be unpacked
+            return False, 0.0
 
         # Calculate RMS energy
         if num_samples == 0:

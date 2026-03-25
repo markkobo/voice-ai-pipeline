@@ -133,6 +133,8 @@ class EmotionMapper:
         self.current_emotion = None
         self.current_instruct = None
         self._emotion_locked = False
+        self._buffer = ""
+        self._buffer_returned_len = 0
 
     @property
     def is_ready(self) -> bool:

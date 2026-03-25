@@ -1,5 +1,7 @@
 """FastAPI application setup with Gradio UI, WebSocket, and TTS streaming."""
 import os
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))  # Load .env file for API keys
 
 # Setup structured JSON logging FIRST
 from app.logging_config import setup_json_logging
@@ -11,7 +13,7 @@ logger.info("Starting Voice AI Pipeline")
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import ws_asr, tts_stream
+from app.api import ws_asr, tts_stream, standalone_ui
 # gradio_ui imported lazily below to handle missing gradio
 
 # Import telemetry collector
@@ -39,6 +41,12 @@ app.add_middleware(
 # Include routers
 app.include_router(ws_asr.router)
 app.include_router(tts_stream.router)
+app.include_router(standalone_ui.router)
+
+print(f"[DEBUG] Routers included. Total routes: {len(app.routes)}")
+for r in app.routes:
+    if hasattr(r, 'path'):
+        print(f"  {r.path}")
 
 
 @app.get("/health")
@@ -72,48 +80,30 @@ def create_app() -> FastAPI:
 
 
 # ============================================================================
-# Gradio UI Mounting
+# Standalone UI is mounted via standalone_ui router (at /ui)
 # ============================================================================
-
-def mount_gradio_app(app: FastAPI):
-    """
-    Mount Gradio UI at /ui.
-
-    This is called after app creation to avoid circular imports.
-    """
-    try:
-        from gradio_ui import build_ui
-
-        ui = build_ui()
-        app = ui.mount(app, path="/ui")
-        logger.info("Gradio UI mounted at /ui")
-        return app
-    except ImportError as e:
-        logger.warning(f"Gradio not available: {e}")
-        return app
-
-
-# Mount Gradio on import (after all routes are registered)
-# This is done lazily to avoid import issues during testing
-_gradio_mounted = False
-
 
 @app.on_event("startup")
 async def startup_event():
-    """Mount Gradio on startup."""
-    global _gradio_mounted
-    if not _gradio_mounted:
-        try:
-            import gradio
-            # Lazy import to avoid top-level gradio import
-            from app.api.gradio_ui import build_ui
-            ui = build_ui()
-            app.mount("/ui", ui)
-            _gradio_mounted = True
-            logger.info("Gradio UI mounted at /ui")
-        except ImportError as e:
-            logger.warning(f"Gradio not installed: {e}")
-            logger.warning("Install with: pip install gradio")
+    """Startup event — preload ASR model."""
+    import asyncio
+
+    async def preload_asr():
+        # Get the ASR engine from state_manager (created at module import)
+        from app.api.ws_asr import state_manager
+        asr_engine = state_manager._default_asr
+
+        # Only preload if it's Qwen3ASR (not MockASR)
+        if asr_engine.__class__.__name__ == "Qwen3ASR" and asr_engine._model is None:
+            logger.info("Preloading Qwen3-ASR model (first load ~30s)...")
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, asr_engine.load_model)
+            logger.info("Qwen3-ASR model preloaded successfully")
+        else:
+            logger.info(f"ASR engine already loaded or using {asr_engine.__class__.__name__}")
+
+    # Load in background so server starts immediately
+    asyncio.create_task(preload_asr())
 
 
 if __name__ == "__main__":
@@ -122,6 +112,6 @@ if __name__ == "__main__":
     uvicorn.run(
         "app.main:app",
         host="0.0.0.0",
-        port=8000,
+        port=8080,
         reload=True,
     )

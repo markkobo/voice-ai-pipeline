@@ -184,6 +184,22 @@ class StateManager:
         )
         return True
 
+    def add_audio(self, session_id: str, audio_chunk: bytes) -> None:
+        """
+        Add audio chunk to the session buffer without VAD processing.
+        Called when client sends accumulated audio before commit_utterance.
+
+        Args:
+            session_id: Session identifier
+            audio_chunk: Binary PCM audio data
+        """
+        state = self._sessions.get(session_id)
+        if not state:
+            raise ValueError(f"Session {session_id} not found")
+        if not state.is_configured:
+            raise RuntimeError("Session not configured")
+        state.audio_buffer.extend(audio_chunk)
+
     def process_audio(self, session_id: str, audio_chunk: bytes) -> Optional[Dict[str, Any]]:
         """
         Process audio chunk through VAD.
