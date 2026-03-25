@@ -1,8 +1,26 @@
-startlitellm.sh
-litellm.log
+# Environment
 .env
+.env.local
+
+# Cache
+.cache/
+models/
+
+# Logs
 logs/
+*.log
+litellm.log
+litellmlog
+
+# Python
 *.pyc
 **/__pycache__/
-*.pyc
 .pytest_cache/
+
+# Temp files
+temp.txt
+manual.md
+
+# Shell scripts (not part of repo)
+startlitellm.sh
+setup_litellm.sh
