@@ -240,8 +240,61 @@ Final TTS text: '好啦～那我們來玩遊戲！' (emotion tag correctly remov
 
 ## 7. Open Issues / Pending
 
-- [ ] Browser testing needed (Gradio UI WebSocket JS)
-- [ ] VAD sensitivity slider in UI updates VAD config in real-time
+- [x] Browser testing completed (Standalone UI with WebSocket + AudioWorklet)
+- [x] VAD sensitivity slider in UI updates VAD config in real-time
+
+---
+
+## 8. Known Issues / Post-M1 Fixes Applied
+
+### TTS WAV Format Fix (P1)
+**Issue**: Browser `decodeAudioData` fails with raw PCM — needs WAV header
+
+**Fix Applied**: TTS endpoint now returns WAV format with proper header.
+Status: Fixed in `app/api/tts_stream.py`
+
+### PyTorch Version for FasterQwen3TTS (DONE)
+**Issue**: PyTorch 2.4.1 `torch.multinomial` cannot be captured in CUDA graphs
+
+**Fix**: Upgraded to PyTorch 2.6.0+cu124
+Status: Fixed, `requirements.txt` updated
+
+### Uvicorn StatReload Crash (DONE)
+**Issue**: `reload=True` caused StatReload when HuggingFace cache updated, crashing server mid-request
+
+**Fix**: Set `reload=False` in `app/main.py`
+Status: Fixed
+
+---
+
+## 9. Next: Milestone P1 — Latency Optimization
+
+**Focus**: Reduce `speech_to_response_start` to < 2s for natural conversation feel
+
+### P1.1: Silero VAD
+- Replace EnergyVAD with Silero VAD (ONNX-based)
+- Expected: Better accuracy, fewer false positives
+- Files: `app/services/asr/silero_vad.py` (new)
+
+### P1.2: TTS Chunks Immediate Playback
+- TTS already generates streaming chunks
+- Fix: Send chunks to client as they arrive (not buffered)
+- Client plays each chunk immediately via AudioContext
+
+### P1.3: New Telemetry Metrics
+```python
+# app/telemetry/metrics.py additions
+speech_to_response_start_seconds = Histogram(
+    "speech_to_response_start_seconds",
+    "Time from user stops speaking to first TTS audio playing",
+    buckets=[0.5, 1.0, 1.5, 2.0, 3.0, 5.0],
+)
+tts_first_chunk_seconds = Histogram(
+    "tts_first_chunk_seconds",
+    "Time from LLM first token to TTS first chunk",
+    buckets=[0.1, 0.25, 0.5, 1.0, 2.0],
+)
+```
 
 ---
 

@@ -10,6 +10,7 @@ import asyncio
 import base64
 import json
 import os
+import time
 import uuid
 from typing import AsyncIterator, Optional
 
@@ -22,6 +23,7 @@ from app.services.tts import (
     TTSStreamEvent,
     get_tts_instruct,
 )
+from telemetry import metrics
 
 log = get_logger(__name__, component="tts_stream")
 
@@ -31,6 +33,33 @@ router = APIRouter()
 _tts_sessions: dict[str, asyncio.Queue] = {}
 
 
+def make_wav_header(num_samples: int, sample_rate: int = 24000, num_channels: int = 1, bits_per_sample: int = 16) -> bytes:
+    """Generate a WAV file header for PCM audio."""
+    byte_rate = sample_rate * num_channels * bits_per_sample // 8
+    block_align = num_channels * bits_per_sample // 8
+    data_size = num_samples * num_channels * bits_per_sample // 8
+    file_size = 36 + data_size
+
+    import struct
+    header = struct.pack(
+        '<4sI4s4sIHHIIHH4sI',
+        b'RIFF',           # ChunkID
+        file_size,         # ChunkSize
+        b'WAVE',           # Format
+        b'fmt ',           # Subchunk1ID
+        16,                # Subchunk1Size (PCM)
+        1,                 # AudioFormat (PCM)
+        num_channels,      # NumChannels
+        sample_rate,       # SampleRate
+        byte_rate,         # ByteRate
+        block_align,       # BlockAlign
+        bits_per_sample,   # BitsPerSample
+        b'data',           # Subchunk2ID
+        data_size,         # Subchunk2Size
+    )
+    return header
+
+
 async def tts_audio_stream(
     text: str,
     emotion: str,
@@ -38,7 +67,7 @@ async def tts_audio_stream(
     session_id: str,
 ) -> AsyncIterator[bytes]:
     """
-    Generate TTS audio and yield chunks as bytes.
+    Generate TTS audio and yield chunks as they arrive.
 
     Args:
         text: Text to synthesize
@@ -47,7 +76,7 @@ async def tts_audio_stream(
         session_id: Session ID for cancellation tracking
 
     Yields:
-        Bytes chunks of PCM audio
+        Bytes chunks of WAV audio (header first, then PCM chunks)
     """
     engine = get_tts_engine(model_size=model_size)
     instruct = get_tts_instruct(emotion)
@@ -57,7 +86,84 @@ async def tts_audio_stream(
         f"instruct={instruct}, text_len={len(text)}"
     )
 
+    sample_rate = 24000
+    header_sent = False
+    total_samples = 0
+    first_chunk_time = None
+    stream_start_time = time.perf_counter()
+
     try:
+        async for event in engine.generate_streaming(
+            text=text,
+            instruct=instruct,
+            language="Chinese",
+        ):
+            if event.event == "audio_chunk" and event.audio_data:
+                chunk = event.audio_data
+
+                # Record time to first chunk
+                if first_chunk_time is None:
+                    first_chunk_time = time.perf_counter()
+                    ttfc = first_chunk_time - stream_start_time
+                    metrics.tts_first_chunk.labels(
+                        component="tts_stream",
+                        model=model_size,
+                    ).observe(ttfc)
+                    log.info(f"TTS first chunk: {ttfc:.3f}s")
+
+                total_samples += len(chunk) // 2  # 16-bit samples
+
+                # Stream chunks immediately as they arrive
+                if not header_sent:
+                    # Estimate based on text length: ~150-200 chars/sec, 24kHz sample rate
+                    # For Chinese, roughly 1 char = 100-150 samples (0.1 second = 2400 samples for 2 chars)
+                    chars_per_sec = 150
+                    estimated_duration_sec = max(1.0, len(text) / chars_per_sec)
+                    buffer_samples = int(estimated_duration_sec * sample_rate)
+                    buffer_samples = max(buffer_samples, 24000)  # At least 1 second
+                    wav_header = make_wav_header(buffer_samples, sample_rate)
+                    yield wav_header
+                    header_sent = True
+                    log.info(f"WAV header: estimated {estimated_duration_sec:.1f}s = {buffer_samples} samples")
+
+                yield chunk
+
+            elif event.event == "error":
+                log.error(f"TTS stream error: {event.error}")
+                break
+
+        log.info(f"TTS stream done: session={session_id}, total_samples={total_samples}")
+
+    except asyncio.CancelledError:
+        log.info(f"TTS stream cancelled: session={session_id}")
+        raise
+
+
+async def tts_raw_stream(
+    text: str,
+    emotion: str,
+    model_size: str,
+    session_id: str,
+) -> AsyncIterator[bytes]:
+    """
+    Generate TTS audio and yield raw PCM chunks (no WAV header).
+
+    For use with WebSocket streaming or AudioWorklet playback.
+
+    Yields:
+        Raw PCM 16-bit mono audio chunks as they arrive (not buffered).
+        Each yield sends a chunk immediately to enable true streaming playback.
+    """
+    engine = get_tts_engine(model_size=model_size)
+    instruct = get_tts_instruct(emotion)
+
+    log.info(
+        f"TTS raw stream started: session={session_id}, emotion={emotion}, "
+        f"instruct={instruct}, text_len={len(text)}"
+    )
+
+    try:
+        # Stream chunks as they arrive (not buffered) - yields immediately per chunk
         async for event in engine.generate_streaming(
             text=text,
             instruct=instruct,
@@ -69,10 +175,10 @@ async def tts_audio_stream(
                 log.error(f"TTS stream error: {event.error}")
                 break
 
-        log.info(f"TTS stream done: session={session_id}")
+        log.info(f"TTS raw stream done: session={session_id}")
 
     except asyncio.CancelledError:
-        log.info(f"TTS stream cancelled: session={session_id}")
+        log.info(f"TTS raw stream cancelled: session={session_id}")
         raise
 
 
@@ -91,7 +197,7 @@ async def tts_stream(
         model: TTS model size ("0.6B" or "1.7B")
 
     Returns:
-        StreamingResponse with audio/pcm content
+        StreamingResponse with audio/wav content
     """
     if model not in ("0.6B", "1.7B"):
         model = "0.6B"
@@ -100,11 +206,47 @@ async def tts_stream(
 
     return StreamingResponse(
         tts_audio_stream(text=text, emotion=emotion, model_size=model, session_id="adhoc"),
+        media_type="audio/wav",
+        headers={
+            "Content-Disposition": "inline",
+            "Cache-Control": "no-cache",
+        },
+    )
+
+
+@router.get("/api/tts/raw")
+async def tts_raw(
+    text: str = Query(..., description="Text to synthesize"),
+    emotion: str = Query("默認", description="Emotion tag"),
+    model: str = Query("0.6B", description="TTS model size (0.6B or 1.7B)"),
+):
+    """
+    Stream TTS audio as raw PCM (16-bit, 24kHz, mono).
+
+    For use with Web Audio API / AudioWorklet playback.
+
+    Query params:
+        text: Text to synthesize (URL encoded)
+        emotion: Emotion tag
+        model: TTS model size ("0.6B" or "1.7B")
+
+    Returns:
+        StreamingResponse with audio/pcm content
+    """
+    if model not in ("0.6B", "1.7B"):
+        model = "0.6B"
+
+    log.info(f"TTS raw request: emotion={emotion}, model={model}, text={text[:50]}...")
+
+    return StreamingResponse(
+        tts_raw_stream(text=text, emotion=emotion, model_size=model, session_id="adhoc"),
         media_type="audio/pcm",
         headers={
             "Content-Disposition": "inline",
             "Cache-Control": "no-cache",
-            "Transfer-Encoding": "chunked",
+            "X-Audio-SampleRate": "24000",
+            "X-Audio-Channels": "1",
+            "X-Audio-Bits": "16",
         },
     )
 
@@ -167,10 +309,9 @@ async def tts_stream_named(
             model_size=model,
             session_id=session_id,
         ),
-        media_type="audio/pcm",
+        media_type="audio/wav",
         headers={
             "Content-Disposition": "inline",
             "Cache-Control": "no-cache",
-            "Transfer-Encoding": "chunked",
         },
     )

@@ -84,6 +84,12 @@ class Qwen3ASR(BaseASR):
         samples = struct.unpack(f"{num_samples}h", audio_bytes)
         audio_array = np.array(samples, dtype=np.float32) / 32768.0  # Normalize to [-1, 1]
 
+        # Debug: check audio stats
+        audio_min = float(np.min(audio_array))
+        audio_max = float(np.max(audio_array))
+        audio_mean = float(np.mean(np.abs(audio_array)))
+        print(f"[ASR] audio_bytes={len(audio_bytes)}, num_samples={num_samples}, min={audio_min:.3f}, max={audio_max:.3f}, mean_abs={audio_mean:.3f}")
+
         # Run inference
         start_time = time.perf_counter()
 
@@ -101,6 +107,8 @@ class Qwen3ASR(BaseASR):
         text = ""
         if result and len(result) > 0:
             text = result[0].text.strip()
+
+        print(f"[ASR] result={result}, text='{text}'")
 
         return {
             "text": text,

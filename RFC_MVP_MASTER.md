@@ -10,48 +10,53 @@ A private, local-first personal voice AI system that preserves and continues a p
 
 **Privacy by design**: All personal data (voice recordings, knowledge base, conversation history) stays on the client's machine. LLM inference may use cloud APIs during MVP demo, with future path to local LLM server.
 
+**Performance target**: End-to-end latency < 2s for natural conversation feel. Key metric: "speech_to_response_start" — from user stops speaking to hearing first TTS audio.
+
 ---
 
 ## 2. Architecture Overview
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     Web UI (Frontend)                       │
+│                     Web UI (Frontend)                         │
 │   ┌──────────────────────┐  ┌──────────────────────────┐   │
 │   │  Streaming Voice Page │  │  Background Mgmt Page     │   │
-│   │  (WebSocket dialogue)│  │  - Voice Recording (WebRTC)│  │
-│   └──────────┬───────────┘  │  - File Upload + Parse   │   │
-│              │              │  - Training Control       │   │
-│              │              └──────────┬───────────────┘   │
-└──────────────┼────────────────────────┼───────────────────┘
-               │ WebSocket               │ HTTP / REST
-               ▼                        ▼
+│   │  - AudioWorklet/     │  │  - WebRTC Recording       │   │
+│   │    ScriptProcessor   │  │  - File Upload + Parse    │   │
+│   │  - WebSocket (PCM+JSON)│  │  - Training Control       │   │
+│   └──────────┬───────────┘  └──────────┬───────────────┘   │
+└──────────────┼─────────────────────────┼───────────────────┘
+               │ WebSocket                │ HTTP / REST
+               ▼                          ▼
 ┌──────────────────────────────────────────────────────────────┐
 │                     Backend (FastAPI)                        │
 │                                                              │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
-│  │  ASR Service │  │  LLM Service │  │  TTS Service         │ │
-│  │  (Qwen3-ASR  │  │  (OpenAI     │  │  (Faster-Qwen3-TTS  │ │
-│  │   streaming) │  │   streaming) │  │   + LoRA fine-tune) │ │
+│  │  ASR Service │  │  LLM Service │  │  TTS Service        │ │
+│  │  - Silero VAD│  │  (OpenAI     │  │  (Faster-Qwen3-TTS  │ │
+│  │  - Qwen3-ASR │  │   streaming) │  │   streaming chunks)  │ │
 │  └──────┬──────┘  └──────┬──────┘  └──────────┬──────────┘ │
-│         │                 │                     │            │
-│  ┌──────┴─────────────────┴─────────────────────┴──────────┐ │
-│  │              Training Service (LoRA/QLoRA)               │ │
+│         │                 │                     │              │
+│  ┌──────┴────────────────┴─────────────────────┴────────────┐ │
+│  │              StateManager (WebSocket Session)           │ │
+│  │  - Audio buffers, utterance tracking                    │ │
+│  │  - LLM/TTS task cancellation (barge-in)                │ │
 │  └─────────────────────────────────────────────────────────┘ │
-│                                                              │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
-│  │ StateManager │  │ PromptManager│  │ Knowledge Base (future)│ │
-│  └─────────────┘  └─────────────┘  └─────────────────────┘ │
 └──────────────────────────────────────────────────────────────┘
                            │
                     ┌──────┴───────┐
                     │  Telemetry   │
                     │  + Logs      │
                     │  /logs/      │
-                    └─────────────┘
+                    └──────────────┘
 ```
 
-**MVP Note**: All services run in a single container. Future milestones split into separate containers.
+**Key latency targets** (P1 improvements):
+- VAD: < 500ms detection
+- ASR: < 1s inference
+- LLM TTFT: < 1s (API dependent)
+- TTS first chunk: < 500ms
+- **speech_to_response_start: < 2s**
 
 ---
 
@@ -62,16 +67,19 @@ voice-ai-pipeline/
 ├── app/
 │   ├── main.py                    # FastAPI app
 │   ├── api/
-│   │   ├── ws_asr.py             # WebSocket streaming endpoint
-│   │   ├── recordings.py         # Upload, parse, list recordings
-│   │   └── training.py           # Training control API
+│   │   ├── ws_asr.py             # WebSocket endpoint (ASR + LLM + TTS)
+│   │   ├── tts_stream.py        # HTTP TTS streaming endpoint
+│   │   ├── recordings.py          # Recording management API
+│   │   ├── training.py           # Training control API
+│   │   ├── standalone_ui.py       # Vanilla JS/HTML UI (primary)
+│   │   └── gradio_ui.py         # Gradio UI (fallback, keep for testing)
 │   ├── core/
-│   │   ├── state_manager.py      # Session state, audio buffers
+│   │   ├── state_manager.py      # Session state, audio buffers, task management
 │   │   └── training_tracker.py   # Background training state
 │   ├── services/
 │   │   ├── asr/
 │   │   │   ├── engine.py         # Qwen3-ASR interface
-│   │   │   └── vad_engine.py     # Energy-based VAD
+│   │   │   └── silero_vad.py    # Silero VAD (P1 upgrade from EnergyVAD)
 │   │   ├── llm/
 │   │   │   ├── openai_client.py  # OpenAI streaming client
 │   │   │   └── prompt_manager.py # Persona + listener prompt logic
@@ -82,13 +90,10 @@ voice-ai-pipeline/
 │   │       ├── lora_trainer.py   # LoRA fine-tuning logic
 │   │       └── voice_profile.py  # Voice profile management
 │   └── resources/
-│       ├── personas/              # JSON persona definitions
+│       ├── personas/
 │       │   └── xiao_s.json
-│       └── voice_profiles/       # Per-persona + listener audio refs
+│       └── voice_profiles/
 │           └── xiao_s/
-│               ├── default.wav
-│               ├── child.wav
-│               └── reporter.wav
 ├── web_ui/                       # Frontend (future: separate repo)
 │   ├── pages/
 │   │   ├── streaming_chat.py     # WebSocket voice dialogue
@@ -99,8 +104,8 @@ voice-ai-pipeline/
 │   └── training.log
 ├── data/                         # Persistent client data
 │   ├── recordings/               # Raw + parsed recordings
-│   ├── voice_profiles/           # Uploaded reference audio
-│   └── models/                   # Fine-tuned LoRA adapters
+│   ├── voice_profiles/          # Uploaded reference audio
+│   └── models/                  # Fine-tuned LoRA adapters
 ├── telemetry/
 │   ├── metrics.py
 │   ├── collector.py
@@ -131,10 +136,11 @@ voice-ai-pipeline/
 - **R12**: Support interrupt/barge-in (new speech cancels in-progress LLM + TTS)
 
 ### 4.4 Telemetry & Observability
-- **R13**: All component latencies tracked (ASR, LLM TTFT, TTS TTFB, E2E)
-- **R14**: All logs written to `/logs/` in structured JSON format
-- **R15**: Prometheus metrics exposed on port 9090
-- **R16**: Grafana dashboard for remote troubleshooting
+- **R13**: All component latencies tracked (VAD, ASR, LLM TTFT, TTS TTFB, E2E)
+- **R14**: **New P1**: Track `speech_to_response_start` — from user stops speaking to first TTS audio playing
+- **R15**: All logs written to `/logs/` in structured JSON format
+- **R16**: Prometheus metrics exposed on port 9090
+- **R17**: Grafana dashboard for latency analysis
 
 ---
 
@@ -177,7 +183,6 @@ Binary: PCM 16-bit audio chunks
 
 **Server → Client:**
 ```json
-{"type": "asr_partial", "text": "..."}
 {"type": "asr_result", "utterance_id": "...", "is_final": true, "text": "...", "emotion": "寵溺"}
 {"type": "llm_start"}
 {"type": "llm_token", "content": "...", "emotion": "寵溺"}
@@ -234,20 +239,29 @@ EMOTION_MAP = {
 
 ## 9. Milestones
 
-### Milestone 1 — Core Streaming Pipeline (MVP Zero)
+### Milestone 1 — Core Streaming Pipeline (MVP Zero) ✅ COMPLETED
 **Goal**: 實現基本 WebSocket 語音對話，測量各環節延遲
-**Duration**: ~1 week
 
-**Deliverables**:
-- [ ] WebSocket endpoint with ASR (Qwen3-ASR streaming) + LLM (OpenAI streaming) + Emotion tag extraction
-- [ ] TTS integration (Faster-Qwen3-TTS, no fine-tune yet, use default voice + emotion instruct)
-- [ ] Emotion tag parsing + TTS instruct mapping
-- [ ] VAD (energy-based) + barge-in/interrupt
-- [ ] Prometheus metrics for all latencies
-- [ ] Structured logs in `/logs/app.log`
-- [ ] Web UI: streaming chat page (select listener/persona, push-to-talk)
+**Completed**:
+- [x] WebSocket endpoint with ASR (Qwen3-ASR streaming) + LLM (OpenAI streaming) + Emotion tag extraction
+- [x] TTS integration (Faster-Qwen3-TTS, no fine-tune yet, use default voice + emotion instruct)
+- [x] Emotion tag parsing + TTS instruct mapping
+- [x] VAD (energy-based) + barge-in/interrupt
+- [x] Prometheus metrics for all latencies
+- [x] Structured logs in `/logs/app.log`
+- [x] Standalone Web UI: streaming chat page (push-to-talk)
 
-**Acceptance**: Client can have a real-time voice conversation; TTS speaks back with emotion-controlled tone; latency metrics visible in Grafana.
+**Post-M1 Fixes (2026-03-25~29)**:
+- [x] TTS fallback: FasterQwenTTSEngine falls back to Qwen3TTSModel when CUDA graph capture fails
+- [x] Torchaudio CUDA mismatch fixed
+- [x] Wrong TTS method fixed: `generate_voice_clone_streaming` → `generate_voice_design_streaming`
+- [x] Emotion tag in display: EmotionMapper strips tag before display; `ttsText` used for TTS URL
+- [x] tts_ready re-fetch storm: Server sends `tts_ready` only once per utterance
+- [x] TTS model size: Default changed from 0.6B → 1.7B VoiceDesign
+- [x] UI emotion tag display: Fragmented emotion tags handled correctly (skip `[, 情, 感, :, 默, 幽` fragments)
+- [x] UI message box: One box per response (not one per token)
+- [x] TTS flow control: MAX_BUFFER_SEC=8 prevents ring buffer overflow
+- [x] AudioWorklet basic ring buffer with no spike detection (simplified to avoid artifacts)
 
 ---
 
@@ -268,7 +282,40 @@ EMOTION_MAP = {
 
 ---
 
-### Milestone 3 — LoRA Fine-tuning Pipeline (MVP Two)
+### Milestone 3 — Latency Optimization (P1 Focus)
+**Goal**: 降低感知延遲，讓對話更像真人
+
+**P1 Priorities** (按優先順序):
+1. [ ] **Silero VAD** 替換 Energy VAD
+   - 更精準的語音檢測
+   - 較少的 false positive/negative
+   - 預期: VAD latency < 500ms
+
+2. [ ] **TTS streaming chunks 立即播放**
+   - 目前 TTS chunks 生成後等待完整 fetch 才播放
+   - 改: TTS chunks 生成時就發給 client，client 立即播放
+   - 預期: speech_to_response_start 降低 500ms+
+
+3. [ ] **新增 Telemetry Metrics**
+   ```python
+   speech_to_response_start_seconds = Histogram(
+       "speech_to_response_start_seconds",
+       "Time from user stops speaking to first TTS audio playing",
+       buckets=[0.5, 1.0, 1.5, 2.0, 3.0, 5.0],
+   )
+   tts_first_chunk_seconds = Histogram(
+       "tts_first_chunk_seconds",
+       "Time from LLM first token to TTS first chunk",
+   )
+   ```
+
+4. [ ] **Prompt 優化**
+   - 短回覆適合即時對話
+   - 避免過長的回覆
+
+---
+
+### Milestone 4 — LoRA Fine-tuning Pipeline (MVP Two)
 **Goal**: 讓 TTS 聲音越來越像 client本人
 **Duration**: ~2 weeks
 
@@ -276,23 +323,22 @@ EMOTION_MAP = {
 - [ ] LoRA/QLoRA fine-tuning pipeline using uploaded recordings
 - [ ] Training API: start / status / cancel
 - [ ] Progress tracking (epoch, loss) streamed to UI
-- [ ] Email notification on completion (fallback if progress too hard)
+- [ ] Email notification on completion
 - [ ] Trained LoRA adapter stored under `data/models/`
 - [ ] TTS loads LoRA adapter at runtime for voice-matched synthesis
-- [ ] Web UI: Train button triggers fine-tune; progress shown
 
 **Acceptance**: Client uploads 10-20 seconds of voice × multiple recordings → system fine-tunes LoRA adapter → TTS speaks with client's voice characteristics.
 
 ---
 
-### Milestone 4 — LLM Knowledge Base + RAG (Future)
+### Milestone 5 — LLM Knowledge Base + RAG (Future)
 **Goal**: 讓 AI 有個人知識庫，能回答關於 client 生活的問題
-**Depends on**: Milestone 1-3 stable
+**Depends on**: Milestones 1-4 stable
 
 **Deliverables**:
 - [ ] Knowledge Base storage (recordings → transcriptions → embeddings)
 - [ ] File upload support (TXT, PDF, EPUB)
-- [ ] RAG retrieval pipeline (embed query → similarity search → inject context)
+- [ ] RAG retrieval pipeline
 - [ ] Knowledge base queried before LLM generates response
 - [ ] Per-listener RAG results filtered by relevance
 
@@ -304,7 +350,7 @@ EMOTION_MAP = {
 
 | Question | Status | Notes |
 |----------|--------|-------|
-| LoRA rank/alpha values | Deferred | Test during M3 |
+| LoRA rank/alpha values | Deferred | Test during M4 |
 | Number of recordings needed for good LoRA | Deferred | MVP: try 5-10 recordings |
 | Full fine-tune on RTX 5080 | Deferred | Future hardware upgrade |
 | Multi-speaker / multi-persona support | Deferred | MVP: single persona (xiao_s) |
@@ -320,5 +366,5 @@ EMOTION_MAP = {
 - Mobile-optimized UI
 - Voice clone (zero-shot cloning via reference audio is sufficient)
 - Full fine-tuning (LoRA only for MVP)
-- File upload to KB (RAG only after M3)
+- File upload to KB (RAG only after M4)
 - Distributed container deployment

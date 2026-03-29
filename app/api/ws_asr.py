@@ -42,7 +42,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.core.state_manager import StateManager
 from app.services.llm import OpenAIClient, MockLLMClient, PersonaManager, PersonaType
-from app.services.tts import EmotionMapper, get_tts_instruct
+from app.services.tts import EmotionMapper, get_tts_instruct, parse_emotion_tag
 from app.logging_config import get_logger
 from telemetry import metrics, rag_retrieval_seconds
 
@@ -252,28 +252,14 @@ async def run_llm_stream(
                         first_token_sent = True
 
                 elif tts_notified:
-                    # Emotion already detected — accumulate text for TTS
+                    # Emotion detected — accumulate text for TTS
                     if cleaned_content:
                         tts_text_parts.append(cleaned_content)
                         tts_text = "".join(tts_text_parts)
 
-                        # Only send tts_ready ONCE — when text first becomes non-empty
-                        if not tts_url_sent:
-                            tts_url_sent = True
-                            import urllib.parse
-                            params = urllib.parse.urlencode({
-                                "text": tts_text,
-                                "emotion": current_emotion,
-                                "model": "0.6B",
-                            })
-                            stream_url = f"/api/tts/stream?{params}"
-                            await websocket.send_text(json.dumps({
-                                "type": "tts_ready",
-                                "text": tts_text,
-                                "emotion": current_emotion,
-                                "instruct": current_instruct,
-                                "stream_url": stream_url,
-                            }))
+                        # DON'T send tts_ready here — wait for llm_done
+                        # TTS generates audio for COMPLETE text, so early tts_ready
+                        # would cause repetition when full text arrives
 
                     await websocket.send_text(json.dumps({
                         "type": "llm_token",
@@ -296,6 +282,36 @@ async def run_llm_stream(
             elif event.event.value == "content_done":
                 e2e_latency = time.perf_counter() - e2e_start
                 metrics.e2e_latency.labels(component="pipeline").observe(e2e_latency)
+
+                # At llm_done: always send tts_ready with FULL accumulated text if emotion was detected
+                # This ensures the complete response audio is available (even if early tts_ready was sent)
+                if tts_notified and tts_text_parts:
+                    tts_text = "".join(tts_text_parts)
+                    _, tts_text_clean = parse_emotion_tag(tts_text)
+                    tts_text = tts_text_clean.strip()
+                    if tts_text:
+                        # Clean text for TTS: remove problematic punctuation that causes audio bursts
+                        import re
+                        # Remove Chinese quotation marks and other special brackets
+                        tts_text = re.sub(r'[「」『』【】〖〗《》〈〉〘〙〚〛‹›«»]', '', tts_text)
+                        # Remove other problematic chars but keep Chinese, alphanumeric, basic punctuation
+                        tts_text = tts_text.strip()
+                        if tts_text:
+                            import urllib.parse
+                            params = urllib.parse.urlencode({
+                                "text": tts_text,
+                                "emotion": current_emotion,
+                                "model": "0.6B",  # Faster model for better latency
+                            })
+                            stream_url = f"/api/tts/stream?{params}"
+                            await websocket.send_text(json.dumps({
+                                "type": "tts_ready",
+                                "text": tts_text,
+                                "emotion": current_emotion,
+                                "instruct": current_instruct,
+                                "stream_url": stream_url,
+                            }))
+                            log.info(f"TTS text (llm_done final): '{tts_text}', emotion={current_emotion}")
 
                 await websocket.send_text(json.dumps({
                     "type": "llm_done",

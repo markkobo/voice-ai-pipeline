@@ -26,22 +26,24 @@ DEFAULT_EMOTION_MAP: Dict[str, str] = {
 
 # Compiled regex for extracting emotion tags from LLM output
 # Matches patterns like: [情感: 撒嬌] or [情感:撒嬌] or [情感: 撒嬌]  (with or without space)
+# Handles leading punctuation/quotes like 「 before the tag
 import re
-EMOTION_TAG_PATTERN = re.compile(r'^\[情感[:：]\s*(.*?)\]\s*')
+# Match the emotion tag anywhere in the text (not just at start)
+EMOTION_TAG_PATTERN = re.compile(r'\[情感[:：]\s*(.*?)\]\s*')
 
 
 def parse_emotion_tag(text: str) -> tuple[Optional[str], str]:
     """
-    Extract emotion tag from the beginning of text.
+    Extract emotion tag from text (anywhere in the text).
 
     Args:
-        text: LLM output text (may contain [情感: xxx] at start)
+        text: LLM output text (may contain [情感: xxx] anywhere)
 
     Returns:
         Tuple of (emotion_string, cleaned_text_with_tag_removed)
         If no tag found, returns (None, original_text)
     """
-    match = EMOTION_TAG_PATTERN.match(text)
+    match = EMOTION_TAG_PATTERN.search(text)
     if match:
         emotion = match.group(1).strip()
         cleaned = EMOTION_TAG_PATTERN.sub('', text, count=1)
@@ -108,8 +110,8 @@ class EmotionMapper:
         # Accumulate
         self._buffer += text
 
-        # Try to find emotion tag at the beginning
-        match = EMOTION_TAG_PATTERN.match(self._buffer)
+        # Try to find emotion tag anywhere in the buffer
+        match = EMOTION_TAG_PATTERN.search(self._buffer)
         if match:
             emotion = match.group(1).strip()
             # Remove the tag from buffer

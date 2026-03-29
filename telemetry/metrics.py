@@ -67,6 +67,23 @@ streaming_chunk_latency = Histogram(
     labelnames=["component", "stream_type"],  # stream_type: "llm_tokens" | "tts_audio"
 )
 
+# P1 Latency Metrics
+# Speech to Response Start: Time from user stops speaking to first TTS audio playing
+speech_to_response_start = Histogram(
+    "speech_to_response_start_seconds",
+    "Time from user stops speaking to first TTS audio playing",
+    buckets=[0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0],
+    labelnames=["component"],
+)
+
+# TTS First Chunk: Time from LLM first token to TTS first audio chunk
+tts_first_chunk = Histogram(
+    "tts_first_chunk_seconds",
+    "Time from LLM first token to TTS first audio chunk",
+    buckets=[0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0],
+    labelnames=["component", "model"],
+)
+
 # ============================================================================
 # Throughput Metrics (Counters)
 # ============================================================================

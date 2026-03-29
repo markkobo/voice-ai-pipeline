@@ -50,7 +50,7 @@ UI_HTML = """
 </head>
 <body>
     <div class="container">
-        <h1>Voice AI — 小S</h1>
+        <h1>Voice AI — 小S <span id="uiVersion" style="font-size:12px;color:#888">[v3]</span></h1>
         <p class="subtitle">選擇對象，開始對話</p>
         <div id="status" class="status disconnected">Disconnected</div>
 
@@ -107,8 +107,19 @@ UI_HTML = """
     </div>
 
     <script>
+    // Global error handler to catch uncaught errors
+    window.onerror = function(msg, url, line, col, error) {
+        log('GLOBAL ERROR: ' + msg + ' at line ' + line + ' col ' + col);
+        return false;
+    };
+    // Version for debugging
+    window.UI_VERSION = '2026-03-28-v24-flowctrl';
+    console.log('UI Version: ' + window.UI_VERSION);
+    document.getElementById('uiVersion').textContent = '[v24-flowctrl]';
+
     const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/asr';
     const TTS_BASE = location.origin + '/api/tts/stream';
+    const TTS_RAW = location.origin + '/api/tts/raw';
 
     let ws = null;
     let audioContext = null;
@@ -118,9 +129,322 @@ UI_HTML = """
     let utteranceId = null;
     let ttsText = '';
     let ttsEmotion = null;
-    let ttsAbortController = null;
+    let ttsStreamUrl = '';
+    let lastPlayedUrl = '';  // 避免重複播放同一個 URL
+    let currentAudio = null;  // 目前播放中的 Audio
+    let ttsSignalController = null;
     let recordingStream = null;
     let accumulatedChunks = [];  // Accumulated PCM ArrayBuffers
+
+    // AudioWorklet for streaming PCM playback
+    let audioWorkletNode = null;
+    let workletInitialized = false;  // Track if worklet module is registered
+    let workletNodeCreated = false;  // Track if AudioWorkletNode is created
+
+    // Audio queue for sequential playback (prevents overwriting)
+    let audioQueue = [];  // Queue of {url, resolve}
+    let isAudioPlaying = false;  // Flag to track if audio is currently playing
+    let currentPlayPromise = null;  // Track current play promise for cleanup
+
+    // Simple AudioWorklet implementation
+    async function initAudioWorklet() {
+        if (workletInitialized) {
+            log('Worklet already initialized');
+            return true;
+        }
+
+        log('initAudioWorklet: starting');
+
+        // Create AudioContext if needed
+        if (!audioContext) {
+            audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+            log('Created AudioContext');
+        }
+
+        // Resume if suspended
+        if (audioContext.state === 'suspended') {
+            await audioContext.resume();
+            log('Resumed AudioContext');
+        }
+
+        // Check if AudioWorklet is supported
+        if (!audioContext.audioWorklet) {
+            log('AudioWorklet not supported');
+            return false;
+        }
+
+        try {
+            const workletCode = `
+                class PCMPlayer extends AudioWorkletProcessor {
+                    constructor() {
+                        super();
+                        // Ring buffer for incoming PCM data
+                        this.ringBuffer = new Float32Array(24000 * 10); // 10 seconds max
+                        this.writePos = 0;
+                        this.readPos = 0;
+                        this.samplesInBuffer = 0;
+                        this.isPlaying = true;
+
+                        this.port.onmessage = (e) => {
+                            if (e.data.type === 'pcm') {
+                                // Convert incoming Int16 to Float32 and add to ring buffer
+                                const int16Data = new Int16Array(e.data.buffer);
+                                const chunkSize = int16Data.length;
+                                let dropped = 0;
+                                for (let i = 0; i < int16Data.length; i++) {
+                                    this.ringBuffer[this.writePos] = int16Data[i] / 32768.0;
+                                    this.writePos = (this.writePos + 1) % this.ringBuffer.length;
+                                    this.samplesInBuffer++;
+                                    // Prevent overflow - drop oldest samples if needed
+                                    if (this.samplesInBuffer > this.ringBuffer.length) {
+                                        this.readPos = (this.readPos + 1) % this.ringBuffer.length;
+                                        this.samplesInBuffer--;
+                                        dropped++;
+                                    }
+                                }
+                                // Log if we dropped samples
+                                if (dropped > 0) {
+                                    this.port.postMessage({ type: 'log', msg: 'BUF DROPPED ' + dropped + ' samples, buf=' + this.samplesInBuffer });
+                                }
+                            } else if (e.data.type === 'flush') {
+                                this.writePos = 0;
+                                this.readPos = 0;
+                                this.samplesInBuffer = 0;
+                            } else if (e.data.type === 'stop') {
+                                this.isPlaying = false;
+                            } else if (e.data.type === 'log') {
+                                console.log('Worklet: ' + e.data.msg);
+                            }
+                        };
+                    }
+
+                    process(inputs, outputs, parameters) {
+                        const output = outputs[0];
+                        if (!output || output.length === 0) return true;
+                        const out = output[0];
+                        if (!out) return true;
+
+                        if (!this.isPlaying || this.samplesInBuffer === 0) {
+                            // Output silence if not playing or buffer empty
+                            for (let i = 0; i < out.length; i++) {
+                                out[i] = 0;
+                            }
+                            return true;
+                        }
+
+                        // Fill output buffer from ring buffer
+                        for (let i = 0; i < out.length; i++) {
+                            if (this.samplesInBuffer > 0) {
+                                out[i] = this.ringBuffer[this.readPos];
+                                this.readPos = (this.readPos + 1) % this.ringBuffer.length;
+                                this.samplesInBuffer--;
+                            } else {
+                                out[i] = 0;
+                            }
+                        }
+                        return true;
+                    }
+                }
+                registerProcessor('pcm-player', PCMPlayer);
+            `;
+
+            const blob = new Blob([workletCode], { type: 'application/javascript' });
+            const workletUrl = URL.createObjectURL(blob);
+
+            log('Adding worklet module...');
+            await audioContext.audioWorklet.addModule(workletUrl);
+            workletInitialized = true;
+            log('Worklet module registered, AudioContext state: ' + audioContext.state);
+            return true;
+        } catch (e) {
+            log('Worklet init error: ' + e.name);
+            return false;
+        }
+    }
+
+    async function ensureWorklet() {
+        if (workletNodeCreated && audioWorkletNode) {
+            // Ensure audio context is running
+            if (audioContext.state === 'suspended') {
+                await audioContext.resume();
+                log('Resumed suspended AudioContext');
+            }
+            return true;
+        }
+
+        const ok = await initAudioWorklet();
+        if (ok && !workletNodeCreated) {
+            audioWorkletNode = new AudioWorkletNode(audioContext, 'pcm-player');
+            audioWorkletNode.connect(audioContext.destination);
+            // Handle messages from AudioWorklet
+            audioWorkletNode.port.onmessage = (e) => {
+                if (e.data.type === 'log') {
+                    log('Worklet: ' + e.data.msg);
+                }
+            };
+            workletNodeCreated = true;
+            log('AudioWorkletNode created, state=' + audioContext.state);
+
+            // CRITICAL: Ensure AudioContext is running before sending audio
+            if (audioContext.state === 'suspended') {
+                await audioContext.resume();
+                log('Resumed after node creation, state=' + audioContext.state);
+            }
+        }
+        return ok;
+    }
+
+    // Play next audio in queue
+    async function playNextInQueue() {
+        if (audioQueue.length === 0) {
+            isAudioPlaying = false;
+            log('Queue empty, no more audio to play');
+            return;
+        }
+
+        const next = audioQueue.shift();
+        isAudioPlaying = true;
+        log('Playing next in queue: ' + next.text.substring(0, 30));
+
+        // Update lastPlayedUrl to track what's currently playing
+        lastPlayedUrl = '';
+
+        // Play this audio and when done, play next in queue
+        await playRawPCM(next.url);
+
+        // After this audio finishes, play next (if any)
+        if (audioQueue.length > 0) {
+            log('Current audio done, playing next from queue...');
+            playNextInQueue();
+        } else {
+            isAudioPlaying = false;
+            log('All queued audio finished');
+        }
+    }
+
+    // Internal PCM player that doesn't manage queue
+    async function playRawPCM(url) {
+        log('playRawPCM called');
+
+        // Ensure worklet is ready
+        const ok = await ensureWorklet();
+        log('ensureWorklet returned: ' + ok + ', state=' + (audioContext ? audioContext.state : 'null'));
+
+        if (!ok || !audioWorkletNode) {
+            log('Worklet not available, using fallback');
+            if (currentAudio) { currentAudio.pause(); currentAudio = null; }
+            currentAudio = new Audio();
+            currentAudio.src = url;
+            currentAudio.play().catch(e => log('fallback error: ' + e.name));
+            return;
+        }
+
+        // Double-check AudioContext is running
+        if (audioContext.state === 'suspended') {
+            log('Context suspended, resuming...');
+            await audioContext.resume();
+        }
+
+        // Flush any existing data
+        audioWorkletNode.port.postMessage({ type: 'flush' });
+
+        log('Fetching PCM with streaming...');
+
+        // Keep AudioContext alive during playback (declared in outer scope for catch block access)
+        let keepAlive = null;
+
+        try {
+            const resp = await fetch(url);
+            if (!resp.ok) {
+                log('fetch error: ' + resp.status);
+                return;
+            }
+
+            // Check if body exists (some responses may not have a body)
+            if (!resp.body) {
+                log('Response has no body, falling back to buffer approach');
+                const buf = await resp.arrayBuffer();
+                const pcm = new Int16Array(buf);
+                audioWorkletNode.port.postMessage({ type: 'pcm', buffer: pcm.buffer }, [pcm.buffer]);
+                log('Full PCM sent: ' + pcm.length + ' samples');
+                // Wait for playback to complete before returning
+                const durationMs = Math.ceil(pcm.length / 24000 * 1000) + 500;
+                log('Waiting ' + durationMs + 'ms for playback to complete');
+                await new Promise(resolve => setTimeout(resolve, durationMs));
+                log('Playback complete (fallback)');
+                return;
+            }
+
+            // Use ReadableStream for incremental reading with flow control
+            const reader = resp.body.getReader();
+            let totalSamples = 0;
+            let lastLogTime = Date.now();
+            const SAMPLE_RATE = 24000;
+            const MAX_BUFFER_SEC = 8; // Max 8 seconds ahead
+            const startTime = Date.now();
+
+            // Keep AudioContext alive during playback
+            keepAlive = setInterval(() => {
+                if (audioContext && audioContext.state === 'suspended') {
+                    audioContext.resume();
+                    log('Keepalive: resumed AudioContext');
+                }
+            }, 200);
+
+            // Stream chunks to AudioWorklet with simple flow control
+            while (true) {
+                // Calculate how much we've sent vs time elapsed (real-time rate)
+                const elapsedSec = (Date.now() - startTime) / 1000;
+                const sentSec = totalSamples / SAMPLE_RATE;
+                const aheadSec = sentSec - elapsedSec;
+
+                // If we're more than MAX_BUFFER_SEC ahead, wait to let buffer drain
+                if (aheadSec > MAX_BUFFER_SEC) {
+                    await new Promise(resolve => setTimeout(resolve, 50));
+                    continue;
+                }
+
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                if (value && value.length > 0) {
+                    // Ensure even byte length for Int16
+                    const byteLen = value.length - (value.length % 2);
+                    if (byteLen > 0) {
+                        const int16Array = new Int16Array(byteLen / 2);
+                        new Uint8Array(int16Array.buffer).set(new Uint8Array(value.buffer, value.byteOffset, byteLen));
+                        totalSamples += int16Array.length;
+                        audioWorkletNode.port.postMessage({ type: 'pcm', buffer: int16Array.buffer }, [int16Array.buffer]);
+                    }
+                }
+
+                // Log progress every 500ms
+                const now = Date.now();
+                if (now - lastLogTime > 500) {
+                    const durationSec = totalSamples / 24000;
+                    log('Streaming PCM: ' + totalSamples + ' samples, ' + durationSec.toFixed(2) + 's');
+                    lastLogTime = now;
+                }
+            }
+
+            const totalDurationSec = totalSamples / 24000;
+            log('PCM stream complete: ' + totalSamples + ' samples, ' + totalDurationSec.toFixed(2) + 's total');
+
+            // CRITICAL: Wait for the AudioWorklet to finish playing ALL samples before returning
+            // The AudioWorklet drains at 24000 samples/sec, so we need to wait for the full duration
+            // Add 500ms buffer for safety margin
+            const playoutTimeMs = Math.ceil(totalDurationSec * 1000) + 500;
+            log('Waiting for AudioWorklet to finish playing: ' + playoutTimeMs + 'ms');
+            await new Promise(resolve => setTimeout(resolve, playoutTimeMs));
+
+            if (keepAlive) clearInterval(keepAlive);
+            log('playRawPCM finished - AudioWorklet should be done playing');
+
+        } catch (e) {
+            if (keepAlive) clearInterval(keepAlive);
+            log('PCM error: ' + e.name + ' ' + e.message);
+        }
+    }
 
     const statusEl = document.getElementById('status');
     const recordBtn = document.getElementById('recordBtn');
@@ -206,6 +530,16 @@ UI_HTML = """
                 isRecording = false;
                 accumulatedChunks = [];
             }
+            // Clean up audio playback
+            if (currentAudio) {
+                try { currentAudio.pause(); } catch(e) {}
+                try { currentAudio.cancel(); } catch(e) {}
+                currentAudio.src = '';
+                currentAudio = null;
+            }
+            if (audioWorkletNode) {
+                try { audioWorkletNode.port.postMessage({ type: 'flush' }); } catch(e) {}
+            }
             log('WS disconnected');
         };
 
@@ -226,26 +560,54 @@ UI_HTML = """
         }
 
         if (msg.type === 'llm_start') {
-            log('LLM started: utterance_id=' + msg.utterance_id);
+            log('LLM started: utterance_id=' + msg.utterance_id + ' (was playing=' + isAudioPlaying + ', queue=' + audioQueue.length + ')');
+            // Stop any playing TTS audio and clear queue (user is speaking again - barge-in)
+            const wasPlaying = isAudioPlaying;
+            audioQueue = [];
+            isAudioPlaying = false;
+            if (currentAudio) {
+                try { currentAudio.pause(); } catch(e) {}
+                try { currentAudio.cancel(); } catch(e) {}
+                currentAudio.src = '';
+                currentAudio = null;
+            }
+            // Flush AudioWorklet
+            if (audioWorkletNode) {
+                try {
+                    audioWorkletNode.port.postMessage({ type: 'flush' });
+                } catch(e) {}
+            }
+            if (wasPlaying) {
+                log('LLM_START: Stopped TTS audio for barge-in');
+            }
+            lastPlayedUrl = '';
             ttsText = '';
         }
 
         if (msg.type === 'llm_token') {
-            // Strip emotion tag from content if present (defensive)
             let content = msg.content || '';
-            if (msg.emotion) {
-                content = content.replace(/\[情感[:：]\s*.*?\]/g, '');
+            // Before accumulating, strip if this content looks like emotion tag fragment
+            // These fragments arrive with emotion=null: "默", " 幽", ":", "感", "情", "["
+            if (content === '[' || content === '情' || content === '感' || content === ':' || 
+                content === '默' || content === ' 幽' || content.match(/^\[情感/)) {
+                // Skip this fragment, don't accumulate
+            } else {
+                ttsText += content;
             }
-            ttsText += content;
-            log('LLM token: content=' + JSON.stringify(msg.content) + ' emotion=' + (msg.emotion || 'none') + ' ttsText so far=' + ttsText.substring(0, 50));
-            // Update AI message
+            // Strip complete emotion tags
+            let displayText = ttsText.replace(/\[情感[:：][^\]]*\]/g, '');
+            // Remove any partial bracket at start
+            if (displayText.startsWith('[')) {
+                displayText = displayText.replace(/^\[情感[:：][^\]]*/, '');
+            }
+            // Only create a new box if there is NO existing AI message box
             let aiMsg = convEl.querySelector('.message.ai:last-child');
-            if (!aiMsg || aiMsg.querySelector('.emotion')) {
+            if (!aiMsg) {
                 aiMsg = document.createElement('div');
                 aiMsg.className = 'message ai';
                 convEl.appendChild(aiMsg);
             }
-            aiMsg.textContent = ttsText;
+            aiMsg.textContent = displayText;
             if (msg.emotion) {
                 let e = aiMsg.querySelector('.emotion');
                 if (!e) { e = document.createElement('div'); e.className = 'emotion'; aiMsg.appendChild(e); }
@@ -255,32 +617,64 @@ UI_HTML = """
         }
 
         if (msg.type === 'tts_ready') {
-            // tts_ready fires TWICE: once with text="" when emotion is first detected,
-            // then again with accumulated text after each llm_token.
-            // Only fetch when we have actual text to avoid empty-URL / re-fetch chaos.
-            if (!ttsText) {
-                // First tts_ready (empty) — just record the emotion and stream_url for later
-                ttsEmotion = msg.emotion;
-                log('TTS ready (waiting for text): emotion=' + msg.emotion);
+            var emotion = msg.emotion || ttsEmotion || '默認';
+            if (!msg.text) {
+                ttsEmotion = emotion;
+                log('TTS ready (empty): emotion=' + emotion);
                 return;
             }
-            // Second+ tts_ready with actual text — fetch once
-            if (ttsAbortController) ttsAbortController.abort();
-            ttsAbortController = new AbortController();
-            const url = msg.stream_url + (msg.stream_url.includes('?') ? '&text=' : '?text=') + encodeURIComponent(ttsText);
-            log('TTS fetch: emotion=' + msg.emotion + ' text_len=' + ttsText.length + ' url=' + url.substring(0, 80));
-            playTTS(url, ttsAbortController.signal);
+            var thisUrl = msg.stream_url;
+            log('TTS ready: emotion=' + emotion + ' text=' + msg.text);
+
+            // 如果 URL 一樣，跳過（避免重複播放）
+            if (thisUrl === lastPlayedUrl) {
+                log('TTS skip same url');
+                return;
+            }
+
+            // Queue audio for sequential playback (no interruption)
+            // Early audio plays first, then full audio - slight repetition but clean playback
+            const rawUrl = thisUrl.replace('/api/tts/stream?', '/api/tts/raw?');
+            log('TTS queued: ' + msg.text.substring(0, 20) + ' (playing=' + isAudioPlaying + ', queue=' + audioQueue.length + ')');
+
+            audioQueue.push({ url: rawUrl, text: msg.text });
+
+            // If not playing, start immediately
+            if (!isAudioPlaying) {
+                playNextInQueue();
+            }
         }
 
         if (msg.type === 'llm_done') {
             log('LLM done: text=' + (msg.text || '').substring(0, 80) + ' total_tokens=' + (msg.total_tokens || '?'));
-            // Don't addMessage — streaming tokens already built the display
+            // Don't clear queue! The full audio is in there waiting to play
+            // Let current audio finish, then queue will continue with full audio
+            // Reset TTS text state but don't interrupt queue
             ttsText = '';
+            ttsEmotion = '';
+            log('LLM done - queue has ' + audioQueue.length + ' items waiting');
         }
 
         if (msg.type === 'llm_cancelled') {
-            if (ttsAbortController) ttsAbortController.abort();
+            if (ttsSignalController) ttsSignalController.abort();
+            // Clear audio queue and stop playing
+            audioQueue = [];
+            isAudioPlaying = false;
+            if (currentAudio) {
+                try { currentAudio.pause(); } catch(e) {}
+                try { currentAudio.cancel(); } catch(e) {}
+                currentAudio.src = '';
+                currentAudio = null;
+            }
+            // Flush AudioWorklet
+            if (audioWorkletNode) {
+                try {
+                    audioWorkletNode.port.postMessage({ type: 'flush' });
+                } catch(e) {}
+            }
             ttsText = '';
+            ttsEmotion = '';
+            lastPlayedUrl = '';
             log('LLM cancelled: partial=' + (msg.partial_text || '').substring(0, 50));
         }
 
@@ -289,35 +683,22 @@ UI_HTML = """
         }
     }
 
-    async function playTTS(url, signal) {
+    async function playTTS(url) {
         try {
-            log('Fetching TTS: ' + url.substring(0, 80) + '...');
-            const response = await fetch(url, { signal });
-            if (!response.ok) throw new Error('TTS fetch failed: ' + response.status);
-            const reader = response.body.getReader();
-            audioChunks = [];
-            if (!audioContext) audioContext = new AudioContext({ sampleRate: 24000 });
-
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                audioChunks.push(value);
-                log('TTS chunk: ' + value.byteLength + ' bytes');
-            }
-            log('TTS done, playing...');
-
-            // Play all chunks
-            for (const chunk of audioChunks) {
-                const buf = await audioContext.decodeAudioData(chunk);
-                const source = audioContext.createBufferSource();
-                source.buffer = buf;
-                source.connect(audioContext.destination);
-                source.start();
-                await new Promise(r => source.onended = r);
-            }
-            log('Playback done');
+            log('playTTS: step1');
+            var resp = await fetch(url);
+            log('playTTS: step2 status=' + resp.status);
+            var blob = await resp.blob();
+            log('playTTS: step3 blob=' + blob.size);
+            var objUrl = URL.createObjectURL(blob);
+            log('playTTS: step4');
+            var audio = new Audio(objUrl);
+            log('playTTS: step5');
+            audio.play();
+            log('playTTS: step6 playing');
+            audio.onended = function() { log('playTTS done'); };
         } catch (e) {
-            if (e.name !== 'AbortError') log('TTS error: ' + e.message);
+            log('playTTS error: ' + e.name + ' ' + e.message);
         }
     }
 
@@ -336,8 +717,9 @@ UI_HTML = """
                 audio: {
                     sampleRate: 24000,
                     channelCount: 1,
-                    echoCancellation: true,
-                    noiseSuppression: true
+                    echoCancellation: false,
+                    noiseSuppression: false,
+                    autoGainControl: false
                 }
             });
             recordingStream = stream;
@@ -356,11 +738,27 @@ UI_HTML = """
             scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
             log('Using onaudioprocess for raw PCM at ' + audioContext.sampleRate + ' Hz');
 
+            // Debug: check first few audio samples
+            let debugSampleCount = 0;
+            let debugSum = 0;
+
             const localIsRecording = { value: true };
 
             scriptProcessor.onaudioprocess = (e) => {
                 if (!localIsRecording.value) return;
                 const inputData = e.inputBuffer.getChannelData(0); // Float32 mono
+
+                // Debug: check if audio data is non-zero
+                let sum = 0;
+                for (let i = 0; i < inputData.length; i++) {
+                    sum += Math.abs(inputData[i]);
+                }
+                debugSum += sum;
+                debugSampleCount++;
+                if (debugSampleCount <= 3) {
+                    log('audio chunk ' + debugSampleCount + ': avg_abs=' + (sum/inputData.length).toFixed(4));
+                }
+
                 // Convert Float32 [-1,1] -> Int16 [−32768, 32767]
                 const int16 = new Int16Array(inputData.length);
                 for (let i = 0; i < inputData.length; i++) {

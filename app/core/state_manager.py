@@ -4,7 +4,7 @@ import uuid
 import time
 from typing import Optional, Dict, Any
 
-from app.services.asr import BaseVAD, EnergyVAD, BaseASR, MockASR, Qwen3ASR
+from app.services.asr import BaseVAD, SileroVAD, EnergyVAD, BaseASR, MockASR, Qwen3ASR
 from telemetry import metrics
 
 
@@ -84,12 +84,12 @@ class StateManager:
         Initialize StateManager.
 
         Args:
-            vad: VAD engine instance (defaults to EnergyVAD)
+            vad: VAD engine instance (defaults to SileroVAD)
             asr: ASR engine instance (defaults to Qwen3ASR or MockASR)
             use_qwen: If True and no asr provided, use Qwen3ASR
         """
         self._sessions: Dict[str, SessionState] = {}
-        self._default_vad = vad or EnergyVAD()
+        self._default_vad = vad or SileroVAD()
 
         if asr is not None:
             self._default_asr = asr
@@ -145,7 +145,7 @@ class StateManager:
         # Recreate VAD with new sample rate
         # Preserve sensitivity if already set
         current_sensitivity = getattr(state.vad, "sensitivity_label", "medium")
-        state.vad = EnergyVAD(
+        state.vad = SileroVAD(
             sample_rate=state.audio_config.sample_rate,
             sensitivity=current_sensitivity,
         )
@@ -178,7 +178,7 @@ class StateManager:
         if not state:
             return False
 
-        state.vad = EnergyVAD(
+        state.vad = SileroVAD(
             sample_rate=state.audio_config.sample_rate,
             sensitivity=sensitivity,
         )
@@ -266,6 +266,7 @@ class StateManager:
             raise ValueError(f"Session {session_id} not found")
 
         if not state.audio_buffer:
+            print(f"[commit_utterance] WARNING: audio_buffer is empty for session {session_id}")
             result = {
                 "type": "asr_result",
                 "utterance_id": state.utterance_id,
@@ -278,6 +279,8 @@ class StateManager:
             }
             self._reset_utterance(session_id)
             return result
+
+        print(f"[commit_utterance] session={session_id}, audio_buffer len={len(state.audio_buffer)} bytes, samples={len(state.audio_buffer)//2}")
 
         # Run ASR on accumulated audio with telemetry
         audio_data = bytes(state.audio_buffer)

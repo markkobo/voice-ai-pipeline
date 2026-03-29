@@ -85,7 +85,7 @@ def create_app() -> FastAPI:
 
 @app.on_event("startup")
 async def startup_event():
-    """Startup event — preload ASR model."""
+    """Startup event — preload ASR model synchronously before accepting connections."""
     import asyncio
 
     async def preload_asr():
@@ -102,8 +102,20 @@ async def startup_event():
         else:
             logger.info(f"ASR engine already loaded or using {asr_engine.__class__.__name__}")
 
-    # Load in background so server starts immediately
-    asyncio.create_task(preload_asr())
+    async def preload_tts():
+        from app.services.tts import get_tts_engine
+        engine = get_tts_engine()
+        logger.info("Warming up TTS model (CUDA graphs)...")
+        loop = asyncio.get_event_loop()
+        # warmup is sync, run in executor to not block
+        await loop.run_in_executor(None, engine.warmup)
+        logger.info("TTS model warmed up")
+
+    # Wait for ASR preload to complete before accepting connections
+    # This prevents race condition where request comes in before model is loaded
+    await preload_asr()
+    # Also preload and warmup TTS
+    await preload_tts()
 
 
 if __name__ == "__main__":
@@ -113,5 +125,5 @@ if __name__ == "__main__":
         "app.main:app",
         host="0.0.0.0",
         port=8080,
-        reload=True,
+        reload=False,
     )

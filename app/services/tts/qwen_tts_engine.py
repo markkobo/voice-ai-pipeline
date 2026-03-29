@@ -48,11 +48,13 @@ class FasterQwenTTSEngine:
     ):
         self.model_size = model_size
         self.model_name = self.MODELS.get(model_size, self.MODELS["1.7B"])
-        self.device = device or ("cuda:0" if os.getenv("CUDA_VISIBLE_DEVICES") else "cpu")
+        import torch
+        self.device = device or ("cuda:0" if torch.cuda.is_available() else "cpu")
         self._model = None  # FasterQwen3TTS (streaming)
         self._raw_model = None  # Qwen3TTSModel (fallback)
         self._is_loaded = False
         self._use_fallback = False
+        self._warmed_up = False
 
     def _ensure_loaded(self):
         """Lazy load the model(s)."""
@@ -75,6 +77,36 @@ class FasterQwenTTSEngine:
             log.info(f"TTS model loaded (raw Qwen3TTSModel): {self.model_name}")
 
         self._is_loaded = True
+
+    def warmup(self):
+        """Warm up the model to capture CUDA graphs. Call once after loading."""
+        if self._warmed_up:
+            return
+
+        # Ensure model is loaded first
+        self._ensure_loaded()
+
+        if self._use_fallback or self._raw_model is not None:
+            log.info("Warmup skipped (using fallback model)")
+            self._warmed_up = True
+            return
+
+        log.info("Warming up TTS model (capturing CUDA graphs)...")
+        import time
+        start = time.time()
+        try:
+            # Run one inference to capture CUDA graphs
+            for _ in self._model.generate_voice_design_streaming(
+                text="測試",
+                instruct="(natural)",
+                language="Chinese",
+                chunk_size=8,
+            ):
+                pass
+            log.info(f"TTS warmup done in {time.time()-start:.1f}s")
+        except Exception as e:
+            log.warning(f"TTS warmup failed: {e}")
+        self._warmed_up = True
 
     async def generate_streaming(
         self,
@@ -161,19 +193,53 @@ class FasterQwenTTSEngine:
                 raise
 
         try:
-            result = await loop.run_in_executor(None, generate)
-            if result is None:
-                yield TTSStreamEvent(event="error", error="No audio generated")
-                return
+            if self._use_fallback or self._raw_model is not None:
+                # Non-streaming fallback - run whole generation in executor
+                result = await loop.run_in_executor(None, generate)
+                if result is None:
+                    yield TTSStreamEvent(event="error", error="No audio generated")
+                    return
+                audio_bytes, sr, _ = result
+                if audio_bytes:
+                    yield TTSStreamEvent(event="audio_chunk", audio_data=audio_bytes, sample_rate=sr)
+                yield TTSStreamEvent(event="done")
+            else:
+                # True streaming - yield chunks as they arrive using queue
+                import queue
+                chunk_queue = queue.Queue()
 
-            audio_bytes, sr, _ = result
-            if audio_bytes:
-                yield TTSStreamEvent(
-                    event="audio_chunk",
-                    audio_data=audio_bytes,
-                    sample_rate=sr,
-                )
-            yield TTSStreamEvent(event="done")
+                def chunk_producer():
+                    try:
+                        for audio_chunk, sr, timing in self._model.generate_voice_design_streaming(
+                            text=text,
+                            instruct=final_instruct,
+                            language=language,
+                            chunk_size=12,
+                        ):
+                            audio_bytes = (audio_chunk * 32767).astype(np.int16).tobytes()
+                            chunk_queue.put((audio_bytes, sr or 24000))
+                        chunk_queue.put(None)  # Sentinel to signal done
+                    except Exception as e:
+                        chunk_queue.put(e)
+
+                # Run producer in thread pool
+                import concurrent.futures
+                pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                future = pool.submit(chunk_producer)
+
+                # Yield chunks as they arrive
+                while True:
+                    result = await loop.run_in_executor(None, chunk_queue.get)
+                    if result is None:
+                        break
+                    if isinstance(result, Exception):
+                        yield TTSStreamEvent(event="error", error=str(result))
+                        break
+                    audio_bytes, sr = result
+                    yield TTSStreamEvent(event="audio_chunk", audio_data=audio_bytes, sample_rate=sr)
+
+                pool.shutdown(wait=False)
+                yield TTSStreamEvent(event="done")
 
         except Exception as e:
             log.exception(f"TTS generation error: {e}")
@@ -217,5 +283,15 @@ def get_tts_engine(model_size: str = "1.7B") -> FasterQwenTTSEngine | MockTTSEng
         else:
             _tts_engine = FasterQwenTTSEngine(model_size=model_size)
             log.info(f"Using FasterQwenTTSEngine ({model_size})")
+
+    return _tts_engine
+
+
+def preload_tts():
+    """Preload and warmup TTS engine at startup. Returns immediately if already loaded."""
+    engine = get_tts_engine()
+    if hasattr(engine, 'warmup') and not getattr(engine, '_warmed_up', False):
+        engine.warmup()
+    return engine
 
     return _tts_engine
