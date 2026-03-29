@@ -8,22 +8,24 @@ openai>=1.0.0
 pydub>=0.25.0
 python-dotenv>=1.0.0
 
-# PyTorch (CUDA 12.4) — 2.6.0+ required for torch.multinomial + CUDA graphs compatibility
-# Install with: pip install torch>=2.5.0 torchaudio torchvision --index-url https://download.pytorch.org/whl/cu124
-torch>=2.5.0
-torchaudio>=2.5.0
+# PyTorch CUDA 12.4 — MUST use exact version for CUDA graphs compatibility
+# Install FIRST: pip install torch==2.6.0+cu124 torchaudio==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0+cu124
+torchaudio==2.6.0+cu124
 torchvision>=0.20.0
 
-# ASR
+# ASR - Real-time streaming for WebSocket voice chat
 qwen-asr>=0.0.6
 
-# TTS
+# TTS - Voice synthesis (FasterQwen3TTS with CUDA graphs)
 faster-qwen3-tts
 qwen-tts>=0.1.1
 
 # Audio Processing Pipeline
-# pip install faster-whisper speechbrain pyannote.audio
-# rnnoise (sudo apt install rnnoise on Ubuntu/Debian)
+# NOTE: pyannote.audio upgrades torch to latest, breaking CUDA graphs
+# Install order: pip install faster-whisper speechbrain pyannote.audio
+# Then restore torch: pip install torch==2.6.0+cu124 torchaudio==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124
+# rnnoise: sudo apt install rnnoise (Ubuntu/Debian)
 faster-whisper>=1.0.0
 speechbrain>=1.0.0
 pyannote.audio>=3.0.0
@@ -33,5 +35,6 @@ pytest>=7.4.0
 pytest-asyncio>=0.21.0
 httpx>=0.24.0
 
-# System dependency required:
-# ffmpeg (sudo apt install ffmpeg on Ubuntu/Debian)
+# System dependencies (install via apt/apt-get):
+# ffmpeg - audio format conversion (sudo apt install ffmpeg)
+# rnnoise - noise reduction (sudo apt install rnnoise)
