@@ -23,12 +23,12 @@ qwen-tts>=0.1.1
 
 # Audio Processing Pipeline
 # NOTE: pyannote.audio upgrades torch to latest, breaking CUDA graphs
-# Install order: pip install faster-whisper speechbrain pyannote.audio
+# Install order: pip install faster-whisper speechbrain pyannote.audio noisereduce
 # Then restore torch: pip install torch==2.6.0+cu124 torchaudio==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124
-# rnnoise: sudo apt install rnnoise (Ubuntu/Debian)
 faster-whisper>=1.0.0
 speechbrain>=1.0.0
 pyannote.audio>=3.0.0
+noisereduce>=3.0.0
 
 # Testing
 pytest>=7.4.0

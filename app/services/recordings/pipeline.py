@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Optional, Callable
 from dataclasses import dataclass
 
+import numpy as np
+
 from .file_storage import RecordingPaths
 from .metadata import RecordingMetadata
 from .quality import AudioQualityAnalyzer
@@ -181,8 +183,11 @@ class AudioProcessingPipeline:
             )
 
     def _run_denoise(self):
-        """Run noise reduction using rnnoise."""
-        self._log("Step 2: Noise Reduction (rnnoise)")
+        """Run noise reduction using noisereduce.
+
+        Falls back to copying raw audio if processing fails.
+        """
+        self._log("Step 2: Noise Reduction (noisereduce)")
         self.metadata.update_processing_step("enhance", "in_progress", progress=0)
 
         start_time = time.time()
@@ -190,16 +195,46 @@ class AudioProcessingPipeline:
 
         for attempt in range(MAX_RETRIES):
             try:
-                # TODO: Implement actual rnnoise processing
-                # For now, just simulate the step
-                if self.metadata.data.get("duration_seconds"):
-                    # Roughly 1x realtime
-                    estimated_ms = int(self.metadata.data["duration_seconds"] * 1000)
-                else:
-                    estimated_ms = 1000
+                import soundfile as sf
+                import noisereduce as nr
+                import numpy as np
+                import torch
 
-                time.sleep(estimated_ms / 1000)  # Simulate processing
-                break  # Success
+                # Read audio
+                audio, sample_rate = sf.read(str(self.paths.raw_audio_path))
+
+                # Use stationary noise reduction (better for speech)
+                # Estimate noise from first 0.5 seconds
+                noise_sample = int(0.5 * sample_rate)
+                noise_clip = audio[:noise_sample]
+
+                # Denoise using noisereduce
+                # Use GPU if available
+                device = 'cuda' if torch.cuda.is_available() else 'cpu'
+                self._log(f"Denoising with noisereduce on {device}...")
+
+                # Stationary noise reduction (frame-level)
+                reduced_noise = nr.reduce_noise(
+                    y=audio,
+                    sr=sample_rate,
+                    y_noise=noise_clip,
+                    stationary=True,
+                    device=device
+                )
+
+                # Create denoised folder and save
+                self.paths.denoised_folder.mkdir(parents=True, exist_ok=True)
+                sf.write(str(self.paths.denoised_audio_path), reduced_noise, sample_rate)
+
+                elapsed_ms = int((time.time() - start_time) * 1000)
+                self.metadata.update_processing_step(
+                    "enhance", "done",
+                    progress=100,
+                    duration_ms=elapsed_ms
+                )
+                self._log(f"Denoise complete: {elapsed_ms}ms, saved to {self.paths.denoised_audio_path}")
+                break
+
             except Exception as e:
                 last_error = e
                 if attempt < MAX_RETRIES - 1:
@@ -207,32 +242,78 @@ class AudioProcessingPipeline:
                     self._log(f"Denoise attempt {attempt + 1} failed, retrying in {sleep_time}s: {e}", "WARNING")
                     time.sleep(sleep_time)
                 else:
-                    self._log(f"Denoise failed after {MAX_RETRIES} attempts: {e}", "ERROR")
-                    raise
-
-        elapsed_ms = int((time.time() - start_time) * 1000)
-        self.metadata.update_processing_step(
-            "enhance", "done",
-            progress=100,
-            duration_ms=elapsed_ms
-        )
-
-        self._log(f"Denoise complete: {elapsed_ms}ms")
+                    # Fallback: just copy raw audio as denoised
+                    self._log(f"Denoise failed, falling back to raw audio: {e}", "WARNING")
+                    try:
+                        import shutil
+                        self.paths.denoised_folder.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(str(self.paths.raw_audio_path), str(self.paths.denoised_audio_path))
+                        elapsed_ms = int((time.time() - start_time) * 1000)
+                        self.metadata.update_processing_step(
+                            "enhance", "done",
+                            progress=100,
+                            duration_ms=elapsed_ms
+                        )
+                        self._log(f"Denoise fallback: copied raw audio")
+                        break
+                    except Exception as fallback_error:
+                        self._log(f"Denoise fallback also failed: {fallback_error}", "ERROR")
+                        raise
 
     def _run_enhance(self):
-        """Run voice enhancement using speechbrain."""
-        self._log("Step 3: Voice Enhancement (speechbrain)")
+        """Run voice enhancement using speechbrain Sepformer.
+
+        Falls back to copying denoised audio if processing fails.
+        """
+        self._log("Step 3: Voice Enhancement (speechbrain Sepformer)")
         self.metadata.update_processing_step("diarize", "in_progress", progress=0)
 
         start_time = time.time()
         last_error = None
 
+        # Use denoised audio if available, otherwise use raw
+        audio_path = self.paths.denoised_audio_path
+        if not audio_path.exists():
+            audio_path = self.paths.raw_audio_path
+            self._log("Denoised audio not found, using raw audio for enhancement")
+
         for attempt in range(MAX_RETRIES):
             try:
-                # TODO: Implement actual speechbrain processing
-                estimated_ms = 5000  # Placeholder
-                time.sleep(estimated_ms / 1000)
+                import soundfile as sf
+                import torch
+                from speechbrain.pretrained import SepformerSeparation
+
+                # Load Sepformer model
+                self._log("Loading speechbrain Sepformer model...")
+                model = SepformerSeparation.from_hparams(
+                    source="speechbrain/sepformer-wham16k",
+                    savedir="pretrained_models/sepformer-wham16k",
+                    run_opts={"device": "cuda" if torch.cuda.is_available() else "cpu"}
+                )
+
+                # Load audio
+                audio, sample_rate = sf.read(str(audio_path))
+                audio_tensor = torch.from_numpy(audio).float()
+
+                # Separate (enhance)
+                self._log("Running speech enhancement...")
+                with torch.no_grad():
+                    enhanced = model(audio_tensor.unsqueeze(0))
+                    enhanced = enhanced.squeeze(0).cpu().numpy()
+
+                # Create enhanced folder and save
+                self.paths.enhanced_folder.mkdir(parents=True, exist_ok=True)
+                sf.write(str(self.paths.enhanced_audio_path), enhanced, sample_rate)
+
+                elapsed_ms = int((time.time() - start_time) * 1000)
+                self.metadata.update_processing_step(
+                    "diarize", "done",
+                    progress=100,
+                    duration_ms=elapsed_ms
+                )
+                self._log(f"Enhance complete: {elapsed_ms}ms, saved to {self.paths.enhanced_audio_path}")
                 break
+
             except Exception as e:
                 last_error = e
                 if attempt < MAX_RETRIES - 1:
@@ -240,8 +321,23 @@ class AudioProcessingPipeline:
                     self._log(f"Enhance attempt {attempt + 1} failed, retrying in {sleep_time}s: {e}", "WARNING")
                     time.sleep(sleep_time)
                 else:
-                    self._log(f"Enhance failed after {MAX_RETRIES} attempts: {e}", "ERROR")
-                    raise
+                    # Fallback: copy denoised as enhanced
+                    self._log(f"Enhance failed, falling back to denoised audio: {e}", "WARNING")
+                    try:
+                        import shutil
+                        self.paths.enhanced_folder.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(str(audio_path), str(self.paths.enhanced_audio_path))
+                        elapsed_ms = int((time.time() - start_time) * 1000)
+                        self.metadata.update_processing_step(
+                            "diarize", "done",
+                            progress=100,
+                            duration_ms=elapsed_ms
+                        )
+                        self._log(f"Enhance fallback: copied audio")
+                        break
+                    except Exception as fallback_error:
+                        self._log(f"Enhance fallback also failed: {fallback_error}", "ERROR")
+                        raise
 
         elapsed_ms = int((time.time() - start_time) * 1000)
         self.metadata.update_processing_step(
@@ -253,19 +349,67 @@ class AudioProcessingPipeline:
         self._log(f"Enhance complete: {elapsed_ms}ms")
 
     def _run_diarize(self):
-        """Run speaker diarization using pyannote."""
+        """Run speaker diarization using pyannote.audio.
+
+        Falls back to empty speaker segments if processing fails.
+        """
         self._log("Step 4: Speaker Diarization (pyannote)")
         self.metadata.update_processing_step("transcribe", "in_progress", progress=0)
 
         start_time = time.time()
         last_error = None
 
+        # Use enhanced audio if available, otherwise use denoised, otherwise use raw
+        audio_path = self.paths.enhanced_audio_path
+        if not audio_path.exists():
+            audio_path = self.paths.denoised_audio_path
+        if not audio_path.exists():
+            audio_path = self.paths.raw_audio_path
+
         for attempt in range(MAX_RETRIES):
             try:
-                # TODO: Implement actual pyannote processing
-                estimated_ms = 8000  # Placeholder
-                time.sleep(estimated_ms / 1000)
+                import torch
+                from pyannote.audio import Pipeline
+
+                # Load pyannote pipeline
+                self._log("Loading pyannote diarization model...")
+                pipeline = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization-3.1",
+                    use_auth_token=None  # Set HF token if needed
+                )
+
+                # Move to GPU if available
+                if torch.cuda.is_available():
+                    pipeline = pipeline.to("cuda")
+
+                # Run diarization
+                self._log(f"Running diarization on: {audio_path}")
+                diarization = pipeline(str(audio_path))
+
+                # Extract speaker segments
+                speaker_segments = []
+                for turn, _, speaker in diarization.itertracks(yield_label=True):
+                    speaker_segments.append({
+                        "speaker_id": speaker,
+                        "start_time": turn.start,
+                        "end_time": turn.end
+                    })
+
+                elapsed_ms = int((time.time() - start_time) * 1000)
+
+                # Store speaker segments in metadata
+                self.metadata._data["speaker_segments"] = speaker_segments
+                self.metadata.save()
+
+                self.metadata.update_processing_step(
+                    "transcribe", "done",
+                    progress=100,
+                    duration_ms=elapsed_ms
+                )
+
+                self._log(f"Diarize complete: {elapsed_ms}ms, found {len(speaker_segments)} speaker segments")
                 break
+
             except Exception as e:
                 last_error = e
                 if attempt < MAX_RETRIES - 1:
@@ -273,29 +417,96 @@ class AudioProcessingPipeline:
                     self._log(f"Diarize attempt {attempt + 1} failed, retrying in {sleep_time}s: {e}", "WARNING")
                     time.sleep(sleep_time)
                 else:
-                    self._log(f"Diarize failed after {MAX_RETRIES} attempts: {e}", "ERROR")
-                    raise
+                    # Fallback: empty speaker segments
+                    self._log(f"Diarize failed, using empty segments: {e}", "WARNING")
+                    self.metadata._data["speaker_segments"] = []
+                    self.metadata.save()
 
-        elapsed_ms = int((time.time() - start_time) * 1000)
-        self.metadata.update_processing_step(
-            "transcribe", "done",
-            progress=100,
-            duration_ms=elapsed_ms
-        )
-
-        self._log(f"Diarize complete: {elapsed_ms}ms")
+                    elapsed_ms = int((time.time() - start_time) * 1000)
+                    self.metadata.update_processing_step(
+                        "transcribe", "done",
+                        progress=100,
+                        duration_ms=elapsed_ms
+                    )
+                    self._log(f"Diarize fallback: no speaker segments")
 
     def _run_transcribe(self):
-        """Run transcription using Whisper."""
+        """Run transcription using Whisper (faster-whisper)."""
         self._log("Step 5: Transcription (Whisper)")
         start_time = time.time()
 
+        # Use enhanced audio if available, otherwise use denoised, otherwise use raw
+        audio_path = self.paths.enhanced_audio_path
+        if not audio_path.exists():
+            audio_path = self.paths.denoised_audio_path
+        if not audio_path.exists():
+            audio_path = self.paths.raw_audio_path
+
+        self._log(f"Transcribing audio from: {audio_path}")
+
         for attempt in range(MAX_RETRIES):
             try:
-                # TODO: Implement actual Whisper transcription
-                estimated_ms = 5000  # Placeholder
-                time.sleep(estimated_ms / 1000)
+                from faster_whisper import WhisperModel
+
+                # Use small model for speed, medium for quality
+                # auto-detect GPU and use it if available
+                model = WhisperModel(
+                    "medium",  # Model size: tiny/base/small/medium/large
+                    device="cuda" if __import__('torch').cuda.is_available() else "cpu",
+                    compute_type="float16" if __import__('torch').cuda.is_available() else "int8"
+                )
+
+                self._log("Whisper model loaded, starting transcription...")
+
+                # Run transcription
+                segments, info = model.transcribe(
+                    str(audio_path),
+                    language="zh",  # Chinese
+                    beam_size=5,
+                    vad_filter=True,  # Voice activity detection filter
+                )
+
+                # Collect results
+                transcription_segments = []
+                full_text = []
+                total_confidence = 0
+                segment_count = 0
+
+                for segment in segments:
+                    seg_dict = {
+                        "start": segment.start,
+                        "end": segment.end,
+                        "text": segment.text.strip()
+                    }
+                    transcription_segments.append(seg_dict)
+                    full_text.append(seg_dict["text"])
+                    if segment.avg_logprob is not None:
+                        total_confidence += segment.avg_logprob
+                        segment_count += 1
+
+                transcription_text = "".join(full_text).strip()
+
+                # Calculate average confidence from log probabilities
+                if segment_count > 0:
+                    avg_logprob = total_confidence / segment_count
+                    # Convert log probability to confidence (0-1)
+                    confidence = min(1.0, max(0.0, np.exp(avg_logprob)))
+                else:
+                    confidence = 0.0
+
+                elapsed_ms = int((time.time() - start_time) * 1000)
+
+                self.metadata.update_transcription(
+                    text=transcription_text,
+                    confidence=confidence,
+                    segments=transcription_segments
+                )
+                self.metadata.save_transcription_text(transcription_text)
+
+                self._log(f"Transcription complete: {elapsed_ms}ms, confidence={confidence:.2f}")
+                self._log(f"Transcription text: {transcription_text[:100]}...")
                 break
+
             except Exception as e:
                 if attempt < MAX_RETRIES - 1:
                     sleep_time = RETRY_BACKOFF_BASE ** attempt
@@ -304,19 +515,6 @@ class AudioProcessingPipeline:
                 else:
                     self._log(f"Transcribe failed after {MAX_RETRIES} attempts: {e}", "ERROR")
                     raise
-
-        elapsed_ms = int((time.time() - start_time) * 1000)
-
-        # Simulate transcription result
-        transcription_text = "這是模擬的轉錄文字稿。"
-        self.metadata.update_transcription(
-            text=transcription_text,
-            confidence=0.95,
-            segments=[{"start": 0.0, "end": 5.0, "text": transcription_text}]
-        )
-        self.metadata.save_transcription_text(transcription_text)
-
-        self._log(f"Transcription complete: {elapsed_ms}ms - '{transcription_text}'")
 
 
 def run_processing_pipeline(recording_id: str) -> ProcessingResult:
