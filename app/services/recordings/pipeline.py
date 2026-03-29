@@ -380,7 +380,7 @@ class AudioProcessingPipeline:
                 self._log(f"Using HF_TOKEN: {hf_token[:8]}...")
                 pipeline = Pipeline.from_pretrained(
                     "pyannote/speaker-diarization-3.1",
-                    use_auth_token=hf_token
+                    token=hf_token
                 )
 
                 # Move to GPU if available
