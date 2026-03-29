@@ -23,9 +23,9 @@ ENHANCED_DIR = RECORDINGS_DIR / "enhanced"
 VOICE_PROFILES_DIR = DATA_DIR / "voice_profiles"
 MODELS_DIR = DATA_DIR / "models"
 
-# Ensure directories exist
-for d in [RAW_DIR, DENOISED_DIR, ENHANCED_DIR, VOICE_PROFILES_DIR, MODELS_DIR]:
-    d.mkdir(parents=True, exist_ok=True)
+# Recording index cache for fast lookup
+RECORDINGS_INDEX_FILE = RECORDINGS_DIR / "index.json"
+_recordings_cache: Optional[dict] = None
 
 # Valid IDs (also defined as class attributes in RecordingPaths)
 VALID_LISTENER_IDS = {"child", "mom", "dad", "friend", "reporter", "elder", "default"}
@@ -163,8 +163,66 @@ def get_recording_by_folder(folder_name: str) -> Optional[RecordingPaths]:
     return None
 
 
+def _load_recordings_cache() -> dict:
+    """Load recordings index from file."""
+    global _recordings_cache
+    if _recordings_cache is not None:
+        return _recordings_cache
+
+    if RECORDINGS_INDEX_FILE.exists():
+        with open(RECORDINGS_INDEX_FILE, "r", encoding="utf-8") as f:
+            _recordings_cache = json.load(f)
+    else:
+        _recordings_cache = {"recordings": []}
+
+    return _recordings_cache
+
+
+def _save_recordings_cache():
+    """Save recordings index to file."""
+    global _recordings_cache
+    if _recordings_cache is None:
+        return
+    with open(RECORDINGS_INDEX_FILE, "w", encoding="utf-8") as f:
+        json.dump(_recordings_cache, f, ensure_ascii=False, indent=2)
+
+
+def invalidate_recordings_cache():
+    """Invalidate the recordings cache. Call after create/delete."""
+    global _recordings_cache
+    _recordings_cache = None
+
+
 def list_all_recordings() -> list[RecordingPaths]:
-    """List all recordings in the raw folder directory."""
+    """
+    List all recordings in the raw folder directory.
+
+    Uses an index cache for fast repeated lookups.
+    Cache is invalidated on recording create/delete.
+    """
+    # Rebuild from cache
+    cache = _load_recordings_cache()
+
+    # If cache has recordings, use it
+    if cache.get("recordings"):
+        recordings = []
+        for rec in cache["recordings"]:
+            try:
+                rp = RecordingPaths(
+                    listener_id=rec["listener_id"],
+                    persona_id=rec["persona_id"],
+                    timestamp=rec["timestamp"],
+                    recording_id=rec["recording_id"],
+                )
+                recordings.append(rp)
+            except (ValueError, KeyError):
+                # Skip invalid entries, trigger cache rebuild
+                invalidate_recordings_cache()
+                return list_all_recordings()
+        recordings.sort(key=lambda r: r.timestamp, reverse=True)
+        return recordings
+
+    # Cache miss or empty - rebuild from filesystem
     recordings = []
     if not RAW_DIR.exists():
         return recordings
@@ -177,7 +235,45 @@ def list_all_recordings() -> list[RecordingPaths]:
 
     # Sort by timestamp descending (newest first)
     recordings.sort(key=lambda r: r.timestamp, reverse=True)
+
+    # Update cache
+    _recordings_cache = {
+        "recordings": [
+            {
+                "recording_id": r.recording_id,
+                "listener_id": r.listener_id,
+                "persona_id": r.persona_id,
+                "timestamp": r.timestamp,
+                "folder_name": r.folder_name,
+            }
+            for r in recordings
+        ]
+    }
+    _save_recordings_cache()
+
     return recordings
+
+
+def register_recording_in_cache(paths: RecordingPaths):
+    """Register a new recording in the cache index."""
+    cache = _load_recordings_cache()
+    cache["recordings"].append({
+        "recording_id": paths.recording_id,
+        "listener_id": paths.listener_id,
+        "persona_id": paths.persona_id,
+        "timestamp": paths.timestamp,
+        "folder_name": paths.folder_name,
+    })
+    _save_recordings_cache()
+
+
+def unregister_recording_from_cache(recording_id: str):
+    """Unregister a recording from the cache index."""
+    cache = _load_recordings_cache()
+    cache["recordings"] = [
+        r for r in cache["recordings"] if r.get("recording_id") != recording_id
+    ]
+    _save_recordings_cache()
 
 
 def get_storage_stats() -> dict:

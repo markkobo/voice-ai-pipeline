@@ -864,7 +864,293 @@ prometheus-client>=0.19.0
 
 ---
 
-## 15. Implementation Phases
+## 16. Post-Implementation Issues & Improvements
+
+> Documented during M2 implementation review (2026-03-29). These issues were found after Phase 1-5 completion.
+
+### 16.1 Architecture Issues
+
+#### ISSUE-1: `list_all_recordings()` does full filesystem traversal on every call
+**Severity**: High | **Component**: `app/services/recordings/file_storage.py`
+
+**Problem**: Every call to `list_all_recordings()` iterates over all listener/persona directories and parses every folder name. At scale (hundreds of recordings), this causes:
+- Slow API responses (1-5 seconds)
+- Increased disk I/O
+- No caching of frequently-accessed data
+
+**Current code**:
+```python
+def list_all_recordings():
+    for listener_id in VALID_LISTENER_IDS:
+        for persona_id in VALID_PERSONA_IDS:
+            base = DATA_DIR / listener_id / persona_id
+            if base.exists():
+                for folder in base.iterdir():
+                    # parse every folder every call
+```
+
+**Recommended fix**:
+- Add recording index cache (`recordings_index.json`) updated on create/delete
+- Use `functools.lru_cache` with TTL for `list_all_recordings()`
+- Or migrate to SQLite for metadata storage
+
+**Priority**: P0
+
+---
+
+#### ISSUE-2: Metadata JSON in same folder as audio — coupling risk
+**Severity**: Medium | **Component**: `app/services/recordings/metadata.py`
+
+**Problem**: Recording metadata is stored in the raw folder alongside audio files. Deleting/moving folders can lose metadata if not handled carefully.
+
+**Recommended fix**:
+- Consider separate metadata store (SQLite)
+- Or ensure delete operations always go through API (not filesystem)
+
+**Priority**: P2
+
+---
+
+### 16.2 Error Handling Issues
+
+#### ISSUE-3: Pipeline has no retry logic
+**Severity**: High | **Component**: `app/services/recordings/pipeline.py`
+
+**Problem**: If denoise fails mid-processing (network blip, OOM), the entire pipeline fails and user must manually retry from start.
+
+**Current**:
+```python
+def run(self) -> ProcessingResult:
+    try:
+        self._run_quality_check()
+        self._run_denoise()  # no retry
+        self._run_enhance()  # no retry
+        ...
+```
+
+**Recommended fix**:
+```python
+def _run_with_retry(step_fn, step_name, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            return step_fn()
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise
+            logger.warning(f"[PIPELINE] {step_name} failed, retrying ({attempt+1}/{max_retries})")
+            time.sleep(2 ** attempt)  # exponential backoff
+```
+
+**Priority**: P0
+
+---
+
+#### ISSUE-4: Quality check failure marked as "done" instead of "skipped"
+**Severity**: Medium | **Component**: `app/services/recordings/pipeline.py:110-138`
+
+**Problem**: When quality check throws an exception, it catches it and marks the step as "done" with 100% progress, even though no quality check actually ran.
+
+**Current**:
+```python
+except Exception as e:
+    self._log(f"Quality check failed: {e}", "ERROR")
+    # Quality check failure is not fatal - continue with pipeline
+    self.metadata.update_processing_step("denoise", "done", progress=100)  # misleading!
+```
+
+**Recommended fix**:
+- Add "skipped" or "warning" status to processing_steps
+- Or log as "done_with_warning"
+
+**Priority**: P1
+
+---
+
+### 16.3 API Design Issues
+
+#### ISSUE-5: `GET /api/recordings` has no pagination
+**Severity**: High | **Component**: `app/api/recordings.py`
+
+**Problem**: Returns all recordings at once. With hundreds of recordings, this causes slow responses and large JSON payloads.
+
+**Recommended fix**:
+```python
+@router.get("/")
+async def list_recordings(page: int = 1, limit: int = 20):
+    # return paginated results with total count
+    return {
+        "recordings": [...],
+        "total": total_count,
+        "page": page,
+        "limit": limit,
+    }
+```
+
+**Priority**: P0
+
+---
+
+#### ISSUE-6: `POST /api/training/versions` is a stub — doesn't trigger actual training
+**Severity**: High | **Component**: `app/api/training.py`
+
+**Problem**: Creates a version record with status="training" but nothing actually trains. The actual LoRA training pipeline is not connected.
+
+**Recommended fix**:
+- Document clearly that this is a stub for MVP
+- Integrate with actual training job queue (Celery/Redis worker, or BackgroundTasks)
+- Add training completion callback that updates version status
+
+**Priority**: P0
+
+---
+
+#### ISSUE-7: No cross-reference between recordings and training versions
+**Severity**: Medium | **Component**: `app/services/recordings/`, `app/services/training/`
+
+**Problem**: A recording can be deleted even if it's referenced by a training version. Training versions track `num_recordings_used` but don't store actual recording IDs.
+
+**Current**:
+```python
+# training.py - TrainingVersion
+num_recordings_used: int = 0  # just a count, not IDs
+```
+
+**Recommended fix**:
+```python
+@dataclass
+class TrainingVersion:
+    ...
+    recording_ids_used: list[str] = []  # actual recording IDs
+```
+
+**Priority**: P1
+
+---
+
+#### ISSUE-8: `processed_expires_at` is set but no cleanup job runs
+**Severity**: High | **Component**: `app/services/recordings/metadata.py`
+
+**Problem**: `processed_expires_at` is calculated when status becomes "processed", but nothing actually deletes expired recordings.
+
+**Recommended fix**:
+```python
+# Add endpoint or startup task
+@router.post("/api/maintenance/cleanup-expired")
+async def cleanup_expired_recordings():
+    """Delete recordings where processed_expires_at < now"""
+    expired = get_expired_recordings()
+    for paths in expired:
+        paths.delete_all()
+    return {"deleted": len(expired)}
+```
+
+**Priority**: P0
+
+---
+
+### 16.4 Data Integrity Issues
+
+#### ISSUE-9: Deleting recording doesn't check training dependencies
+**Severity**: High | **Component**: `app/api/recordings.py:delete_recording`
+
+**Problem**: Recording can be deleted while being used by an active training version.
+
+**Recommended fix**:
+```python
+@router.delete("/{recording_id}")
+async def delete_recording(recording_id: str):
+    # Check if any training version uses this recording
+    manager = get_version_manager()
+    for version in manager.list_versions():
+        if recording_id in version.recording_ids_used:
+            if version.status == "training":
+                raise HTTPException(400, "Cannot delete recording used in active training")
+```
+
+**Priority**: P0
+
+---
+
+### 16.5 Performance Issues
+
+#### ISSUE-10: Upload reads entire file into memory
+**Severity**: Medium | **Component**: `app/api/recordings.py:upload_recording`
+
+**Problem**:
+```python
+content = await file.read()  # entire file in memory
+if len(content) > MAX_FILE_SIZE:
+    ...
+f.write(content)
+```
+
+**Recommended fix**: Use streaming upload with chunked processing.
+
+**Priority**: P1
+
+---
+
+#### ISSUE-11: Pipeline steps run sequentially — denoise and enhance could parallelize
+**Severity**: Low | **Component**: `app/services/recordings/pipeline.py`
+
+**Problem**: `denoise` and `enhance` are independent but run sequentially.
+
+**Recommended fix**: Run as `asyncio.gather(denoise_task, enhance_task)` if using async pipeline.
+
+**Priority**: P2
+
+---
+
+### 16.6 Testing Gaps
+
+#### ISSUE-12: No integration tests with actual file processing
+**Severity**: High | **Component**: `tests/integration/`
+
+**Problem**: Integration tests mock everything. No real file I/O or pipeline execution tests.
+
+**Recommended fix**:
+- Add integration tests with `tmp_path` fixtures creating actual audio files
+- Test full pipeline with real (but small) audio
+
+**Priority**: P1
+
+---
+
+#### ISSUE-13: Training tests mock filesystem
+**Severity**: Low | **Component**: `tests/unit/test_training.py`
+
+**Problem**: All training unit tests patch `MODELS_DIR` and `VERSION_INDEX_FILE`. No test verifies actual file creation.
+
+**Recommended fix**:
+- Add integration test with real temp directory
+
+**Priority**: P2
+
+---
+
+### 16.7 Small Improvements
+
+| ID | Component | Issue | Fix |
+|----|-----------|-------|-----|
+| IMPROVE-1 | `app/services/training.py` | Hardcoded `MODELS_DIR` | Use env var `MODELS_DIR` |
+| IMPROVE-2 | `app/api/training.py` | No request validation | Validate `num_recordings > 0` |
+| IMPROVE-3 | `app/api/training.py` | No logging in `activate_version`, `delete_version` | Add `logger.info` |
+| IMPROVE-4 | `app/services/recordings/file_storage.py` | `xiao_s` contains underscore, parsing edge case | Add unit test for underscore in persona_id |
+| IMPROVE-5 | `app/services/recordings/pipeline.py` | Processing step status only has "done"/"failed" | Add "skipped" status |
+
+---
+
+### 16.8 Priority Summary
+
+| Priority | Issues | Description |
+|----------|--------|-------------|
+| **P0** | ISSUE-1, ISSUE-3, ISSUE-5, ISSUE-6, ISSUE-8, ISSUE-9 | Critical fixes for production readiness |
+| **P1** | ISSUE-4, ISSUE-7, ISSUE-10, ISSUE-12 | Important improvements for next iteration |
+| **P2** | ISSUE-2, ISSUE-11, ISSUE-13, IMPROVE-1~5 | Nice-to-have / future work |
+
+---
+
+## 17. Implementation Phases
 
 ### Phase 1: Foundation (2 days)
 1. File storage layer (folder naming, JSON metadata)

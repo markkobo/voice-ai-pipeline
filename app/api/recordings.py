@@ -26,6 +26,8 @@ from app.services.recordings import (
     list_recordings_metadata,
     load_recording_metadata,
     get_storage_stats,
+    register_recording_in_cache,
+    unregister_recording_from_cache,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,9 +73,28 @@ def allowed_file(filename: str) -> bool:
 
 
 @router.get("/")
-async def list_recordings():
-    """List all recordings with metadata."""
-    return list_recordings_metadata()
+async def list_recordings(page: int = 1, limit: int = 20):
+    """
+    List all recordings with metadata (paginated).
+
+    Args:
+        page: Page number (1-indexed)
+        limit: Items per page (default 20, max 100)
+    """
+    limit = min(limit, 100)  # cap at 100
+    offset = (page - 1) * limit
+
+    all_recordings = list_recordings_metadata()
+    total = len(all_recordings)
+    paginated = all_recordings[offset:offset + limit]
+
+    return {
+        "recordings": paginated,
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "total_pages": (total + limit - 1) // limit,
+    }
 
 
 @router.get("/stats")
@@ -146,6 +167,9 @@ async def upload_recording(
     metadata.update_audio_info(duration, size)
     metadata.save()
 
+    # Register in cache index for fast lookup
+    register_recording_in_cache(paths)
+
     logger.info(f"[UPLOAD] Complete: recording_id={metadata.data['recording_id']}, duration={duration}s, size={size}bytes")
 
     return {
@@ -170,12 +194,25 @@ async def get_recording(recording_id: str):
 
 @router.delete("/{recording_id}")
 async def delete_recording(recording_id: str):
-    """Delete a recording and all its files."""
+    """
+    Delete a recording and all its files.
+
+    Note: Cannot delete if there's an active training session (ISSUE-9).
+    Full dependency tracking requires ISSUE-7 fix (recording_ids in TrainingVersion).
+    """
     logger.info(f"[DELETE] Deleting recording: {recording_id}")
+
+    # Check if training is currently running
+    from app.services.training import get_version_manager
+    training_status = get_version_manager().get_training_status()
+    if training_status.get("is_training"):
+        raise HTTPException(400, "Cannot delete recording while training is in progress")
 
     # Find and delete
     for paths in list_all_recordings():
         if paths.recording_id == recording_id:
+            # Unregister from cache first
+            unregister_recording_from_cache(recording_id)
             paths.delete_all()
             logger.info(f"[DELETE] Deleted: {paths.folder_name}")
             return {"status": "deleted", "recording_id": recording_id}
@@ -305,3 +342,71 @@ async def trigger_processing(recording_id: str, background_tasks: BackgroundTask
     background_tasks.add_task(run_processing_pipeline, recording_id)
 
     return {"status": "processing_started", "recording_id": recording_id}
+
+
+@router.post("/cleanup-expired")
+async def cleanup_expired_recordings(dry_run: bool = False):
+    """
+    Delete recordings where processed_expires_at < now.
+
+    Only deletes processed files (denoised/enhanced), keeps raw audio.
+    Raw audio is never auto-deleted per NFR-32.
+
+    Args:
+        dry_run: If True, return list of recordings that would be deleted without deleting
+    """
+    from app.services.recordings import RecordingMetadata, unregister_recording_from_cache
+
+    now = datetime.now()
+    expired_recordings = []
+
+    for paths in list_all_recordings():
+        metadata = RecordingMetadata(paths)
+        if metadata.data.get("status") != "processed":
+            continue
+
+        expires_at_str = metadata.data.get("processed_expires_at")
+        if not expires_at_str:
+            continue
+
+        expires_at = datetime.fromisoformat(expires_at_str.replace("Z", "+00:00"))
+        if expires_at < now:
+            expired_recordings.append({
+                "recording_id": paths.recording_id,
+                "folder_name": paths.folder_name,
+                "expired_at": expires_at_str,
+            })
+
+    if dry_run:
+        return {
+            "would_delete": len(expired_recordings),
+            "recordings": expired_recordings,
+            "dry_run": True,
+        }
+
+    # Actually delete processed files
+    deleted_count = 0
+    for rec in expired_recordings:
+        for paths in list_all_recordings():
+            if paths.recording_id == rec["recording_id"]:
+                # Delete only processed folders (denoised, enhanced), keep raw
+                if paths.denoised_folder.exists():
+                    shutil.rmtree(paths.denoised_folder)
+                if paths.enhanced_folder.exists():
+                    shutil.rmtree(paths.enhanced_folder)
+
+                # Update metadata to mark as expired
+                metadata = RecordingMetadata(paths)
+                metadata._data["processed_expires_at"] = None
+                metadata.save()
+
+                unregister_recording_from_cache(paths.recording_id)
+                deleted_count += 1
+                logger.info(f"[CLEANUP] Deleted processed files for: {paths.folder_name}")
+                break
+
+    return {
+        "deleted": deleted_count,
+        "recordings": expired_recordings,
+        "dry_run": False,
+    }

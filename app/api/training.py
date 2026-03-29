@@ -5,6 +5,11 @@ Handles:
 - Training version management
 - Training trigger/status
 - Model activation
+
+NOTE: This is an MVP STUB implementation. Actual LoRA training is not yet
+connected. The create_version endpoint creates a record, and simulate_training
+can mark it as ready for testing purposes. Real training integration (M4) is
+deferred until after MVP demo.
 """
 
 import logging
@@ -56,6 +61,10 @@ async def create_version(persona_id: str, num_recordings: int):
     """
     from app.services.recordings import list_recordings_metadata
 
+    # Validate inputs
+    if num_recordings < 1:
+        raise HTTPException(400, "num_recordings must be at least 1")
+
     # Validate persona has enough recordings
     recordings = list_recordings_metadata()
     persona_recordings = [r for r in recordings if r.get("persona_id") == persona_id]
@@ -94,6 +103,7 @@ async def activate_version(version_id: str):
     if not success:
         raise HTTPException(500, "Failed to activate version")
 
+    logger.info(f"[TRAINING] Activated version: {version_id}")
     return {"status": "activated", "version_id": version_id}
 
 
@@ -104,6 +114,8 @@ async def delete_version(version_id: str):
     success = manager.delete_version(version_id)
     if not success:
         raise HTTPException(404, "Version not found or cannot delete active version")
+
+    logger.info(f"[TRAINING] Deleted version: {version_id}")
     return {"status": "deleted", "version_id": version_id}
 
 

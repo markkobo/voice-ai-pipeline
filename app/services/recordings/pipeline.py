@@ -12,7 +12,7 @@ Pipeline steps:
 import logging
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable
 from dataclasses import dataclass
 
 from .file_storage import RecordingPaths
@@ -20,6 +20,10 @@ from .metadata import RecordingMetadata
 from .quality import AudioQualityAnalyzer
 
 logger = logging.getLogger(__name__)
+
+# Retry configuration
+MAX_RETRIES = 3
+RETRY_BACKOFF_BASE = 2  # seconds, exponential backoff
 
 
 @dataclass
@@ -53,6 +57,40 @@ class AudioProcessingPipeline:
     def _log(self, message: str, level: str = "INFO"):
         """Log a message with component identifier."""
         logger.info(f"[PIPELINE:{self.recording_id[:8]}] {message}")
+
+    def _run_with_retry(self, step_fn: Callable, step_name: str) -> any:
+        """
+        Run a pipeline step with retry logic.
+
+        Args:
+            step_fn: The step function to execute
+            step_name: Human-readable name for logging
+
+        Returns:
+            Result of step_fn
+
+        Raises:
+            The last exception if all retries fail
+        """
+        last_error = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                return step_fn()
+            except Exception as e:
+                last_error = e
+                if attempt < MAX_RETRIES - 1:
+                    sleep_time = RETRY_BACKOFF_BASE ** attempt
+                    logger.warning(
+                        f"[PIPELINE:{self.recording_id[:8]}] {step_name} failed "
+                        f"(attempt {attempt + 1}/{MAX_RETRIES}), retrying in {sleep_time}s: {e}"
+                    )
+                    time.sleep(sleep_time)
+                else:
+                    logger.error(
+                        f"[PIPELINE:{self.recording_id[:8]}] {step_name} failed "
+                        f"(all {MAX_RETRIES} attempts): {e}"
+                    )
+        raise last_error
 
     def run(self) -> ProcessingResult:
         """
@@ -140,22 +178,32 @@ class AudioProcessingPipeline:
     def _run_denoise(self):
         """Run noise reduction using rnnoise."""
         self._log("Step 2: Noise Reduction (rnnoise)")
-        # TODO: Implement actual rnnoise processing
-        # For now, just simulate the step
-
         self.metadata.update_processing_step("enhance", "in_progress", progress=0)
 
         start_time = time.time()
+        last_error = None
 
-        # Simulate processing time based on audio duration
-        if self.metadata.data.get("duration_seconds"):
-            # Roughly 1x realtime
-            estimated_ms = int(self.metadata.data["duration_seconds"] * 1000)
-        else:
-            estimated_ms = 1000
+        for attempt in range(MAX_RETRIES):
+            try:
+                # TODO: Implement actual rnnoise processing
+                # For now, just simulate the step
+                if self.metadata.data.get("duration_seconds"):
+                    # Roughly 1x realtime
+                    estimated_ms = int(self.metadata.data["duration_seconds"] * 1000)
+                else:
+                    estimated_ms = 1000
 
-        import time as t
-        t.sleep(estimated_ms / 1000)  # Simulate processing
+                time.sleep(estimated_ms / 1000)  # Simulate processing
+                break  # Success
+            except Exception as e:
+                last_error = e
+                if attempt < MAX_RETRIES - 1:
+                    sleep_time = RETRY_BACKOFF_BASE ** attempt
+                    self._log(f"Denoise attempt {attempt + 1} failed, retrying in {sleep_time}s: {e}", "WARNING")
+                    time.sleep(sleep_time)
+                else:
+                    self._log(f"Denoise failed after {MAX_RETRIES} attempts: {e}", "ERROR")
+                    raise
 
         elapsed_ms = int((time.time() - start_time) * 1000)
         self.metadata.update_processing_step(
@@ -169,16 +217,26 @@ class AudioProcessingPipeline:
     def _run_enhance(self):
         """Run voice enhancement using speechbrain."""
         self._log("Step 3: Voice Enhancement (speechbrain)")
-        # TODO: Implement actual speechbrain processing
-
         self.metadata.update_processing_step("diarize", "in_progress", progress=0)
 
         start_time = time.time()
+        last_error = None
 
-        estimated_ms = 5000  # Placeholder
-
-        import time as t
-        t.sleep(estimated_ms / 1000)
+        for attempt in range(MAX_RETRIES):
+            try:
+                # TODO: Implement actual speechbrain processing
+                estimated_ms = 5000  # Placeholder
+                time.sleep(estimated_ms / 1000)
+                break
+            except Exception as e:
+                last_error = e
+                if attempt < MAX_RETRIES - 1:
+                    sleep_time = RETRY_BACKOFF_BASE ** attempt
+                    self._log(f"Enhance attempt {attempt + 1} failed, retrying in {sleep_time}s: {e}", "WARNING")
+                    time.sleep(sleep_time)
+                else:
+                    self._log(f"Enhance failed after {MAX_RETRIES} attempts: {e}", "ERROR")
+                    raise
 
         elapsed_ms = int((time.time() - start_time) * 1000)
         self.metadata.update_processing_step(
@@ -192,16 +250,26 @@ class AudioProcessingPipeline:
     def _run_diarize(self):
         """Run speaker diarization using pyannote."""
         self._log("Step 4: Speaker Diarization (pyannote)")
-        # TODO: Implement actual pyannote processing
-
         self.metadata.update_processing_step("transcribe", "in_progress", progress=0)
 
         start_time = time.time()
+        last_error = None
 
-        estimated_ms = 8000  # Placeholder
-
-        import time as t
-        t.sleep(estimated_ms / 1000)
+        for attempt in range(MAX_RETRIES):
+            try:
+                # TODO: Implement actual pyannote processing
+                estimated_ms = 8000  # Placeholder
+                time.sleep(estimated_ms / 1000)
+                break
+            except Exception as e:
+                last_error = e
+                if attempt < MAX_RETRIES - 1:
+                    sleep_time = RETRY_BACKOFF_BASE ** attempt
+                    self._log(f"Diarize attempt {attempt + 1} failed, retrying in {sleep_time}s: {e}", "WARNING")
+                    time.sleep(sleep_time)
+                else:
+                    self._log(f"Diarize failed after {MAX_RETRIES} attempts: {e}", "ERROR")
+                    raise
 
         elapsed_ms = int((time.time() - start_time) * 1000)
         self.metadata.update_processing_step(
@@ -215,14 +283,22 @@ class AudioProcessingPipeline:
     def _run_transcribe(self):
         """Run transcription using Whisper."""
         self._log("Step 5: Transcription (Whisper)")
-        # TODO: Implement actual Whisper transcription
-
         start_time = time.time()
 
-        estimated_ms = 5000  # Placeholder
-
-        import time as t
-        t.sleep(estimated_ms / 1000)
+        for attempt in range(MAX_RETRIES):
+            try:
+                # TODO: Implement actual Whisper transcription
+                estimated_ms = 5000  # Placeholder
+                time.sleep(estimated_ms / 1000)
+                break
+            except Exception as e:
+                if attempt < MAX_RETRIES - 1:
+                    sleep_time = RETRY_BACKOFF_BASE ** attempt
+                    self._log(f"Transcribe attempt {attempt + 1} failed, retrying in {sleep_time}s: {e}", "WARNING")
+                    time.sleep(sleep_time)
+                else:
+                    self._log(f"Transcribe failed after {MAX_RETRIES} attempts: {e}", "ERROR")
+                    raise
 
         elapsed_ms = int((time.time() - start_time) * 1000)
 
