@@ -813,6 +813,14 @@ async def recordings_page():
         loadRecordings();
         log('Recordings page loaded', 'info', 'UI');
 
+        // Auto-refresh recordings list every 5 seconds when page is visible
+        // This ensures processing status updates automatically
+        setInterval(() => {
+            if (!document.hidden) {
+                loadRecordings();
+            }
+        }, 5000);
+
         // Load personas/listeners for potential future use
         fetch('/api/personas').then(r => r.json()).then(data => {
             log(`Loaded ${data.length} personas`, 'debug', 'UI');
