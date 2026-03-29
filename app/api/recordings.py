@@ -136,13 +136,16 @@ async def upload_recording(
     paths = RecordingPaths(listener_id=listener_id, persona_id=persona_id)
     paths.create_folders()
 
-    # Save uploaded file
+    # Save uploaded file (streaming to avoid memory issues)
     temp_path = paths.raw_folder / "upload_temp"
+    bytes_read = 0
     with open(temp_path, "wb") as f:
-        content = await file.read()
-        if len(content) > MAX_FILE_SIZE:
-            raise HTTPException(400, f"File too large: {len(content)} bytes (max {MAX_FILE_SIZE})")
-        f.write(content)
+        while chunk := await file.read(1024 * 1024):  # 1MB chunks
+            bytes_read += len(chunk)
+            if bytes_read > MAX_FILE_SIZE:
+                temp_path.unlink(missing_ok=True)
+                raise HTTPException(400, f"File too large: {bytes_read} bytes (max {MAX_FILE_SIZE})")
+            f.write(chunk)
 
     # Validate and convert to WAV
     try:

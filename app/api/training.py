@@ -74,8 +74,11 @@ async def create_version(persona_id: str, num_recordings: int):
     if len(processed) < num_recordings:
         raise HTTPException(400, f"Not enough processed recordings. Need {num_recordings}, have {len(processed)}")
 
+    # Get recording IDs for the recordings we'll use
+    recording_ids = [r["recording_id"] for r in processed[:num_recordings]]
+
     manager = get_version_manager()
-    version = manager.create_version(persona_id, num_recordings)
+    version = manager.create_version(persona_id, recording_ids)
 
     logger.info(f"[TRAINING] Created version {version.version_id} for {persona_id}")
 

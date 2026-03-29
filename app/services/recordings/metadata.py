@@ -116,6 +116,10 @@ class RecordingMetadata:
             step_data["started_at"] = datetime.now().isoformat()
         elif status == "done":
             step_data["completed_at"] = datetime.now().isoformat()
+        elif status == "skipped":
+            # Skipped means step didn't run but pipeline continued
+            step_data["error_message"] = error_message or "Step skipped"
+            step_data["completed_at"] = datetime.now().isoformat()
         elif status == "failed":
             step_data["error_message"] = error_message
             step_data["completed_at"] = datetime.now().isoformat()

@@ -172,8 +172,12 @@ class AudioProcessingPipeline:
 
         except Exception as e:
             self._log(f"Quality check failed: {e}", "ERROR")
-            # Quality check failure is not fatal - continue with pipeline
-            self.metadata.update_processing_step("denoise", "done", progress=100)
+            # Quality check failure is not fatal - continue with pipeline but mark as skipped
+            self.metadata.update_processing_step(
+                "denoise", "skipped",
+                progress=0,
+                error_message=str(e)
+            )
 
     def _run_denoise(self):
         """Run noise reduction using rnnoise."""

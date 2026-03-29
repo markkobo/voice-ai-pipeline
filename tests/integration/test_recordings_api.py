@@ -40,7 +40,11 @@ class TestRecordingsAPI:
         response = client.get("/api/recordings/")
         assert response.status_code == 200
         data = response.json()
-        assert isinstance(data, list)
+        # Response is now paginated dict
+        assert isinstance(data, dict)
+        assert "recordings" in data
+        assert data["recordings"] == []
+        assert data["total"] == 0
 
     def test_get_personas(self, client):
         """Test getting personas list."""
@@ -103,6 +107,40 @@ class TestRecordingsAPI:
             json={"title": "Test"}
         )
         assert response.status_code == 404
+
+    def test_upload_and_get_recording(self, client, temp_audio_file):
+        """Test uploading a file and retrieving it."""
+        # Upload
+        with open(temp_audio_file, 'rb') as f:
+            response = client.post(
+                "/api/recordings/upload",
+                files={"file": ("test.wav", f, "audio/wav")},
+                data={"listener_id": "child", "persona_id": "xiao_s"}
+            )
+        assert response.status_code == 200
+        data = response.json()
+        recording_id = data["recording_id"]
+        assert recording_id is not None
+        assert data["status"] == "raw"
+
+        # Get the recording
+        response = client.get(f"/api/recordings/{recording_id}")
+        assert response.status_code == 200
+        rec_data = response.json()
+        assert rec_data["recording_id"] == recording_id
+        assert rec_data["listener_id"] == "child"
+        assert rec_data["persona_id"] == "xiao_s"
+
+    def test_pagination_params(self, client):
+        """Test pagination parameters on list endpoint."""
+        response = client.get("/api/recordings/?page=1&limit=10")
+        assert response.status_code == 200
+        data = response.json()
+        assert "recordings" in data
+        assert "total" in data
+        assert "page" in data
+        assert "limit" in data
+        assert "total_pages" in data
 
 
 class TestRecordingsUI:

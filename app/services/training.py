@@ -10,7 +10,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 
 logger = logging.getLogger(__name__)
 
@@ -36,12 +36,15 @@ class TrainingVersion:
     batch_size: int = 4
     final_loss: Optional[float] = None
     training_time_seconds: Optional[int] = None
-    num_recordings_used: int = 0
+    recording_ids_used: list[str] = field(default_factory=list)
+    num_recordings_used: int = 0  # Deprecated: use len(recording_ids_used) instead
     created_at: Optional[str] = None
     completed_at: Optional[str] = None
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        d["num_recordings_used"] = len(self.recording_ids_used)  # Always derive from list
+        return d
 
 
 @dataclass
@@ -83,7 +86,7 @@ class VersionManager:
         with open(VERSION_INDEX_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
-    def create_version(self, persona_id: str, num_recordings: int) -> TrainingVersion:
+    def create_version(self, persona_id: str, recording_ids: list[str]) -> TrainingVersion:
         """Create a new training version."""
         # Generate version ID
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -94,7 +97,7 @@ class VersionManager:
             version_id=version_id,
             persona_id=persona_id,
             status="training",
-            num_recordings_used=num_recordings,
+            recording_ids_used=recording_ids,
             created_at=datetime.now().isoformat(),
         )
 

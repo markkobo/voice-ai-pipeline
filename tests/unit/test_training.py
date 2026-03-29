@@ -82,11 +82,12 @@ class TestVersionManager:
         with patch("app.services.training.MODELS_DIR", Path(self.temp_dir)):
             with patch("app.services.training.VERSION_INDEX_FILE", self.index_file):
                 manager = VersionManager()
-                version = manager.create_version("xiao_s", num_recordings=5)
+                version = manager.create_version("xiao_s", recording_ids=["r1", "r2", "r3", "r4", "r5"])
 
                 assert version.persona_id == "xiao_s"
                 assert version.status == "training"
-                assert version.num_recordings_used == 5
+                assert len(version.recording_ids_used) == 5
+                assert version.recording_ids_used == ["r1", "r2", "r3", "r4", "r5"]
                 assert version.created_at is not None
                 assert "v1_" in version.version_id
 
@@ -95,7 +96,7 @@ class TestVersionManager:
         with patch("app.services.training.MODELS_DIR", Path(self.temp_dir)):
             with patch("app.services.training.VERSION_INDEX_FILE", self.index_file):
                 manager = VersionManager()
-                created = manager.create_version("xiao_s", num_recordings=5)
+                created = manager.create_version("xiao_s", recording_ids=["r1", "r2", "r3", "r4", "r5"])
 
                 retrieved = manager.get_version(created.version_id)
                 assert retrieved is not None
@@ -114,8 +115,8 @@ class TestVersionManager:
         with patch("app.services.training.MODELS_DIR", Path(self.temp_dir)):
             with patch("app.services.training.VERSION_INDEX_FILE", self.index_file):
                 manager = VersionManager()
-                v1 = manager.create_version("xiao_s", num_recordings=5)
-                v2 = manager.create_version("caregiver", num_recordings=3)
+                v1 = manager.create_version("xiao_s", recording_ids=["r1", "r2", "r3", "r4", "r5"])
+                v2 = manager.create_version("caregiver", recording_ids=["r1", "r2", "r3"])
 
                 all_versions = manager.list_versions()
                 assert len(all_versions) == 2
@@ -129,7 +130,7 @@ class TestVersionManager:
         with patch("app.services.training.MODELS_DIR", Path(self.temp_dir)):
             with patch("app.services.training.VERSION_INDEX_FILE", self.index_file):
                 manager = VersionManager()
-                version = manager.create_version("xiao_s", num_recordings=5)
+                version = manager.create_version("xiao_s", recording_ids=["r1", "r2", "r3", "r4", "r5"])
 
                 # Cannot activate before ready
                 result = manager.set_active_version(version.version_id)
@@ -151,7 +152,7 @@ class TestVersionManager:
         with patch("app.services.training.MODELS_DIR", Path(self.temp_dir)):
             with patch("app.services.training.VERSION_INDEX_FILE", self.index_file):
                 manager = VersionManager()
-                version = manager.create_version("xiao_s", num_recordings=5)
+                version = manager.create_version("xiao_s", recording_ids=["r1", "r2", "r3", "r4", "r5"])
 
                 manager.update_version_status(
                     version.version_id,
@@ -171,7 +172,7 @@ class TestVersionManager:
         with patch("app.services.training.MODELS_DIR", Path(self.temp_dir)):
             with patch("app.services.training.VERSION_INDEX_FILE", self.index_file):
                 manager = VersionManager()
-                version = manager.create_version("xiao_s", num_recordings=5)
+                version = manager.create_version("xiao_s", recording_ids=["r1", "r2", "r3", "r4", "r5"])
 
                 result = manager.delete_version(version.version_id)
                 assert result is True
@@ -184,7 +185,7 @@ class TestVersionManager:
         with patch("app.services.training.MODELS_DIR", Path(self.temp_dir)):
             with patch("app.services.training.VERSION_INDEX_FILE", self.index_file):
                 manager = VersionManager()
-                version = manager.create_version("xiao_s", num_recordings=5)
+                version = manager.create_version("xiao_s", recording_ids=["r1", "r2", "r3", "r4", "r5"])
                 manager.update_version_status(version.version_id, "ready")
                 manager.set_active_version(version.version_id)
 
@@ -206,7 +207,7 @@ class TestVersionManager:
                 assert status["is_training"] is False
 
                 # With training
-                version = manager.create_version("xiao_s", num_recordings=5)
+                version = manager.create_version("xiao_s", recording_ids=["r1", "r2", "r3", "r4", "r5"])
                 status = manager.get_training_status()
                 assert status["is_training"] is True
                 assert status["version_id"] == version.version_id
@@ -218,7 +219,7 @@ class TestVersionManager:
             with patch("app.services.training.VERSION_INDEX_FILE", self.index_file):
                 # Create and save a version
                 manager1 = VersionManager()
-                v1 = manager1.create_version("xiao_s", num_recordings=5)
+                v1 = manager1.create_version("xiao_s", recording_ids=["r1", "r2", "r3", "r4", "r5"])
                 manager1.update_version_status(v1.version_id, "ready")
 
                 # Load in new manager
