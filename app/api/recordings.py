@@ -282,6 +282,8 @@ async def trigger_processing(recording_id: str, background_tasks: BackgroundTask
 
     Pipeline: denoise → enhance → diarize → transcribe
     """
+    from app.services.recordings import run_processing_pipeline
+
     logger.info(f"[PIPELINE] Triggered for recording: {recording_id}")
 
     # Find recording
@@ -300,7 +302,6 @@ async def trigger_processing(recording_id: str, background_tasks: BackgroundTask
 
     # Start background processing
     metadata.update_status("processing")
-    # TODO: Call actual processing pipeline
-    # background_tasks.add_task(run_processing_pipeline, recording_id)
+    background_tasks.add_task(run_processing_pipeline, recording_id)
 
     return {"status": "processing_started", "recording_id": recording_id}

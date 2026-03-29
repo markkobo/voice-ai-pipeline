@@ -10,6 +10,7 @@ from .file_storage import (
 )
 from .metadata import RecordingMetadata, list_recordings_metadata, load_recording_metadata
 from .quality import AudioQualityAnalyzer, analyze_audio
+from .pipeline import AudioProcessingPipeline, run_processing_pipeline
 
 __all__ = [
     "RecordingPaths",
@@ -21,4 +22,6 @@ __all__ = [
     "load_recording_metadata",
     "AudioQualityAnalyzer",
     "analyze_audio",
+    "AudioProcessingPipeline",
+    "run_processing_pipeline",
 ]
