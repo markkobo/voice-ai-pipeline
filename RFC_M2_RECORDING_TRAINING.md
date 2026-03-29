@@ -840,26 +840,71 @@ GET /api/metrics/summary (JSON format)
 | Full fine-tune on RTX 5080 | Deferred | Future hardware upgrade |
 | Multi-speaker support | Deferred | MVP: single persona |
 | Knowledge base embedding | Deferred | Use OpenAI embeddings or local |
+| pyannote.audio torch conflict | Known Issue | pyannote upgrades torch, breaks CUDA graphs |
 
 ---
 
-## 14. Dependencies
+## 14. Dependencies & Installation Notes
+
+### PyTorch Version Conflict
+
+**IMPORTANT**: `pyannote.audio` installs latest torch by default, which breaks CUDA graphs (TTS acceleration).
+
+**Correct install order:**
+```bash
+# 1. Install torch FIRST (exact version required for CUDA graphs)
+pip install torch==2.6.0+cu124 torchaudio==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124
+
+# 2. Install pipeline packages
+pip install faster-whisper speechbrain pyannote.audio
+
+# 3. Restore torch if pyannote.audio broke it
+pip install torch==2.6.0+cu124 torchaudio==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124
+```
+
+### qwen-asr vs faster-whisper
+
+- **qwen-asr**: Real-time streaming ASR for WebSocket voice chat (low latency)
+- **faster-whisper**: Batch transcription for pipeline processing (high accuracy)
+
+They serve different purposes — not redundant.
+
+### System Dependencies
+
+```bash
+# Ubuntu/Debian
+sudo apt install ffmpeg    # Audio format conversion
+sudo apt install rnnoise   # Noise reduction
+```
+
+### Python Packages
 
 ```txt
-# Audio Processing
-rnnoise (C library) + pyrnnoise (Python binding)
+# Core
+torch==2.6.0+cu124           # MUST be exact version
+torchaudio==2.6.0+cu124
+fastapi>=0.100.0
+uvicorn>=0.23.0
+pydub>=0.25.0
+python-dotenv>=1.0.0
+
+# ASR - Real-time streaming
+qwen-asr>=0.0.6
+
+# TTS - Voice synthesis
+faster-qwen3-tts
+qwen-tts>=0.1.1
+
+# Pipeline - Batch processing
+faster-whisper>=1.0.0
 speechbrain>=1.0.0
 pyannote.audio>=3.0.0
-faster-whisper>=1.0.0
-
-# File Upload
-python-multipart (FastAPI)
-
-# Background Tasks
-fastapi.BackgroundTasks (MVP simplicity)
 
 # Metrics
 prometheus-client>=0.19.0
+
+# Background Tasks
+fastapi.BackgroundTasks (included with FastAPI)
 ```
 
 ---
@@ -1142,11 +1187,14 @@ f.write(content)
 
 ### 16.8 Priority Summary
 
-| Priority | Issues | Description |
-|----------|--------|-------------|
-| **P0** | ISSUE-1, ISSUE-3, ISSUE-5, ISSUE-6, ISSUE-8, ISSUE-9 | Critical fixes for production readiness |
-| **P1** | ISSUE-4, ISSUE-7, ISSUE-10, ISSUE-12 | Important improvements for next iteration |
-| **P2** | ISSUE-2, ISSUE-11, ISSUE-13, IMPROVE-1~5 | Nice-to-have / future work |
+> All issues resolved as of 2026-03-29 (commits 57cfc5c, 2ab187d, 08bd30c, 44db83f)
+
+| Priority | Issues | Status | Fix |
+|----------|--------|--------|-----|
+| **P0** | ISSUE-1, ISSUE-3, ISSUE-5, ISSUE-6, ISSUE-8, ISSUE-9 | ✅ Fixed | Caching, retry, pagination, stub docs, cleanup endpoint, training check |
+| **P1** | ISSUE-4, ISSUE-7, ISSUE-10, ISSUE-12 | ✅ Fixed | Skipped status, recording_ids list, streaming upload, integration tests |
+| **P2** | ISSUE-2, ISSUE-11, ISSUE-13, IMPROVE-1~5 | ✅ Fixed | Design doc, parallel TODO, filesystem tests, env var, logging |
+| **Known** | pyannote.audio torch conflict | ⚠️ Documented | Must restore torch after pyannote install |
 
 ---
 
