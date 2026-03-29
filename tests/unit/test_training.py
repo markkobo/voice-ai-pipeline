@@ -229,3 +229,28 @@ class TestVersionManager:
                 retrieved = manager2.get_version(v1.version_id)
                 assert retrieved is not None
                 assert retrieved.status == "ready"
+
+    def test_create_version_creates_lora_directory(self):
+        """Test that creating a version creates the actual LoRA directory."""
+        with patch("app.services.training.MODELS_DIR", Path(self.temp_dir)):
+            with patch("app.services.training.VERSION_INDEX_FILE", self.index_file):
+                manager = VersionManager()
+                version = manager.create_version("xiao_s", recording_ids=["r1", "r2"])
+
+                # Verify LoRA directory was created
+                lora_path = Path(self.temp_dir) / f"xiao_s_{version.version_id}"
+                assert lora_path.exists(), f"LoRA directory should exist at {lora_path}"
+                assert lora_path.is_dir(), "LoRA path should be a directory"
+
+    def test_delete_version_removes_lora_directory(self):
+        """Test that deleting a version removes the LoRA directory."""
+        with patch("app.services.training.MODELS_DIR", Path(self.temp_dir)):
+            with patch("app.services.training.VERSION_INDEX_FILE", self.index_file):
+                manager = VersionManager()
+                version = manager.create_version("xiao_s", recording_ids=["r1", "r2"])
+                lora_path = Path(self.temp_dir) / f"xiao_s_{version.version_id}"
+
+                assert lora_path.exists()
+
+                manager.delete_version(version.version_id)
+                assert not lora_path.exists(), "LoRA directory should be deleted"

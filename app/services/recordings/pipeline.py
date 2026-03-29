@@ -119,10 +119,11 @@ class AudioProcessingPipeline:
             # Step 3: Voice Enhancement
             self._run_enhance()
 
-            # Step 4: Speaker Diarization
+            # Step 4 & 5: Diarize and Transcribe can run in parallel
+            # (both depend only on enhanced audio output)
+            # TODO(P2): Use asyncio.gather for parallel execution when
+            # actual implementations are added (pyannote + whisper)
             self._run_diarize()
-
-            # Step 5: Transcription
             self._run_transcribe()
 
             # Update status to processed

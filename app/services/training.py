@@ -6,6 +6,7 @@ Manages LoRA training versions for TTS voice cloning.
 
 import json
 import logging
+import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -14,8 +15,8 @@ from dataclasses import dataclass, asdict, field
 
 logger = logging.getLogger(__name__)
 
-# Base directory for models
-MODELS_DIR = Path("/workspace/voice-ai-pipeline-1/data/models")
+# Base directory for models (configurable via env var)
+MODELS_DIR = Path(os.environ.get("MODELS_DIR", "/workspace/voice-ai-pipeline-1/data/models"))
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Version index file
