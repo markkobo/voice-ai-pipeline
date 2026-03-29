@@ -10,6 +10,7 @@ Pipeline steps:
 """
 
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Optional, Callable
@@ -373,9 +374,13 @@ class AudioProcessingPipeline:
 
                 # Load pyannote pipeline
                 self._log("Loading pyannote diarization model...")
+                hf_token = os.environ.get("HF_TOKEN")
+                if not hf_token:
+                    raise ValueError("HF_TOKEN not set in environment")
+                self._log(f"Using HF_TOKEN: {hf_token[:8]}...")
                 pipeline = Pipeline.from_pretrained(
                     "pyannote/speaker-diarization-3.1",
-                    use_auth_token=None  # Set HF token if needed
+                    use_auth_token=hf_token
                 )
 
                 # Move to GPU if available
