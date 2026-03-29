@@ -13,7 +13,7 @@ logger.info("Starting Voice AI Pipeline")
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import ws_asr, tts_stream, standalone_ui
+from app.api import ws_asr, tts_stream, standalone_ui, recordings, reference_data
 # gradio_ui imported lazily below to handle missing gradio
 
 # Import telemetry collector
@@ -42,6 +42,8 @@ app.add_middleware(
 app.include_router(ws_asr.router)
 app.include_router(tts_stream.router)
 app.include_router(standalone_ui.router)
+app.include_router(recordings.router)
+app.include_router(reference_data.router)
 
 print(f"[DEBUG] Routers included. Total routes: {len(app.routes)}")
 for r in app.routes:
