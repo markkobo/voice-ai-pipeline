@@ -484,7 +484,9 @@ async def recordings_page():
         async function loadRecordings() {
             try {
                 const response = await fetch('/api/recordings/');
-                const recordings = await response.json();
+                const data = await response.json();
+                // Handle both paginated {recordings: [...]} and legacy array responses
+                const recordings = Array.isArray(data) ? data : (data.recordings || []);
                 renderRecordings(recordings);
                 log(`Loaded ${recordings.length} recordings`, 'info', 'UI');
             } catch (e) {

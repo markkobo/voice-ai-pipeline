@@ -253,6 +253,10 @@ class MockTTSEngine:
         self.model_size = model_size
         self._is_loaded = True
 
+    def warmup(self):
+        """No-op warmup for mock engine."""
+        pass
+
     async def generate_streaming(
         self,
         text: str,
