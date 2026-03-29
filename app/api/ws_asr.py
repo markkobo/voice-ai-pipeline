@@ -402,12 +402,14 @@ async def websocket_endpoint(websocket: WebSocket):
 
                         # VAD commit — finalize audio and run ASR
                         asr_result = await state_manager.commit_utterance(session_id)
+
+                        # Skip if ASR returned empty (don't send to client)
+                        if not asr_result.get("text"):
+                            log.info(f"[{session_id}] ASR empty, skipping")
+                            continue
+
                         await websocket.send_text(json.dumps(asr_result))
                         log.info(f"[{session_id}] ASR done: {asr_result.get('text', '')[:50]}")
-
-                        # Skip LLM if ASR returned empty
-                        if not asr_result.get("text"):
-                            continue
 
                         # Get session config
                         persona_id = state.persona_id
