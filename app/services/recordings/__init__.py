@@ -9,6 +9,7 @@ from .file_storage import (
     VALID_PERSONA_IDS,
 )
 from .metadata import RecordingMetadata, list_recordings_metadata, load_recording_metadata
+from .quality import AudioQualityAnalyzer, analyze_audio
 
 __all__ = [
     "RecordingPaths",
@@ -18,4 +19,6 @@ __all__ = [
     "RecordingMetadata",
     "list_recordings_metadata",
     "load_recording_metadata",
+    "AudioQualityAnalyzer",
+    "analyze_audio",
 ]
