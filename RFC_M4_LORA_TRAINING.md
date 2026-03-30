@@ -137,9 +137,29 @@ class TrainingProgress:
     total_epochs: int
     current_loss: float
     best_loss: float
-    elapsed_seconds: int
-    eta_seconds: int
-    last_updated: datetime
+    epoch_times: list[float] = field(default_factory=list)  # seconds per epoch
+    elapsed_seconds: int = 0
+    eta_seconds: int = 0
+    progress_pct: int = 0  # 0-100
+    last_updated: datetime = None
+```
+
+### 3.4 TrainingProgress JSON (progress.json)
+
+```json
+{
+  "version_id": "v1_20260329_143022",
+  "status": "training",
+  "current_epoch": 3,
+  "total_epochs": 10,
+  "current_loss": 0.12,
+  "best_loss": 0.10,
+  "epoch_times": [42, 38, 41],
+  "elapsed_seconds": 121,
+  "eta_seconds": 281,
+  "progress_pct": 30,
+  "last_updated": "2026-03-29T14:35:22"
+}
 ```
 
 ---
@@ -202,9 +222,9 @@ Recording (多人對話)
 GET /api/training/versions/{id}/progress
 
 SSE Stream:
-data: {"event": "progress", "epoch": 3, "loss": 0.12, "step": 150, "best_loss": 0.10}
-data: {"event": "progress", "epoch": 3, "loss": 0.11, "step": 160, "best_loss": 0.10}
-data: {"event": "complete", "final_loss": 0.05, "training_time": 1800}
+data: {"event": "progress", "epoch": 3, "loss": 0.12, "best_loss": 0.10, "progress_pct": 30, "elapsed_seconds": 121, "eta_seconds": 281}
+data: {"event": "progress", "epoch": 4, "loss": 0.11, "best_loss": 0.10, "progress_pct": 40, "elapsed_seconds": 162, "eta_seconds": 243}
+data: {"event": "complete", "final_loss": 0.05, "training_time": 487}
 data: {"event": "error", "error": "CUDA OOM"}
 ```
 
@@ -318,7 +338,32 @@ Recording → Version Mapping:
 | LoRA Rank | 4, 8, 16, 32 | 16 |
 | Batch Size | 1, 2, 4, 8 | 4 |
 
-### 7.2 Fixed Settings
+### 7.2 Training Time Estimation
+
+Pre-training estimation based on audio duration and epochs:
+
+```python
+# Baseline: ~0.5 seconds training time per audio second per epoch (RTX 4090)
+# Adjustable based on actual benchmark
+TIME_PER_AUDIO_SECOND = 0.5  # seconds
+
+# Overhead factor for model loading, etc.
+OVERHEAD_FACTOR = 1.3
+
+estimated_seconds = (
+    total_audio_duration *
+    num_epochs *
+    TIME_PER_AUDIO_SECOND *
+    OVERHEAD_FACTOR
+)
+```
+
+Example:
+```
+75s audio × 10 epochs × 0.5 × 1.3 = 487s ≈ 8 minutes
+```
+
+### 7.3 Fixed Settings
 
 ```python
 learning_rate = 1e-4
@@ -425,7 +470,71 @@ class TrainingJob:
 
 ---
 
-## 10.断线重连 Strategy
+## 10. Progress Estimation & ETA
+
+### 10.1 ETA Algorithm
+
+```python
+def update_eta(progress: TrainingProgress) -> int:
+    """
+    Calculate ETA based on actual epoch times.
+    """
+    if progress.current_epoch >= 2 and progress.epoch_times:
+        # Use actual average epoch time
+        avg_time = sum(progress.epoch_times) / len(progress.epoch_times)
+        remaining_epochs = progress.total_epochs - progress.current_epoch
+        eta = avg_time * remaining_epochs
+    else:
+        # Fallback: estimate based on audio duration
+        estimated_per_epoch = total_audio_duration * TIME_PER_AUDIO_SECOND * OVERHEAD_FACTOR
+        eta = estimated_per_epoch * (progress.total_epochs - progress.current_epoch)
+
+    return max(0, int(eta))
+```
+
+### 10.2 Progress Percentage
+
+```python
+progress_pct = int((progress.current_epoch / progress.total_epochs) * 100)
+```
+
+### 10.3 Progress UI
+
+**Simple View:**
+```
+[Training xiao_s - v3]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+██████████████░░░░░░░░░░░░░░░  50%
+Epoch 5/10
+Loss: 0.120
+最佳 Loss: 0.100
+已用時間: 3:21
+預計剩餘: 3:21
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+[取消訓練]
+```
+
+**Detailed View (optional):**
+```
+[Training xiao_s - v3]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Epoch 5/10 ████████████░░░░░░  (50%)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Loss    ████████░░░░░░░░░░░░░  0.120
+Best    ██████████████░░░░░░░  0.100
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  已用: 3:21    預計: 3:21
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Loss history: [0.45, 0.32, 0.28, 0.22, 0.18, 0.15, 0.13, 0.12, 0.12, 0.12]
+```
+
+**MVP Decision**: Show simple view only (epoch, loss, %, time). Loss curve deferred to future.
+
+---
+
+## 11.断线重连 Strategy
 
 ```
 Training 開始
@@ -537,8 +646,10 @@ def synthesize(self, text, emotion_instruct):
 - [ ] M4.2: Training API endpoints + SSE
 - [ ] M4.3: Version Manager 擴展 (manifest)
 - [ ] M4.4: LoRA Trainer implementation
-- [ ] M4.5: Background job runner
-- [ ] M4.6: Training Selection UI
-- [ ] M4.7: Model Summary UI
-- [ ] M4.8: TTS LoRA integration
-- [ ] M4.9: Integration tests
+- [ ] M4.5: Background job runner + progress tracking
+- [ ] M4.6: Training time estimation (pre-training)
+- [ ] M4.7: Progress UI (epoch, loss, %, ETA)
+- [ ] M4.8: Training Selection UI
+- [ ] M4.9: Model Summary UI
+- [ ] M4.10: TTS LoRA integration
+- [ ] M4.11: Integration tests
