@@ -319,13 +319,18 @@ EMOTION_MAP = {
 **Goal**: 讓 TTS 聲音越來越像 client本人
 **Duration**: ~2 weeks
 
+**Detailed Specification**: See [RFC_M4_LORA_TRAINING.md](./RFC_M4_LORA_TRAINING.md)
+
 **Deliverables**:
 - [ ] LoRA/QLoRA fine-tuning pipeline using uploaded recordings
 - [ ] Training API: start / status / cancel
-- [ ] Progress tracking (epoch, loss) streamed to UI
-- [ ] Email notification on completion
+- [ ] Progress tracking (epoch, loss) streamed to UI (SSE)
+- [ ] Progress persisted to disk for断线重连
 - [ ] Trained LoRA adapter stored under `data/models/`
 - [ ] TTS loads LoRA adapter at runtime for voice-matched synthesis
+- [ ] Multi-speaker selection: per-recording speaker selection for training
+- [ ] Training selection UI with persona/recording/speaker filtering
+- [ ] Model summary page with version management
 
 **Acceptance**: Client uploads 10-20 seconds of voice × multiple recordings → system fine-tunes LoRA adapter → TTS speaks with client's voice characteristics.
 
@@ -350,12 +355,14 @@ EMOTION_MAP = {
 
 | Question | Status | Notes |
 |----------|--------|-------|
-| LoRA rank/alpha values | Deferred | Test during M4 |
-| Number of recordings needed for good LoRA | Deferred | MVP: try 5-10 recordings |
+| LoRA rank/alpha values | Decided | Client 可選 4, 8, 16, 32, default 16 |
+| Number of recordings needed | Decided | 至少 10s, 越多越好 |
 | Full fine-tune on RTX 5080 | Deferred | Future hardware upgrade |
-| Multi-speaker / multi-persona support | Deferred | MVP: single persona (xiao_s) |
+| Multi-speaker support | Decided | Speaker labeling + per-speaker selection |
 | Knowledge base embedding model | Deferred | Use OpenAI embeddings or local |
 | Email notification provider | Deferred | SMTP? SendGrid? |
+| Incremental vs Fresh training | Decided | Fresh training (每次獨立版本) |
+| Progress streaming | Decided | SSE + progress.json for断线重连 |
 
 ---
 
