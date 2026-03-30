@@ -7,6 +7,7 @@ falls back to Qwen3TTSModel (non-streaming) on CUDA errors.
 import asyncio
 import os
 import time
+from pathlib import Path
 from typing import AsyncIterator, Optional, List
 from dataclasses import dataclass
 
@@ -33,6 +34,7 @@ class FasterQwenTTSEngine:
 
     Tries FasterQwen3TTS (streaming, CUDA graphs) first.
     Falls back to Qwen3TTSModel (non-streaming) if CUDA graph capture fails.
+    Supports LoRA adapter loading for voice cloning.
     """
 
     # Model options
@@ -55,6 +57,7 @@ class FasterQwenTTSEngine:
         self._is_loaded = False
         self._use_fallback = False
         self._warmed_up = False
+        self._current_lora_path: Optional[str] = None
 
     def _ensure_loaded(self):
         """Lazy load the model(s)."""
@@ -85,6 +88,57 @@ class FasterQwenTTSEngine:
 
         # Ensure model is loaded first
         self._ensure_loaded()
+
+    def activate_version(self, version_id: str):
+        """
+        Load LoRA adapter for a training version.
+
+        Args:
+            version_id: The training version ID to activate
+        """
+        from app.services.training import get_version_manager
+
+        manager = get_version_manager()
+        version = manager.get_version(version_id)
+
+        if not version:
+            log.warning(f"[TTS] Version {version_id} not found")
+            return
+
+        if version.status != "ready":
+            log.warning(f"[TTS] Version {version_id} not ready (status: {version.status})")
+            return
+
+        if not version.lora_path:
+            log.warning(f"[TTS] Version {version_id} has no lora_path")
+            return
+
+        adapter_path = Path(version.lora_path) / "adapter"
+        if not adapter_path.exists():
+            log.warning(f"[TTS] LoRA adapter not found: {adapter_path}")
+            return
+
+        self._current_lora_path = str(adapter_path)
+        log.info(f"[TTS] Activated LoRA adapter: {adapter_path}")
+
+        # Reload model with LoRA if needed
+        self._ensure_loaded()
+        if self._raw_model is not None:
+            try:
+                from peft import PeftModel
+                # Reload with LoRA adapter
+                self._raw_model = PeftModel.from_pretrained(
+                    self._raw_model,
+                    str(adapter_path),
+                )
+                log.info(f"[TTS] LoRA adapter loaded onto raw model")
+            except Exception as e:
+                log.warning(f"[TTS] Failed to load LoRA onto raw model: {e}")
+
+    def deactivate_lora(self):
+        """Deactivate LoRA adapter and use base model."""
+        self._current_lora_path = None
+        log.info("[TTS] LoRA adapter deactivated")
 
         if self._use_fallback or self._raw_model is not None:
             log.info("Warmup skipped (using fallback model)")
@@ -252,9 +306,18 @@ class MockTTSEngine:
     def __init__(self, model_size: str = "0.6B"):
         self.model_size = model_size
         self._is_loaded = True
+        self._current_lora_path: Optional[str] = None
 
     def warmup(self):
         """No-op warmup for mock engine."""
+        pass
+
+    def activate_version(self, version_id: str):
+        """Mock activation - does nothing."""
+        pass
+
+    def deactivate_lora(self):
+        """Mock deactivation - does nothing."""
         pass
 
     async def generate_streaming(

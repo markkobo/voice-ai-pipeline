@@ -23,6 +23,10 @@ class RecordingMetadata:
         self.paths = paths
         self._data: dict = self._load_or_create()
 
+    def reload(self):
+        """Reload metadata from disk."""
+        self._data = self._load_or_create()
+
     def _load_or_create(self) -> dict:
         """Load existing metadata or create new structure."""
         if self.paths.metadata_path.exists():

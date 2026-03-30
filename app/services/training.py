@@ -7,6 +7,7 @@ Manages LoRA training versions for TTS voice cloning.
 import json
 import logging
 import os
+import shutil
 import time
 from datetime import datetime
 from pathlib import Path
@@ -44,7 +45,7 @@ class TrainingVersion:
 
     def to_dict(self) -> dict:
         d = asdict(self)
-        d["num_recordings_used"] = len(self.recording_ids_used)  # Always derive from list
+        d["num_recordings_used"] = len(self.recording_ids_used)
         return d
 
 
@@ -87,9 +88,16 @@ class VersionManager:
         with open(VERSION_INDEX_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
-    def create_version(self, persona_id: str, recording_ids: list[str]) -> TrainingVersion:
+    def create_version(
+        self,
+        persona_id: str,
+        recording_ids: list[str],
+        rank: int = 16,
+        learning_rate: float = 1e-4,
+        num_epochs: int = 10,
+        batch_size: int = 4,
+    ) -> TrainingVersion:
         """Create a new training version."""
-        # Generate version ID
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         existing_count = sum(1 for v in self._versions if v.persona_id == persona_id)
         version_id = f"v{existing_count + 1}_{timestamp}"
@@ -99,6 +107,10 @@ class VersionManager:
             persona_id=persona_id,
             status="training",
             recording_ids_used=recording_ids,
+            rank=rank,
+            learning_rate=learning_rate,
+            num_epochs=num_epochs,
+            batch_size=batch_size,
             created_at=datetime.now().isoformat(),
         )
 
@@ -181,17 +193,13 @@ class VersionManager:
         if not version:
             return False
 
-        # Don't delete if it's the active version
         if self._active_version and self._active_version.version_id == version_id:
             logger.warning(f"[TRAINING] Cannot delete active version: {version_id}")
             return False
 
-        # Remove from list
         self._versions = [v for v in self._versions if v.version_id != version_id]
 
-        # Delete files
         if version.lora_path:
-            import shutil
             lora_path = Path(version.lora_path)
             if lora_path.exists():
                 shutil.rmtree(lora_path)
@@ -213,6 +221,33 @@ class VersionManager:
             }
         return {"is_training": False}
 
+    def get_version_dir(self, version_id: str) -> Optional[Path]:
+        """Get version directory path."""
+        version = self.get_version(version_id)
+        if version and version.lora_path:
+            return Path(version.lora_path)
+        return None
+
+    def save_manifest(self, version_id: str, manifest: dict):
+        """Save training manifest."""
+        version_dir = self.get_version_dir(version_id)
+        if not version_dir:
+            return
+        manifest_path = version_dir / "manifest.json"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, ensure_ascii=False, indent=2)
+
+    def get_manifest(self, version_id: str) -> Optional[dict]:
+        """Load training manifest."""
+        version_dir = self.get_version_dir(version_id)
+        if not version_dir:
+            return None
+        manifest_path = version_dir / "manifest.json"
+        if not manifest_path.exists():
+            return None
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
 
 # Global version manager instance
 _version_manager: Optional[VersionManager] = None
@@ -224,3 +259,98 @@ def get_version_manager() -> VersionManager:
     if _version_manager is None:
         _version_manager = VersionManager()
     return _version_manager
+
+
+def get_training_audio_for_persona(
+    persona_id: str,
+    selected_recordings: list[dict],
+    speaker_selections: dict[str, str] = None,
+) -> list[tuple[Path, float, str]]:
+    """
+    Get training audio paths for a persona.
+
+    Args:
+        persona_id: Target persona to train
+        selected_recordings: List of recording metadata dicts
+        speaker_selections: {recording_id: speaker_id} - which speaker to use per recording
+
+    Returns:
+        List of (audio_path, duration_seconds, recording_id)
+    """
+    from app.services.recordings import RecordingPaths, RecordingMetadata
+
+    audio_files = []
+
+    for rec in selected_recordings:
+        rec_id = rec["recording_id"]
+        folder_name = rec.get("folder_name", "")
+
+        # Find recording paths
+        paths = None
+        for rp in RecordingPaths.__subclasses__() or []:
+            pass
+
+        # Find by folder name
+        recordings_dir = Path("/workspace/voice-ai-pipeline-1/data/recordings/raw")
+        for folder in recordings_dir.iterdir():
+            if folder.name == folder_name:
+                # Reconstruct RecordingPaths
+                parts = folder.name.split("_")
+                if len(parts) >= 3:
+                    listener_id = parts[0]
+                    # Find persona_id
+                    persona_candidate = "_".join(parts[1:-2])
+                    timestamp = "_".join(parts[-2:])
+                    if listener_id in {"child", "mom", "dad", "friend", "reporter", "elder", "default"}:
+                        paths = RecordingPaths(
+                            listener_id=listener_id,
+                            persona_id=rec.get("persona_id", "xiao_s"),
+                            timestamp=timestamp,
+                            recording_id=rec_id,
+                        )
+                break
+
+        if not paths:
+            continue
+
+        # Check speaker labels
+        speaker_labels = rec.get("speaker_labels", {})
+        metadata = RecordingMetadata(paths)
+        metadata.reload()
+
+        speaker_labels = metadata.data.get("speaker_labels", {})
+
+        # Determine which speaker to use
+        speaker_to_use = None
+
+        if speaker_selections and rec_id in speaker_selections:
+            # User explicitly selected a speaker
+            speaker_to_use = speaker_selections[rec_id]
+        elif speaker_labels:
+            # Find speaker labeled as target persona
+            for speaker_id, label in speaker_labels.items():
+                if label == persona_id:
+                    speaker_to_use = speaker_id
+                    break
+
+        # Get audio path
+        audio_path = None
+
+        if speaker_to_use and speaker_to_use != "full":
+            # Use specific speaker
+            speaker_audio = paths.speakers_folder / f"{speaker_to_use}.wav"
+            if speaker_audio.exists():
+                audio_path = speaker_audio
+        elif paths.enhanced_audio_path.exists():
+            # Use full enhanced audio
+            audio_path = paths.enhanced_audio_path
+        elif paths.denoised_audio_path.exists():
+            audio_path = paths.denoised_audio_path
+        elif paths.raw_audio_path.exists():
+            audio_path = paths.raw_audio_path
+
+        if audio_path and audio_path.exists():
+            duration = rec.get("duration_seconds", 0) or 30.0  # Estimate if unknown
+            audio_files.append((audio_path, duration, rec_id))
+
+    return audio_files
