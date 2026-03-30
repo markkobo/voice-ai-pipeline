@@ -90,9 +90,14 @@ class RecordingPaths:
         """Transcription as plain text (easy to move/copy)."""
         return self.raw_folder / "transcription.txt"
 
+    @property
+    def speakers_folder(self) -> Path:
+        """Folder for extracted speaker audio files."""
+        return self.raw_folder / "speakers"
+
     def create_folders(self) -> None:
         """Create all recording folders."""
-        for folder in [self.raw_folder, self.denoised_folder, self.enhanced_folder]:
+        for folder in [self.raw_folder, self.denoised_folder, self.enhanced_folder, self.speakers_folder]:
             folder.mkdir(parents=True, exist_ok=True)
 
     def save_audio(self, source_path: Path, stage: str = "raw") -> Path:

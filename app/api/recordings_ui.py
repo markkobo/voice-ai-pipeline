@@ -291,6 +291,91 @@ async def recordings_page():
         .quality-good { color: #00ff88; }
         .quality-bad { color: #ff4444; }
 
+        /* Inline edit */
+        .edit-btn {
+            background: #333;
+            color: #fff;
+            border: none;
+            padding: 2px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.75rem;
+            margin-left: 5px;
+        }
+        .edit-btn:hover { background: #555; }
+        .inline-edit {
+            background: #1a1a2e;
+            color: #fff;
+            border: 1px solid #00ccff;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            min-width: 100px;
+        }
+        .save-btn {
+            background: #00ccff;
+            color: #000;
+            border: none;
+            padding: 2px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.75rem;
+            margin-left: 4px;
+        }
+        .cancel-btn {
+            background: #666;
+            color: #fff;
+            border: none;
+            padding: 2px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.75rem;
+            margin-left: 4px;
+        }
+
+        /* Speaker labeling */
+        .speaker-section {
+            margin-top: 10px;
+            padding: 10px;
+            background: #0d1b2a;
+            border-radius: 6px;
+        }
+        .speaker-section-title {
+            font-size: 0.85rem;
+            color: #00ccff;
+            margin-bottom: 8px;
+        }
+        .speaker-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 6px;
+            font-size: 0.85rem;
+        }
+        .speaker-name {
+            font-family: monospace;
+            color: #aaa;
+            min-width: 100px;
+        }
+        .speaker-select {
+            background: #1a1a2e;
+            color: #fff;
+            border: 1px solid #333;
+            padding: 4px 8px;
+            border-radius: 4px;
+            min-width: 120px;
+        }
+        .speaker-audio-btn {
+            background: #333;
+            color: #fff;
+            border: none;
+            padding: 4px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.8rem;
+        }
+        .speaker-audio-btn:hover { background: #444; }
+
         /* Transcription */
         .transcription {
             margin-top: 10px;
@@ -488,6 +573,7 @@ async def recordings_page():
                 // Handle both paginated {recordings: [...]} and legacy array responses
                 const recordings = Array.isArray(data) ? data : (data.recordings || []);
                 renderRecordings(recordings);
+                applySpeakerLabelDefaults();
                 log(`Loaded ${recordings.length} recordings`, 'info', 'UI');
             } catch (e) {
                 log(`Failed to load recordings: ${e.message}`, 'error', 'UI');
@@ -508,6 +594,11 @@ async def recordings_page():
                     ? `<span class="${quality.training_ready ? 'quality-good' : 'quality-bad'}">${quality.training_ready ? '✓ 可用於訓練' : '⚠ 品質不足'}</span>`
                     : '';
 
+                const speakers = r.speaker_segments || [];
+                const uniqueSpeakers = [...new Set(speakers.map(s => s.speaker_id))].sort();
+                const speakerLabels = r.speaker_labels || {};
+                const speakerSectionHtml = uniqueSpeakers.length > 0 ? renderSpeakerSection(r.recording_id, uniqueSpeakers, speakerLabels) : '';
+
                 return `
                     <div class="recording-card" data-id="${r.recording_id}">
                         <div class="recording-info">
@@ -515,14 +606,20 @@ async def recordings_page():
                                 ${r.title || r.folder_name || r.recording_id}
                                 <span class="recording-badge ${statusClass}">${r.status}</span>
                             </div>
-                            <div class="recording-meta">
-                                <span>👤 ${r.listener_id || 'unknown'}</span>
-                                <span>🎭 ${r.persona_id || 'unknown'}</span>
+                            <div class="recording-meta" id="meta-${r.recording_id}">
+                                <span>👤 <span id="listener-display-${r.recording_id}">${r.listener_id || 'unknown'}</span>
+                                    <button class="edit-btn" onclick="showEditField('${r.recording_id}', 'listener')">✎</button>
+                                </span>
+                                <span>🎭 <span id="persona-display-${r.recording_id}">${r.persona_id || 'unknown'}</span>
+                                    <button class="edit-btn" onclick="showEditField('${r.recording_id}', 'persona')">✎</button>
+                                </span>
                                 <span>⏱ ${r.duration_seconds ? r.duration_seconds.toFixed(1) + 's' : '-'}</span>
                                 <span>📅 ${r.created_at ? new Date(r.created_at).toLocaleDateString('zh-TW') : '-'}</span>
+                                ${uniqueSpeakers.length > 0 ? `<span>🔊 ${uniqueSpeakers.length} speakers</span>` : ''}
                             </div>
                             ${qualityHtml ? `<div class="quality-info">${qualityHtml}</div>` : ''}
                             ${r.transcription && r.transcription.text ? `<div class="transcription">${r.transcription.text.substring(0, 100)}...</div>` : ''}
+                            ${speakerSectionHtml}
                         </div>
                         <div class="recording-actions">
                             ${r.status === 'processed' || r.status === 'raw' ? `<button class="action-btn play" onclick="playRecording('${r.recording_id}')">▶</button>` : ''}
@@ -531,6 +628,132 @@ async def recordings_page():
                     </div>
                 `;
             }).join('');
+        }
+
+        // Render speaker labeling section
+        function renderSpeakerSection(recordingId, speakers, labels) {
+            const personaOptions = `
+                <option value="xiao_s">小S</option>
+                <option value="caregiver">照護者</option>
+                <option value="elder_gentle">長輩-溫柔</option>
+                <option value="elder_playful">長輩-活潑</option>
+            `;
+
+            const speakerRows = speakers.map(s => {
+                const currentLabel = labels[s] || '';
+                return `
+                    <div class="speaker-row">
+                        <span class="speaker-name">${s}</span>
+                        <select class="speaker-select" id="speaker-${s}-${recordingId}" data-initial-value="${currentLabel}" onchange="updateSpeakerLabel('${recordingId}', '${s}', this.value)">
+                            <option value="">-- 未標記 --</option>
+                            ${personaOptions}
+                        </select>
+                        <button class="speaker-audio-btn" onclick="playSpeakerAudio('${recordingId}', '${s}')">▶ 播放</button>
+                    </div>
+                `;
+            }).join('');
+
+            return `
+                <div class="speaker-section">
+                    <div class="speaker-section-title">🔊 說話者標記</div>
+                    ${speakerRows}
+                </div>
+            `;
+        }
+
+        // Apply initial speaker label values after rendering
+        function applySpeakerLabelDefaults() {
+            document.querySelectorAll('.speaker-select[data-initial-value]').forEach(select => {
+                const initialValue = select.getAttribute('data-initial-value');
+                if (initialValue) {
+                    select.value = initialValue;
+                }
+            });
+        }
+
+        // Show inline edit field
+        function showEditField(recordingId, field) {
+            const displayEl = document.getElementById(`${field}-display-${recordingId}`);
+            if (!displayEl) return;
+
+            const currentValue = displayEl.textContent.trim();
+            const options = field === 'listener'
+                ? `<option value="child">child</option><option value="mom">mom</option><option value="dad">dad</option><option value="friend">friend</option><option value="reporter">reporter</option><option value="elder">elder</option><option value="default">default</option>`
+                : `<option value="xiao_s">xiao_s</option><option value="caregiver">caregiver</option><option value="elder_gentle">elder_gentle</option><option value="elder_playful">elder_playful</option>`;
+
+            displayEl.innerHTML = `
+                <select class="inline-edit" id="edit-${field}-${recordingId}">
+                    ${options}
+                </select>
+                <button class="save-btn" onclick="saveEdit('${recordingId}', '${field}')">儲存</button>
+                <button class="cancel-btn" onclick="cancelEdit('${recordingId}', '${field}', '${currentValue}')">取消</button>
+            `;
+            document.getElementById(`edit-${field}-${recordingId}`).value = currentValue;
+        }
+
+        // Save edited field
+        async function saveEdit(recordingId, field) {
+            const newValue = document.getElementById(`edit-${field}-${recordingId}`).value;
+            try {
+                const response = await fetch(`/api/recordings/${recordingId}`, {
+                    method: 'PATCH',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({[field === 'listener' ? 'listener_id' : 'persona_id']: newValue})
+                });
+                if (!response.ok) throw new Error('Update failed');
+                loadRecordings();
+                log(`Updated ${field} to ${newValue}`, 'info', 'UI');
+            } catch (e) {
+                log(`Update failed: ${e.message}`, 'error', 'UI');
+            }
+        }
+
+        // Cancel edit
+        function cancelEdit(recordingId, field, originalValue) {
+            const displayEl = document.getElementById(`${field}-display-${recordingId}`);
+            if (displayEl) {
+                displayEl.textContent = originalValue;
+            }
+        }
+
+        // Update speaker label
+        async function updateSpeakerLabel(recordingId, speakerId, personaId) {
+            try {
+                // Get current labels
+                const response = await fetch(`/api/recordings/${recordingId}/speakers`);
+                const info = await response.json();
+                const labels = {...info.speaker_labels};
+                labels[speakerId] = personaId || undefined;
+
+                // Remove undefined keys
+                Object.keys(labels).forEach(k => labels[k] === undefined && delete labels[k]);
+
+                // Update
+                const updateResponse = await fetch(`/api/recordings/${recordingId}/speakers`, {
+                    method: 'PATCH',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({speaker_labels: labels})
+                });
+                if (!updateResponse.ok) throw new Error('Update failed');
+                log(`Labeled ${speakerId} as ${personaId || '(unlabeled)'}`, 'info', 'UI');
+            } catch (e) {
+                log(`Speaker label update failed: ${e.message}`, 'error', 'UI');
+            }
+        }
+
+        // Play speaker audio
+        async function playSpeakerAudio(recordingId, speakerId) {
+            log(`Playing speaker audio: ${speakerId}`, 'info', 'PLAYBACK');
+            try {
+                const response = await fetch(`/api/recordings/${recordingId}/speaker/${speakerId}/audio`);
+                if (!response.ok) throw new Error('Speaker audio not available');
+                const blob = await response.blob();
+                const url = URL.createObjectURL(blob);
+                const audio = new Audio(url);
+                audio.play();
+            } catch (e) {
+                log(`Speaker playback failed: ${e.message}`, 'error', 'PLAYBACK');
+            }
         }
 
         // Play recording

@@ -58,6 +58,7 @@ class RecordingMetadata:
                 "transcribe": {"status": "pending", "progress": 0, "error_message": None, "started_at": None, "completed_at": None},
             },
             "speaker_segments": [],
+            "speaker_labels": {},  # {"SPEAKER_00": "xiao_s", "SPEAKER_01": "mom"}
             "pipeline_metrics": {
                 "denoise_ms": None,
                 "enhance_ms": None,
@@ -179,6 +180,24 @@ class RecordingMetadata:
         """Save transcription as plain text file."""
         with open(self.paths.transcription_path, "w", encoding="utf-8") as f:
             f.write(text)
+
+    def update_speaker_labels(self, labels: dict) -> None:
+        """Update speaker labels mapping.
+
+        Args:
+            labels: Dict mapping speaker_id to persona_id, e.g., {"SPEAKER_00": "xiao_s", "SPEAKER_01": "mom"}
+        """
+        self._data["speaker_labels"] = labels
+        self.save()
+
+    def update_speaker_segments(self, segments: list) -> None:
+        """Update speaker segments from diarization.
+
+        Args:
+            segments: List of speaker segments with speaker_id, start_time, end_time
+        """
+        self._data["speaker_segments"] = segments
+        self.save()
 
     def is_expired(self) -> bool:
         """Check if processed files should be auto-deleted."""

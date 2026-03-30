@@ -129,6 +129,9 @@ class AudioProcessingPipeline:
             self._run_diarize()
             self._run_transcribe()
 
+            # Step 6: Extract speaker audio files
+            self._extract_speakers()
+
             # Update status to processed
             self.metadata.update_status("processed")
 
@@ -403,8 +406,7 @@ class AudioProcessingPipeline:
                 elapsed_ms = int((time.time() - start_time) * 1000)
 
                 # Store speaker segments in metadata
-                self.metadata._data["speaker_segments"] = speaker_segments
-                self.metadata.save()
+                self.metadata.update_speaker_segments(speaker_segments)
 
                 self.metadata.update_processing_step(
                     "transcribe", "done",
@@ -424,8 +426,7 @@ class AudioProcessingPipeline:
                 else:
                     # Fallback: empty speaker segments
                     self._log(f"Diarize failed, using empty segments: {e}", "WARNING")
-                    self.metadata._data["speaker_segments"] = []
-                    self.metadata.save()
+                    self.metadata.update_speaker_segments([])
 
                     elapsed_ms = int((time.time() - start_time) * 1000)
                     self.metadata.update_processing_step(
@@ -434,6 +435,63 @@ class AudioProcessingPipeline:
                         duration_ms=elapsed_ms
                     )
                     self._log(f"Diarize fallback: no speaker segments")
+
+    def _extract_speakers(self):
+        """Extract audio for each speaker from diarization segments.
+
+        Creates individual WAV files for each speaker in the speakers/ folder.
+        Each file is named: SPEAKER_XX.wav
+        """
+        self._log("Step 6: Extracting speaker audio")
+
+        speaker_segments = self.metadata._data.get("speaker_segments", [])
+        if not speaker_segments:
+            self._log("No speaker segments to extract")
+            return
+
+        # Find the best available audio (enhanced > denoised > raw)
+        audio_path = self.paths.enhanced_audio_path
+        if not audio_path.exists():
+            audio_path = self.paths.denoised_audio_path
+        if not audio_path.exists():
+            audio_path = self.paths.raw_audio_path
+
+        if not audio_path.exists():
+            self._log(f"Audio file not found: {audio_path}")
+            return
+
+        try:
+            import soundfile as sf
+
+            # Load full audio
+            full_audio, sample_rate = sf.read(str(audio_path))
+            self._log(f"Loaded audio: {len(full_audio)} samples at {sample_rate}Hz")
+
+            # Create speakers folder
+            self.paths.speakers_folder.mkdir(parents=True, exist_ok=True)
+
+            # Group segments by speaker
+            speaker_audio = {}
+            for seg in speaker_segments:
+                speaker_id = seg["speaker_id"]
+                start_sample = int(seg["start_time"] * sample_rate)
+                end_sample = int(seg["end_time"] * sample_rate)
+
+                if speaker_id not in speaker_audio:
+                    speaker_audio[speaker_id] = []
+                speaker_audio[speaker_id].append(full_audio[start_sample:end_sample])
+
+            # Save each speaker's audio
+            for speaker_id, audio_chunks in speaker_audio.items():
+                speaker_audio_combined = np.concatenate(audio_chunks)
+                speaker_path = self.paths.speakers_folder / f"{speaker_id}.wav"
+                sf.write(str(speaker_path), speaker_audio_combined, sample_rate)
+                self._log(f"Extracted {speaker_id}: {len(speaker_audio_combined)} samples ({len(audio_chunks)} segments)")
+
+            self._log(f"Speaker extraction complete: {len(speaker_audio)} speakers")
+
+        except Exception as e:
+            self._log(f"Speaker extraction failed: {e}", "WARNING")
 
     def _run_transcribe(self):
         """Run transcription using Whisper (faster-whisper)."""

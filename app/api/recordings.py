@@ -304,6 +304,30 @@ async def download_recording(recording_id: str):
     raise HTTPException(501, "Not implemented yet")
 
 
+@router.get("/{recording_id}/speaker/{speaker_id}/audio")
+async def get_speaker_audio(recording_id: str, speaker_id: str):
+    """
+    Stream audio file for a specific speaker.
+
+    Args:
+        recording_id: Recording ID
+        speaker_id: Speaker ID (e.g., "SPEAKER_00")
+    """
+    for paths in list_all_recordings():
+        if paths.recording_id == recording_id:
+            speaker_path = paths.speakers_folder / f"{speaker_id}.wav"
+            if not speaker_path.exists():
+                raise HTTPException(404, f"Speaker audio not found: {speaker_id}")
+
+            return FileResponse(
+                str(speaker_path),
+                media_type="audio/wav",
+                filename=f"{speaker_id}.wav",
+            )
+
+    raise HTTPException(404, "Recording not found")
+
+
 @router.get("/{recording_id}/transcription")
 async def get_transcription(recording_id: str):
     """Get recording transcription."""
@@ -311,6 +335,77 @@ async def get_transcription(recording_id: str):
         if paths.recording_id == recording_id:
             metadata = RecordingMetadata(paths)
             return metadata.data.get("transcription", {})
+
+    raise HTTPException(404, "Recording not found")
+
+
+@router.patch("/{recording_id}/speakers")
+async def update_speaker_labels(recording_id: str, update: dict):
+    """
+    Update speaker labels for a recording.
+
+    Args:
+        update: {"speaker_labels": {"SPEAKER_00": "xiao_s", "SPEAKER_01": "mom"}}
+
+    This maps extracted speaker files to personas for selective training.
+    """
+    for paths in list_all_recordings():
+        if paths.recording_id == recording_id:
+            metadata = RecordingMetadata(paths)
+
+            if "speaker_labels" not in update:
+                raise HTTPException(400, "speaker_labels field required")
+
+            labels = update["speaker_labels"]
+            if not isinstance(labels, dict):
+                raise HTTPException(400, "speaker_labels must be a dict")
+
+            # Validate persona IDs
+            for speaker_id, persona_id in labels.items():
+                if persona_id not in VALID_PERSONA_IDS:
+                    raise HTTPException(400, f"Invalid persona_id '{persona_id}' for speaker '{speaker_id}'")
+
+            metadata.update_speaker_labels(labels)
+            return {
+                "status": "updated",
+                "recording_id": recording_id,
+                "speaker_labels": labels,
+            }
+
+    raise HTTPException(404, "Recording not found")
+
+
+@router.get("/{recording_id}/speakers")
+async def get_speaker_info(recording_id: str):
+    """
+    Get speaker information for a recording.
+
+    Returns speaker segments and current labels.
+    """
+    for paths in list_all_recordings():
+        if paths.recording_id == recording_id:
+            metadata = RecordingMetadata(paths)
+
+            # Get existing labels
+            labels = metadata.data.get("speaker_labels", {})
+
+            # Get unique speakers from segments
+            segments = metadata.data.get("speaker_segments", [])
+            unique_speakers = sorted(set(seg["speaker_id"] for seg in segments))
+
+            # Get available speaker audio files
+            speaker_files = []
+            if paths.speakers_folder.exists():
+                for f in sorted(paths.speakers_folder.glob("*.wav")):
+                    speaker_files.append(f.name)
+
+            return {
+                "recording_id": recording_id,
+                "speakers": unique_speakers,
+                "speaker_labels": labels,
+                "speaker_files": speaker_files,
+                "segment_count": len(segments),
+            }
 
     raise HTTPException(404, "Recording not found")
 
