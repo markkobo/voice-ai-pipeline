@@ -30,6 +30,12 @@ speechbrain>=1.0.0
 pyannote.audio>=3.0.0
 noisereduce>=3.0.0
 
+# LoRA Fine-tuning (M4)
+transformers>=4.40.0
+peft>=0.10.0
+datasets>=2.18.0
+accelerate>=0.28.0
+
 # Testing
 pytest>=7.4.0
 pytest-asyncio>=0.21.0
