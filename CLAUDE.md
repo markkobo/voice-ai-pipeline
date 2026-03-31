@@ -21,13 +21,19 @@ pip install -r requirements.txt
 cp .env.example .env  # then fill in OPENAI_API_KEY, HF_TOKEN if needed
 
 # Run server (port 8080, Qwen3-ASR + Qwen3-TTS)
-python -m app.main
+bash scripts/restart.sh
+
+# Watch mode — auto-reload on code changes (for development)
+bash scripts/restart.sh --watch
+
+# Force full restart (after env var changes, TTS reload needed)
+bash scripts/restart.sh --force
+
+# Just verify server is up
+bash scripts/restart.sh --ui
 
 # Run with mock services for testing
-USE_QWEN_ASR=false USE_MOCK_TTS=true python -m app.main
-
-# Run with mock LLM
-USE_MOCK_LLM=true python -m app.main
+USE_QWEN_ASR=false USE_MOCK_TTS=true bash scripts/restart.sh
 ```
 
 **Ports**: Server on `8080`, Prometheus metrics on `9090`.
@@ -142,7 +148,7 @@ python3 -c "import torch; import torchaudio; print(torch.__version__, torchaudio
 pip install torchaudio==2.4.1+cu121 --index-url https://download.pytorch.org/whl/cu121
 
 # Use mock TTS for testing
-USE_MOCK_TTS=true python -m app.main
+USE_MOCK_TTS=true bash scripts/restart.sh --force
 ```
 
 ## UI
@@ -202,11 +208,14 @@ USE_QWEN_ASR=false pytest tests/test_ws_asr.py::TestWebSocketIntegration -v
 
 5. **server --port flag**: `uvicorn.run` in `main.py` hardcodes port 8080. Change `app/main.py:112` if needed.
 
-## Recent Fixes (2026-03-25)
+## Recent Fixes (2026-03-31)
 
-- **TTS fallback**: `FasterQwenTTSEngine` now falls back to `Qwen3TTSModel` when CUDA graph capture fails (common in containerized/VM environments)
-- **torchaudio CUDA mismatch**: Fixed by installing `torchaudio==2.4.1+cu121` matching PyTorch's CUDA 12.1
-- **Wrong TTS method**: Was calling `generate_voice_clone_streaming(instruct=...)` — correct is `generate_voice_design_streaming(instruct=...)`
-- **Emotion tag in display**: EmotionMapper now strips tag before display; `ttsText` used for TTS URL (not `msg.text`)
-- **tts_ready re-fetch storm**: Server now sends `tts_ready` only once per utterance
-- **Model size**: Default TTS model changed from 0.6B → 1.7B VoiceDesign
+- **VAD auto-send**: `process_audio()` now correctly returns `vad_commit` when silence is detected after speech (was inverted — returned on speech, not silence)
+- **VAD barge-in**: New speech during active utterance cancels LLM+TTS via `_vad_had_speech` + `_vad_committed` tracking in SessionState
+- **UI vad_commit handler**: Now calls `stopRecordingAndSend()` to actually send audio to server (was only resetting UI flags)
+- **WS binary + HTTP overlap**: Added `wsBinaryActive` flag — when WS binary TTS chunks stream, HTTP `tts_ready` fetch is skipped to prevent duplicate overlapping audio
+- **TTS fallback**: Streaming path now falls back to non-streaming `generate_voice_design()` within the same call when CUDA graph errors occur (was ignoring errors and returning empty audio)
+- **Auto-merge after training**: Training pipeline now calls `merge_lora()` after success, auto-activates merged model, sets status="merging" in progress.json
+- **Startup merged model**: `preload_tts()` activates latest ready merged model BEFORE warmup (avoids loading base model twice)
+- **activate_version()**: Now skips reload if same merged model already active
+- **Smart restart script**: `scripts/restart.sh` auto-detects code changes via git hash; `--watch` mode for auto-reload on file changes
