@@ -285,13 +285,13 @@ EMOTION_MAP = {
 **Duration**: ~1 week
 
 **Deliverables**:
-- [ ] WebRTC browser recording (with WebAudio PCM capture)
-- [ ] File upload endpoint (WAV, MP3, etc.)
-- [ ] Parsing pipeline: ASR transcription per recording
-- [ ] Recording metadata storage + list/delete/play UI
-- [ ] Voice profile management: upload reference audio per persona/listener
-- [ ] Background training state tracker (does NOT block UI)
-- [ ] Web UI: background management page with recording list
+- [x] WebRTC browser recording (with WebAudio PCM capture)
+- [x] File upload endpoint (WAV, MP3, etc.)
+- [x] Parsing pipeline: ASR transcription per recording
+- [x] Recording metadata storage + list/delete/play UI
+- [x] Voice profile management: upload reference audio per persona/listener
+- [x] Background training state tracker (does NOT block UI)
+- [x] Web UI: background management page with recording list
 
 **Acceptance**: Client can record voice in browser, see parsed transcriptions, upload reference audio files, manage recordings.
 
