@@ -58,23 +58,31 @@ echo ""
 
 # Step 1: Kill existing processes
 echo -e "${YELLOW}[1/5] Killing existing processes...${NC}"
-pkill -f "python -m app.main" 2>/dev/null || true
-pkill -f "uvicorn app.main" 2>/dev/null || true
 
-# Wait for ports to be released
-sleep 2
-
-# Check if ports are still in use
-if lsof -i :$PORT 2>/dev/null; then
-    echo -e "${RED}Port $PORT is still in use. Trying to force kill...${NC}"
-    lsof -t -i :$PORT | xargs -r kill -9 2>/dev/null || true
-    sleep 2
+# Kill by PID file if it exists
+if [ -f /tmp/voice-ai-server.pid ]; then
+    kill -9 $(cat /tmp/voice-ai-server.pid) 2>/dev/null || true
+    rm -f /tmp/voice-ai-server.pid
 fi
 
-if lsof -i :9090 2>/dev/null; then
-    echo -e "${RED}Port 9090 (metrics) is still in use. Trying to force kill...${NC}"
-    lsof -t -i :9090 | xargs -r kill -9 2>/dev/null || true
-    sleep 1
+# Kill any process on our ports
+for pid in $(lsof -ti :$PORT 2>/dev/null || true); do
+    kill -9 $pid 2>/dev/null || true
+done
+for pid in $(lsof -ti :9090 2>/dev/null || true); do
+    kill -9 $pid 2>/dev/null || true
+done
+
+# Also kill any stray app.main processes
+pkill -9 -f "python3 -m app.main" 2>/dev/null || true
+pkill -9 -f "uvicorn app.main" 2>/dev/null || true
+
+# Wait for ports to be released
+sleep 3
+
+# Verify ports are free
+if lsof -i :$PORT 2>/dev/null; then
+    echo -e "${RED}Port $PORT still in use after kill${NC}"
 fi
 
 echo -e "${GREEN}✓ Processes killed${NC}"
@@ -98,8 +106,9 @@ export PYTHONUNBUFFERED=1
 
 # Start in background
 cd /workspace/voice-ai-pipeline-1
-nohup python -m app.main > "$LOG_FILE" 2>&1 &
+nohup python3 -m app.main > "$LOG_FILE" 2>&1 &
 SERVER_PID=$!
+echo $SERVER_PID > /tmp/voice-ai-server.pid
 
 echo "Server PID: $SERVER_PID"
 echo "Log file: $LOG_FILE"
@@ -110,7 +119,7 @@ echo -e "${YELLOW}[4/5] Waiting for server startup...${NC}"
 max_wait=60
 counter=0
 while [ $counter -lt $max_wait ]; do
-    if curl -s "http://localhost:$PORT/api/personas" > /dev/null 2>&1; then
+    if curl -s "http://localhost:$PORT/health" > /dev/null 2>&1; then
         echo -e "${GREEN}✓ Server is ready!${NC}"
         break
     fi
@@ -142,10 +151,10 @@ fi
 echo -e "${YELLOW}[5/5] Verifying endpoints...${NC}"
 
 endpoints=(
+    "/health"
     "/api/personas"
     "/api/listeners"
-    "/api/recordings/stats"
-    "/api/training/status"
+    "/api/training/versions"
 )
 
 all_ok=true
@@ -163,6 +172,7 @@ echo -e "${GREEN}=== Server Started Successfully ===${NC}"
 echo ""
 echo "  Main UI:      http://localhost:$PORT/ui"
 echo "  Recordings:   http://localhost:$PORT/ui/recordings"
+echo "  Training:     http://localhost:$PORT/ui/training"
 echo "  API Docs:     http://localhost:$PORT/docs"
 echo "  Metrics:      http://localhost:$PORT:9090/metrics"
 echo "  Log:          $LOG_FILE"
