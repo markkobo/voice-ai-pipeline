@@ -68,9 +68,10 @@ async def api_update_persona(persona_id: str, body: PersonaUpdate):
     """Update persona name."""
     if is_fixed_persona(persona_id):
         raise HTTPException(400, "Cannot rename fixed persona via this API")
-    persona = update_persona(persona_id, name=body.name)
-    if not persona:
-        raise HTTPException(404, f"Persona not found: {persona_id}")
+    try:
+        persona = update_persona(persona_id, name=body.name)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
     return persona
 
 
@@ -80,9 +81,7 @@ async def api_delete_persona(persona_id: str):
     if is_fixed_persona(persona_id):
         raise HTTPException(400, f"Cannot delete fixed persona: '{persona_id}'")
     try:
-        success = delete_persona(persona_id)
+        delete_persona(persona_id)
     except ValueError as e:
-        raise HTTPException(400, str(e))
-    if not success:
-        raise HTTPException(404, f"Persona not found: {persona_id}")
+        raise HTTPException(404, str(e))
     return {"status": "deleted", "persona_id": persona_id}

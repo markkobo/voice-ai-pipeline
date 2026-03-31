@@ -4,6 +4,7 @@ Listener service — manages listener definitions (family + dynamic guests).
 Listeners are stored in data/listeners/listeners.json
 """
 
+import fcntl
 import json
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +15,26 @@ logger = logging.getLogger(__name__)
 
 DATA_DIR = Path("data/listeners")
 DATA_FILE = DATA_DIR / "listeners.json"
+_LOCK_FILE = DATA_DIR / ".listeners.lock"
+
+
+def _with_lock(mode: str, callback):
+    """
+    Execute a callback while holding an exclusive flock on _LOCK_FILE.
+    """
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _LOCK_FILE.touch(exist_ok=True)
+    with open(_LOCK_FILE, "r") as lockf:
+        fcntl.flock(lockf.fileno(), fcntl.LOCK_EX)
+        try:
+            f = open(DATA_FILE, mode, encoding="utf-8")
+            try:
+                result = callback(f)
+            finally:
+                f.close()
+            return result
+        finally:
+            fcntl.flock(lockf.fileno(), fcntl.LOCK_UN)
 
 
 # Pre-seeded listeners
@@ -28,11 +49,11 @@ SEED_LISTENERS = [
 ]
 
 
-def _load_listeners() -> list[dict]:
-    """Load listeners from JSON file, seeding defaults if missing."""
+def _load_listeners_unlocked() -> list[dict]:
+    """Load listeners from JSON file, seeding defaults if missing. Caller must hold lock."""
     if not DATA_FILE.exists():
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        _save_listeners(SEED_LISTENERS)
+        _save_listeners_unlocked(SEED_LISTENERS.copy())
         return SEED_LISTENERS.copy()
 
     with open(DATA_FILE, "r", encoding="utf-8") as f:
@@ -47,11 +68,20 @@ def _load_listeners() -> list[dict]:
     return stored
 
 
-def _save_listeners(listeners: list[dict]) -> None:
-    """Save listeners to JSON file."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+def _save_listeners_unlocked(listeners: list[dict]) -> None:
+    """Save listeners to JSON file. Caller must hold lock."""
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(listeners, f, ensure_ascii=False, indent=2)
+
+
+def _load_listeners() -> list[dict]:
+    """Load listeners (thread-safe)."""
+    return _with_lock("r", lambda f: _load_listeners_unlocked())
+
+
+def _save_listeners(listeners: list[dict]) -> None:
+    """Save listeners (thread-safe)."""
+    _with_lock("r", lambda f: _save_listeners_unlocked(listeners))
 
 
 def list_listeners() -> list[dict]:
@@ -76,52 +106,63 @@ def create_listener(listener_id: str, name: str, is_family: bool = False,
     Raises:
         ValueError: if listener_id already exists
     """
-    listeners = _load_listeners()
+    def _txn(f):
+        listeners = _load_listeners_unlocked()
 
-    existing_ids = {l["listener_id"] for l in listeners}
-    if listener_id in existing_ids:
-        raise ValueError(f"Listener '{listener_id}' already exists")
+        existing_ids = {l["listener_id"] for l in listeners}
+        if listener_id in existing_ids:
+            raise ValueError(f"Listener '{listener_id}' already exists")
 
-    listener = {
-        "listener_id": listener_id,
-        "name": name,
-        "is_family": is_family,
-        "default_emotion": default_emotion,
-        "created_at": datetime.now().isoformat() + "Z",
-    }
-    listeners.append(listener)
-    _save_listeners(listeners)
-    return listener
+        listener = {
+            "listener_id": listener_id,
+            "name": name,
+            "is_family": is_family,
+            "default_emotion": default_emotion,
+            "created_at": datetime.now().isoformat() + "Z",
+        }
+        listeners.append(listener)
+        _save_listeners_unlocked(listeners)
+        return listener
+
+    return _with_lock("r", _txn)
 
 
 def update_listener(listener_id: str, name: Optional[str] = None,
-                    default_emotion: Optional[str] = None) -> Optional[dict]:
+                    default_emotion: Optional[str] = None) -> dict:
     """
     Update listener name or default emotion.
+
+    Raises:
+        ValueError: if listener_id not found
     """
-    listeners = _load_listeners()
-    for l in listeners:
-        if l["listener_id"] == listener_id:
-            if name is not None:
-                l["name"] = name
-            if default_emotion is not None:
-                l["default_emotion"] = default_emotion
-            _save_listeners(listeners)
-            return l
-    return None
+    def _txn(f):
+        listeners = _load_listeners_unlocked()
+        for l in listeners:
+            if l["listener_id"] == listener_id:
+                if name is not None:
+                    l["name"] = name
+                if default_emotion is not None:
+                    l["default_emotion"] = default_emotion
+                _save_listeners_unlocked(listeners)
+                return l
+        raise ValueError(f"Listener not found: '{listener_id}'")
+
+    return _with_lock("r", _txn)
 
 
 def delete_listener(listener_id: str) -> bool:
     """
     Delete a listener by ID.
-    Returns True if deleted, False if not found.
+
+    Raises:
+        ValueError: if listener_id not found
     """
-    listeners = _load_listeners()
-    original_count = len(listeners)
-    new_listeners = [l for l in listeners if l["listener_id"] != listener_id]
+    def _txn(f):
+        listeners = _load_listeners_unlocked()
+        new_listeners = [l for l in listeners if l["listener_id"] != listener_id]
+        if len(new_listeners) == len(listeners):
+            raise ValueError(f"Listener not found: '{listener_id}'")
+        _save_listeners_unlocked(new_listeners)
+        return True
 
-    if len(new_listeners) == original_count:
-        return False
-
-    _save_listeners(new_listeners)
-    return True
+    return _with_lock("r", _txn)

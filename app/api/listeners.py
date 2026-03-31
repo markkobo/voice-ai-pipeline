@@ -56,6 +56,9 @@ async def api_create_listener(body: ListenerCreate):
     if not re.match(r'^[a-z][a-z0-9_]*$', body.listener_id):
         raise HTTPException(400, "listener_id must be lowercase letters, numbers, underscores, starting with a letter")
 
+    if body.default_emotion not in VALID_EMOTIONS:
+        raise HTTPException(400, f"Invalid emotion: {body.default_emotion}. Valid: {VALID_EMOTIONS}")
+
     try:
         listener = create_listener(
             body.listener_id,
@@ -74,16 +77,18 @@ async def api_update_listener(listener_id: str, body: ListenerUpdate):
     if body.default_emotion and body.default_emotion not in VALID_EMOTIONS:
         raise HTTPException(400, f"Invalid emotion: {body.default_emotion}. Valid: {VALID_EMOTIONS}")
 
-    listener = update_listener(listener_id, name=body.name, default_emotion=body.default_emotion)
-    if not listener:
-        raise HTTPException(404, f"Listener not found: {listener_id}")
+    try:
+        listener = update_listener(listener_id, name=body.name, default_emotion=body.default_emotion)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
     return listener
 
 
 @router.delete("/{listener_id}")
 async def api_delete_listener(listener_id: str):
     """Delete a listener."""
-    success = delete_listener(listener_id)
-    if not success:
-        raise HTTPException(404, f"Listener not found: {listener_id}")
+    try:
+        delete_listener(listener_id)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
     return {"status": "deleted", "listener_id": listener_id}

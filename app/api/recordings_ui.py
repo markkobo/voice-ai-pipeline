@@ -849,6 +849,16 @@ async def recordings_page():
             console.log(`[${level.toUpperCase()}] [${component}] ${message}`);
         }
 
+        // ==================== HELPERS ====================
+        function escapeHtml(str) {
+            return String(str || '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
         // ==================== TOAST ====================
         function showToast(message, type = 'info', duration = 4000) {
             const container = document.getElementById('toastContainer');
@@ -897,6 +907,7 @@ async def recordings_page():
             await Promise.all([loadPersonas(), loadListeners(), loadRecordings()]);
             buildListenerFilter();
             buildRecorderDropdowns();
+            loadVersions();
             log('Recordings page loaded', 'info', 'UI');
         }
 
@@ -940,14 +951,44 @@ async def recordings_page():
             // Build listener dropdown
             const currentListener = listenerSelect.value;
             listenerSelect.innerHTML = listeners.map(l =>
-                `<option value="${l.listener_id}" ${l.listener_id === currentListener ? 'selected' : ''}>${l.name || l.listener_id}</option>`
+                `<option value="${l.listener_id}" ${l.listener_id === currentListener ? 'selected' : ''}>${escapeHtml(l.name) || l.listener_id}</option>`
             ).join('');
 
             // Build persona dropdown
             const currentPersona = personaSelect.value;
             personaSelect.innerHTML = personas.map(p =>
-                `<option value="${p.persona_id}" ${p.persona_id === currentPersona ? 'selected' : ''}>${p.name || p.persona_id}</option>`
+                `<option value="${p.persona_id}" ${p.persona_id === currentPersona ? 'selected' : ''}>${escapeHtml(p.name) || p.persona_id}</option>`
             ).join('');
+        }
+
+        // ==================== VERSION LOADING ====================
+        async function loadVersions() {
+            const versionSelect = document.getElementById('versionSelect');
+            try {
+                const personaId = personaSelect.value;
+                const [versionsRes, activeRes] = await Promise.all([
+                    fetch(`/api/training/versions?persona_id=${personaId}`),
+                    fetch(`/api/training/active?persona_id=${personaId}`)
+                ]);
+                const versionsData = await versionsRes.json();
+                const activeData = await activeRes.json();
+                const activeVersionId = activeData.version?.version_id;
+
+                versionSelect.innerHTML = '<option value="">系統預設</option>';
+                (versionsData.versions || []).forEach(v => {
+                    if (v.status === 'ready') {
+                        const label = v.nickname ? `${v.version_id} (${escapeHtml(v.nickname)})` : v.version_id;
+                        const selected = v.version_id === activeVersionId ? 'selected' : '';
+                        versionSelect.innerHTML += `<option value="${v.version_id}" ${selected}>${label}</option>`;
+                    }
+                });
+
+                if (activeVersionId) {
+                    versionSelect.value = activeVersionId;
+                }
+            } catch (e) {
+                log(`Failed to load versions: ${e.message}`, 'error', 'UI');
+            }
         }
 
         // ==================== RECORDINGS LOADING ====================
@@ -1096,7 +1137,7 @@ async def recordings_page():
                             <label>人格</label>
                             <select onchange="updateSegment('${r.recording_id}', '${speakerId}', 'persona_id', this.value)">
                                 <option value="">--</option>
-                                ${personas.map(p => `<option value="${p.persona_id}" ${p.persona_id === personaId ? 'selected' : ''}>${p.name}</option>`).join('')}
+                                ${personas.map(p => `<option value="${p.persona_id}" ${p.persona_id === personaId ? 'selected' : ''}>${escapeHtml(p.name)}</option>`).join('')}
                             </select>
                             <button class="add-btn" onclick="openAddPersonaModal()" title="新增人格">+</button>
                         </div>
@@ -1104,7 +1145,7 @@ async def recordings_page():
                             <label>對</label>
                             <select onchange="updateSegment('${r.recording_id}', '${speakerId}', 'listener_id', this.value)">
                                 <option value="">--</option>
-                                ${listeners.map(l => `<option value="${l.listener_id}" ${l.listener_id === listenerId ? 'selected' : ''}>${l.name}</option>`).join('')}
+                                ${listeners.map(l => `<option value="${l.listener_id}" ${l.listener_id === listenerId ? 'selected' : ''}>${escapeHtml(l.name)}</option>`).join('')}
                             </select>
                             <button class="add-btn" onclick="openAddListenerModal()" title="新增聆聽者">+</button>
                         </div>

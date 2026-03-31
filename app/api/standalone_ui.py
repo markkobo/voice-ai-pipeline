@@ -96,6 +96,7 @@ UI_HTML = """
             transition: opacity 0.3s;
             pointer-events: none;
             max-width: 300px;
+            margin-top: 8px;
         }
         .toast.show { opacity: 1; }
         .toast.success { background: #1a4a2e; color: #00ff88; border: 1px solid #00ff88; }
@@ -104,7 +105,7 @@ UI_HTML = """
     </style>
 </head>
 <body>
-    <div id="toast" class="toast"></div>
+    <div id="toastContainer"></div>
     <div class="container">
         <div style="display: flex; justify-content: space-between; align-items: center;">
             <div>
@@ -722,11 +723,17 @@ UI_HTML = """
 
     // Show toast notification
     function showToast(message, type = 'info') {
-        const toast = document.getElementById('toast');
+        const container = document.getElementById('toastContainer') || document.body;
+        const toast = document.createElement('div');
+        toast.className = `toast ${type}`;
         toast.textContent = message;
-        toast.className = `toast ${type} show`;
+        container.appendChild(toast);
+        // Force reflow so transition fires
+        toast.offsetHeight;
+        toast.classList.add('show');
         setTimeout(() => {
             toast.classList.remove('show');
+            setTimeout(() => { if (toast.parentNode) toast.remove(); }, 300);
         }, 3000);
     }
 
