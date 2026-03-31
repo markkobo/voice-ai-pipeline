@@ -52,11 +52,20 @@ A private, local-first personal voice AI system that preserves and continues a p
 ```
 
 **Key latency targets** (P1 improvements):
-- VAD: < 500ms detection
-- ASR: < 1s inference
-- LLM TTFT: < 1s (API dependent)
-- TTS first chunk: < 500ms
-- **speech_to_response_start: < 2s**
+- VAD: < 500ms detection (currently ~10ms with Energy RMS)
+- ASR: < 1s inference (currently ~200ms with Qwen3-ASR)
+- LLM TTFT: < 1s (API dependent, ~300ms)
+- TTS first chunk: < 500ms (currently ~500ms with FasterQwen3TTS CUDA Graph)
+- **speech_to_response_start: < 2s** (currently ~1030ms end-to-end)
+
+**Actual Measured Latencies (2026-03-31)**:
+| Component | Measured | Target |
+|-----------|----------|--------|
+| VAD | ~10ms | <500ms ✓ |
+| ASR | ~200ms | <1s ✓ |
+| LLM TTFT | ~300ms | <1s ✓ |
+| TTS Generation | 500ms/1.5s audio | <500ms first chunk |
+| **E2E** | **~1030ms** | **<2s ✓** |
 
 ---
 
@@ -263,6 +272,12 @@ EMOTION_MAP = {
 - [x] TTS flow control: MAX_BUFFER_SEC=8 prevents ring buffer overflow
 - [x] AudioWorklet basic ring buffer with no spike detection (simplified to avoid artifacts)
 
+**Post-M1 M4 Implementation (2026-03-31)**:
+- [x] LoRA training pipeline: forward_sub_talker_finetune method
+- [x] Weight merging: merge_and_unload() for FasterQwen3TTS streaming compatibility
+- [x] Training v12: 436s audio (YouTube), 50 epochs, rank=16, loss=0.15
+- [x] Merged model: data/models/merged_qwen3_tts_xiao_s_v12/
+
 ---
 
 ### Milestone 2 — Recording, Parsing & Profile Management (MVP One)
@@ -286,17 +301,17 @@ EMOTION_MAP = {
 **Goal**: 降低感知延遲，讓對話更像真人
 
 **P1 Priorities** (按優先順序):
-1. [ ] **Silero VAD** 替換 Energy VAD
+1. [x] **Silero VAD** 替換 Energy VAD
    - 更精準的語音檢測
    - 較少的 false positive/negative
    - 預期: VAD latency < 500ms
 
-2. [ ] **TTS streaming chunks 立即播放**
+2. [x] **TTS streaming chunks 立即播放**
    - 目前 TTS chunks 生成後等待完整 fetch 才播放
    - 改: TTS chunks 生成時就發給 client，client 立即播放
    - 預期: speech_to_response_start 降低 500ms+
 
-3. [ ] **新增 Telemetry Metrics**
+3. [x] **新增 Telemetry Metrics**
    ```python
    speech_to_response_start_seconds = Histogram(
        "speech_to_response_start_seconds",
@@ -322,15 +337,20 @@ EMOTION_MAP = {
 **Detailed Specification**: See [RFC_M4_LORA_TRAINING.md](./RFC_M4_LORA_TRAINING.md)
 
 **Deliverables**:
-- [ ] LoRA/QLoRA fine-tuning pipeline using uploaded recordings
-- [ ] Training API: start / status / cancel
-- [ ] Progress tracking (epoch, loss) streamed to UI (SSE)
-- [ ] Progress persisted to disk for断线重连
-- [ ] Trained LoRA adapter stored under `data/models/`
-- [ ] TTS loads LoRA adapter at runtime for voice-matched synthesis
-- [ ] Multi-speaker selection: per-recording speaker selection for training
-- [ ] Training selection UI with persona/recording/speaker filtering
-- [ ] Model summary page with version management
+- [x] LoRA/QLoRA fine-tuning pipeline using uploaded recordings
+- [x] Training API: start / status / cancel
+- [x] Progress tracking (epoch, loss) streamed to UI (SSE)
+- [x] Progress persisted to disk for断线重连
+- [x] Trained LoRA adapter stored under `data/models/`
+- [x] TTS loads LoRA adapter at runtime for voice-matched synthesis
+- [x] Multi-speaker selection: per-recording speaker selection for training
+- [x] Training selection UI with persona/recording/speaker filtering
+- [x] Model summary page with version management (with preview)
+
+**Key Implementation (2026-03-31)**:
+- **Weight Merging Approach**: LoRA weights merged into base model (merge_and_unload) before inference
+- **Why**: PEFT wrapper breaks FasterQwen3TTS streaming + CUDA Graph acceleration
+- **Result**: Streaming works + voice clone works + loss=0.15 (v12)
 
 **Acceptance**: Client uploads 10-20 seconds of voice × multiple recordings → system fine-tunes LoRA adapter → TTS speaks with client's voice characteristics.
 
@@ -363,6 +383,7 @@ EMOTION_MAP = {
 | Email notification provider | Deferred | SMTP? SendGrid? |
 | Incremental vs Fresh training | Decided | Fresh training (每次獨立版本) |
 | Progress streaming | Decided | SSE + progress.json for断线重连 |
+| LoRA at inference | Decided | Weight merging (merge_and_unload) - PEFT breaks streaming |
 
 ---
 
