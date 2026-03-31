@@ -37,11 +37,17 @@ class FasterQwenTTSEngine:
     Supports LoRA adapter loading for voice cloning.
     """
 
-    # Model options
-    MODELS = {
+    # Model options - VoiceDesign for streaming, Base for LoRA
+    VOICEDESIGN_MODELS = {
         "0.6B": "Qwen/Qwen3-TTS-12Hz-0.6B-VoiceDesign",
         "1.7B": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
     }
+    BASE_MODELS = {
+        "0.6B": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+        "1.7B": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+    }
+    # Merged LoRA models (weight merging replaces need for PEFT at inference)
+    MERGED_MODELS_DIR = Path(os.environ.get("MODELS_DIR", "/workspace/voice-ai-pipeline-1/data/models"))
 
     def __init__(
         self,
@@ -49,35 +55,50 @@ class FasterQwenTTSEngine:
         device: Optional[str] = None,
     ):
         self.model_size = model_size
-        self.model_name = self.MODELS.get(model_size, self.MODELS["1.7B"])
+        self.voicedesign_name = self.VOICEDESIGN_MODELS.get(model_size, self.VOICEDESIGN_MODELS["1.7B"])
+        self.base_model_name = self.BASE_MODELS.get(model_size, self.BASE_MODELS["1.7B"])
         import torch
         self.device = device or ("cuda:0" if torch.cuda.is_available() else "cpu")
-        self._model = None  # FasterQwen3TTS (streaming)
-        self._raw_model = None  # Qwen3TTSModel (fallback)
+        self._model = None  # FasterQwen3TTS (streaming, VoiceDesign)
+        self._raw_model = None  # Qwen3TTSModel (fallback for voice clone)
+        self._lora_model = None  # Qwen3TTSForConditionalGeneration + LoRA
         self._is_loaded = False
         self._use_fallback = False
         self._warmed_up = False
         self._current_lora_path: Optional[str] = None
+        self._merged_model_path: Optional[str] = None
 
     def _ensure_loaded(self):
         """Lazy load the model(s)."""
         if self._is_loaded:
             return
 
-        log.info(f"Loading TTS model: {self.model_name} on {self.device}")
-
         import torch
         from faster_qwen3_tts import FasterQwen3TTS
 
+        # Check for merged model path first
+        if hasattr(self, '_merged_model_path') and self._merged_model_path:
+            model_path = self._merged_model_path
+            log.info(f"Loading merged TTS model from: {model_path}")
+            try:
+                self._model = FasterQwen3TTS.from_pretrained(model_path, device=self.device)
+                log.info(f"TTS model loaded (FasterQwen3TTS, merged): {model_path}")
+                self._is_loaded = True
+                return
+            except Exception as e:
+                log.warning(f"Failed to load merged model: {e}, falling back to base")
+
+        log.info(f"Loading TTS model: {self.voicedesign_name} on {self.device}")
+
         try:
-            self._model = FasterQwen3TTS.from_pretrained(self.model_name, device=self.device)
-            log.info(f"TTS model loaded (FasterQwen3TTS): {self.model_name}")
+            self._model = FasterQwen3TTS.from_pretrained(self.voicedesign_name, device=self.device)
+            log.info(f"TTS model loaded (FasterQwen3TTS): {self.voicedesign_name}")
         except Exception as e:
             log.warning(f"FasterQwen3TTS failed to load: {e}, trying raw Qwen3TTSModel")
             from qwen_tts import Qwen3TTSModel
-            self._raw_model = Qwen3TTSModel.from_pretrained(self.model_name, device_map="auto")
+            self._raw_model = Qwen3TTSModel.from_pretrained(self.voicedesign_name, device_map="auto")
             self._use_fallback = True
-            log.info(f"TTS model loaded (raw Qwen3TTSModel): {self.model_name}")
+            log.info(f"TTS model loaded (raw Qwen3TTSModel): {self.voicedesign_name}")
 
         self._is_loaded = True
 
@@ -91,7 +112,10 @@ class FasterQwenTTSEngine:
 
     def activate_version(self, version_id: str):
         """
-        Load LoRA adapter for a training version.
+        Activate a merged LoRA model for voice cloning.
+
+        Uses weight-merging approach: LoRA weights are merged into base model
+        to produce a standalone model that works with FasterQwen3TTS streaming.
 
         Args:
             version_id: The training version ID to activate
@@ -113,65 +137,56 @@ class FasterQwenTTSEngine:
             log.warning(f"[TTS] Version {version_id} has no lora_path")
             return
 
-        adapter_path = Path(version.lora_path) / "adapter"
-        if not adapter_path.exists():
-            log.warning(f"[TTS] LoRA adapter not found: {adapter_path}")
+        # Look for merged model: merged_{lora_dir_name_without_timestamp}
+        # e.g., data/models/xiao_s_v11_20260330_204755 -> data/models/merged_qwen3_tts_xiao_s_v11
+        lora_dir = Path(version.lora_path)
+        parent_dir = lora_dir.parent
+        # Extract version base name (e.g., "xiao_s_v11" from "xiao_s_v11_20260330_204755")
+        # Name format: {persona}_{version}_{timestamp}
+        parts = lora_dir.name.split('_')
+        # First 3 parts: xiao, s, v11 -> xiao_s_v11
+        version_base = '_'.join(parts[:3])
+        merged_name = f"merged_qwen3_tts_{version_base}"
+        merged_path = parent_dir / merged_name
+
+        if not merged_path.exists():
+            log.warning(f"[TTS] Merged model not found at: {merged_path}")
+            log.warning(f"[TTS] Run merge script first to create merged model")
             return
 
-        self._current_lora_path = str(adapter_path)
-        log.info(f"[TTS] Activated LoRA adapter: {adapter_path}")
+        # Convert to absolute path for proper loading
+        self._merged_model_path = str(merged_path.resolve())
+        self._current_lora_path = str(lora_dir)
+        log.info(f"[TTS] Activated merged model: {merged_path}")
 
-        # Reload model with LoRA if needed
-        self._ensure_loaded()
-        if self._raw_model is not None:
-            try:
-                from peft import PeftModel
-                # Reload with LoRA adapter
-                self._raw_model = PeftModel.from_pretrained(
-                    self._raw_model,
-                    str(adapter_path),
-                )
-                log.info(f"[TTS] LoRA adapter loaded onto raw model")
-            except Exception as e:
-                log.warning(f"[TTS] Failed to load LoRA onto raw model: {e}")
+        # Reload model if already loaded to use merged weights
+        if self._is_loaded:
+            self._is_loaded = False
+            self._ensure_loaded()
 
     def deactivate_lora(self):
-        """Deactivate LoRA adapter and use base model."""
+        """Deactivate merged model and use base VoiceDesign model."""
         self._current_lora_path = None
-        log.info("[TTS] LoRA adapter deactivated")
-
-        if self._use_fallback or self._raw_model is not None:
-            log.info("Warmup skipped (using fallback model)")
-            self._warmed_up = True
-            return
-
-        log.info("Warming up TTS model (capturing CUDA graphs)...")
-        import time
-        start = time.time()
-        try:
-            # Run one inference to capture CUDA graphs
-            for _ in self._model.generate_voice_design_streaming(
-                text="測試",
-                instruct="(natural)",
-                language="Chinese",
-                chunk_size=8,
-            ):
-                pass
-            log.info(f"TTS warmup done in {time.time()-start:.1f}s")
-        except Exception as e:
-            log.warning(f"TTS warmup failed: {e}")
-        self._warmed_up = True
+        self._merged_model_path = None
+        log.info("[TTS] Merged model deactivated")
 
     async def generate_streaming(
         self,
         text: str,
         instruct: Optional[str] = None,
         language: str = "Chinese",
+        reference_audio: Optional[str] = None,
+        voice_clone_prompt=None,
     ) -> AsyncIterator[TTSStreamEvent]:
         """
         Generate audio from text with optional emotion instruct.
-        Yields audio as a single chunk (non-streaming) if FasterQwen3TTS
-        fails, otherwise yields chunks as they are generated.
+
+        Args:
+            text: Text to synthesize
+            instruct: Emotion instruct string (e.g., "(gentle, warm)")
+            language: Language code
+            reference_audio: Path to reference audio for voice cloning
+            voice_clone_prompt: Pre-built voice clone prompt (not needed with merged model)
         """
         self._ensure_loaded()
 
@@ -183,57 +198,60 @@ class FasterQwenTTSEngine:
         else:
             final_instruct = "(natural, conversational tone)"
 
-        log.info(f"TTS generating: text_len={len(text)}, instruct={final_instruct}, fallback={self._use_fallback}")
+        # With merged model, the voice is baked in - no reference needed
+        using_merged = hasattr(self, '_merged_model_path') and self._merged_model_path is not None
+
+        log.info(f"TTS generating: text_len={len(text)}, instruct={final_instruct}, "
+                 f"merged_model={using_merged}, fallback={self._use_fallback}")
 
         yield TTSStreamEvent(event="start")
 
         loop = asyncio.get_event_loop()
 
-        def generate():
-            try:
-                if self._use_fallback or self._raw_model is not None:
-                    # Non-streaming fallback
-                    audio_arrays, sr = self._raw_model.generate_voice_design(
-                        text=text,
-                        instruct=final_instruct,
-                        language=language,
-                    )
-                    # audio_arrays is a list of arrays, sr is int
-                    if isinstance(audio_arrays, (list, tuple)):
-                        full_audio = np.concatenate(audio_arrays) if len(audio_arrays) > 1 else audio_arrays[0]
-                    else:
-                        full_audio = audio_arrays
-                    audio_bytes = (full_audio * 32767).astype(np.int16).tobytes()
-                    return audio_bytes, sr or 24000, None
-                else:
-                    # Streaming with FasterQwen3TTS
-                    chunks = []
+        # Use streaming path with FasterQwen3TTS (works with merged model too)
+        if self._model is not None and not self._use_fallback:
+            import queue
+            chunk_queue = queue.Queue()
+
+            def chunk_producer():
+                try:
                     for audio_chunk, sr, timing in self._model.generate_voice_design_streaming(
                         text=text,
                         instruct=final_instruct,
                         language=language,
                         chunk_size=12,
                     ):
-                        chunks.append(audio_chunk)
+                        audio_bytes = (audio_chunk * 32767).astype(np.int16).tobytes()
+                        chunk_queue.put((audio_bytes, sr or 24000))
+                    chunk_queue.put(None)
+                except Exception as e:
+                    log.error(f"Chunk producer error: {e}")
+                    chunk_queue.put(e)
 
-                    if not chunks:
-                        return None, 24000, None
+            import concurrent.futures
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            future = pool.submit(chunk_producer)
 
-                    full_audio = np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
-                    audio_bytes = (full_audio * 32767).astype(np.int16).tobytes()
-                    return audio_bytes, sr, None
+            while True:
+                result = await loop.run_in_executor(None, chunk_queue.get)
+                if result is None:
+                    break
+                if isinstance(result, Exception):
+                    yield TTSStreamEvent(event="error", error=str(result))
+                    break
+                audio_bytes, sr = result
+                yield TTSStreamEvent(event="audio_chunk", audio_data=audio_bytes, sample_rate=sr)
 
-            except RuntimeError as e:
-                if "CUDA" in str(e) or "capture" in str(e):
-                    log.warning(f"CUDA error in streaming, falling back to non-streaming: {e}")
-                    # Switch to fallback model
-                    if self._raw_model is None:
-                        from qwen_tts import Qwen3TTSModel
-                        self._raw_model = Qwen3TTSModel.from_pretrained(
-                            self.model_name, device_map=self.device
-                        )
-                        self._use_fallback = True
-                    audio_arrays, sr = self._raw_model.generate_voice_design(
+            pool.shutdown(wait=False)
+            yield TTSStreamEvent(event="done")
+            return
+
+        # Fallback path (non-streaming)
+        if self._use_fallback or self._raw_model is not None:
+            raw_model = self._raw_model
+            def generate():
+                try:
+                    audio_arrays, sr = raw_model.generate_voice_design(
                         text=text,
                         instruct=final_instruct,
                         language=language,
@@ -244,60 +262,27 @@ class FasterQwenTTSEngine:
                         full_audio = audio_arrays
                     audio_bytes = (full_audio * 32767).astype(np.int16).tobytes()
                     return audio_bytes, sr or 24000, None
-                raise
+                except Exception as e:
+                    log.error(f"Generation error: {e}")
+                    return None, 24000, None
 
-        try:
-            if self._use_fallback or self._raw_model is not None:
-                # Non-streaming fallback - run whole generation in executor
-                result = await loop.run_in_executor(None, generate)
-                if result is None:
-                    yield TTSStreamEvent(event="error", error="No audio generated")
-                    return
-                audio_bytes, sr, _ = result
-                if audio_bytes:
-                    yield TTSStreamEvent(event="audio_chunk", audio_data=audio_bytes, sample_rate=sr)
-                yield TTSStreamEvent(event="done")
-            else:
-                # True streaming - yield chunks as they arrive using queue
-                import queue
-                chunk_queue = queue.Queue()
+            result = await loop.run_in_executor(None, generate)
+            if result is None or result[0] is None:
+                yield TTSStreamEvent(event="error", error="No audio generated")
+                return
+            audio_bytes, sr, _ = result
+            yield TTSStreamEvent(event="audio_chunk", audio_data=audio_bytes, sample_rate=sr)
+            yield TTSStreamEvent(event="done")
+            return
 
-                def chunk_producer():
-                    try:
-                        for audio_chunk, sr, timing in self._model.generate_voice_design_streaming(
-                            text=text,
-                            instruct=final_instruct,
-                            language=language,
-                            chunk_size=12,
-                        ):
-                            audio_bytes = (audio_chunk * 32767).astype(np.int16).tobytes()
-                            chunk_queue.put((audio_bytes, sr or 24000))
-                        chunk_queue.put(None)  # Sentinel to signal done
-                    except Exception as e:
-                        chunk_queue.put(e)
-
-                # Run producer in thread pool
-                import concurrent.futures
-                pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-                future = pool.submit(chunk_producer)
-
-                # Yield chunks as they arrive
-                while True:
-                    result = await loop.run_in_executor(None, chunk_queue.get)
-                    if result is None:
-                        break
-                    if isinstance(result, Exception):
-                        yield TTSStreamEvent(event="error", error=str(result))
-                        break
-                    audio_bytes, sr = result
-                    yield TTSStreamEvent(event="audio_chunk", audio_data=audio_bytes, sample_rate=sr)
-
-                pool.shutdown(wait=False)
-                yield TTSStreamEvent(event="done")
-
-        except Exception as e:
-            log.exception(f"TTS generation error: {e}")
-            yield TTSStreamEvent(event="error", error=str(e))
+            result = await loop.run_in_executor(None, generate)
+            if result is None or result[0] is None:
+                yield TTSStreamEvent(event="error", error="No audio generated")
+                return
+            audio_bytes, sr, _ = result
+            yield TTSStreamEvent(event="audio_chunk", audio_data=audio_bytes, sample_rate=sr)
+            yield TTSStreamEvent(event="done")
+            return
 
 
 class MockTTSEngine:

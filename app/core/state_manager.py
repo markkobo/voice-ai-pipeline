@@ -127,7 +127,7 @@ class StateManager:
 
         Args:
             session_id: Session identifier
-            config: Config dict with audio settings, persona_id, listener_id, etc.
+            config: Config dict with audio settings, persona_id, listener_id, vad, etc.
 
         Returns:
             True if config was applied, False otherwise
@@ -142,13 +142,20 @@ class StateManager:
         state.audio_config.channels = audio_config.get("channels", 1)
         state.audio_config.format = audio_config.get("format", "pcm")
 
-        # Recreate VAD with new sample rate
-        # Preserve sensitivity if already set
-        current_sensitivity = getattr(state.vad, "sensitivity_label", "medium")
-        state.vad = SileroVAD(
-            sample_rate=state.audio_config.sample_rate,
-            sensitivity=current_sensitivity,
-        )
+        # VAD sensitivity - use provided value or preserve existing
+        vad_sensitivity = config.get("vad")
+        if vad_sensitivity:
+            state.vad = SileroVAD(
+                sample_rate=state.audio_config.sample_rate,
+                sensitivity=vad_sensitivity,
+            )
+        else:
+            # Recreate VAD with new sample rate, preserve sensitivity
+            current_sensitivity = getattr(state.vad, "sensitivity_label", "medium")
+            state.vad = SileroVAD(
+                sample_rate=state.audio_config.sample_rate,
+                sensitivity=current_sensitivity,
+            )
 
         # Persona / listener
         if "persona_id" in config:

@@ -35,6 +35,7 @@ transformers>=4.40.0
 peft>=0.10.0
 datasets>=2.18.0
 accelerate>=0.28.0
+soundfile>=0.12.0
 
 # Testing
 pytest>=7.4.0

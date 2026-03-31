@@ -2,7 +2,58 @@
 
 ## Overview
 
-A real-time voice AI pipeline that enables natural conversation with a persona-aware AI assistant. The system processes voice input through a series of streaming services, generates responses using an LLM with emotion tagging, and synthesizes speech using a TTS engine.
+A real-time voice AI pipeline that enables natural conversation with a persona-aware AI assistant. The system processes voice input through a series of streaming services, generates responses using an LLM with emotion tagging, and synthesizes speech using a TTS engine with LoRA fine-tuned voice cloning.
+
+**Last Updated**: 2026-03-31
+
+---
+
+## Latency Architecture
+
+### End-to-End Latency Breakdown
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           語音 AI Pipeline 延遲分解                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  麥克風輸入 → VAD檢測 → ASR辨識 → LLM生成 → 情緒解析 → TTS合成 → 音頻播放    │
+│                                                                             │
+│  ┌─────────┐   ┌──────┐   ┌──────┐   ┌──────┐   ┌──────┐   ┌─────────┐   │
+│  │  VAD    │   │ ASR  │   │ LLM  │   │情感  │   │ TTS  │   │ 播放    │   │
+│  │  ~10ms  │   │~200ms│   │~300ms│   │ <1ms │   │~500ms│   │  ~20ms  │   │
+│  │         │   │      │   │      │   │      │   │      │   │         │   │
+│  │ Energy  │   │Qwen3 │   │gpt-  │   │解析  │   │Qwen3 │   │ streaming│   │
+│  │ RMS     │   │-ASR  │   │4o-mini│  │[情感] │   │-TTS  │   │ 緩衝    │   │
+│  │ commit  │   │      │   │      │   │      │   │CUDA  │   │         │   │
+│  └─────────┘   └──────┘   └──────┘   └──────┘   └──────┘   └─────────┘   │
+│                                                                             │
+│  端到端延遲: ~1030ms (網路往返 + 模型推論)                                   │
+│  speech_to_response_start: < 2s (P1 目標)                                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Latency Components Detail
+
+| Component | Latency | Technology | Notes |
+|-----------|---------|------------|-------|
+| VAD Detection | ~10ms | Energy RMS | Only on `commit_utterance`, not per-frame |
+| ASR Inference | ~200ms | Qwen3-ASR-1.7B | WebSocket continuous input |
+| LLM First Token | ~300ms | gpt-4o-mini | Network dependent |
+| Emotion Parsing | <1ms | Regex | Inline with LLM streaming |
+| TTS Generation | 500ms | FasterQwen3TTS | Generates 1.5s audio with CUDA Graph |
+| Audio Playback | ~20ms | Browser AudioWorklet | Streaming buffer |
+
+### Key Optimizations
+
+1. **VAD**: Only triggers on explicit `commit_utterance`, not every audio frame
+2. **Streaming TTS**: FasterQwen3TTS CUDA Graph acceleration - 500ms generates 1.5s audio
+3. **Pipeline**: WebSocket continuous传输,边生成边播放
+4. **LoRA Inference**: Weight merging (merge_and_unload) enables FasterQwen3TTS streaming without PEFT wrapper
+
+---
+
+## System Architecture
 
 ## System Architecture
 
@@ -299,6 +350,123 @@ TTS generate_streaming(
 | 生氣 | "(annoyed, frustrated, slightly elevated pitch, impatient)" |
 | 開心 | "(happy, bright, enthusiastic, faster pace with positive energy)" |
 | 默認 | "(natural, conversational tone, warm and engaging)" |
+
+---
+
+## LoRA Training Pipeline
+
+### Training Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        LoRA Fine-tuning Pipeline                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  1. Recording Pipeline (YouTube / Microphone)                              │
+│  ════════════════════════════════════════════════════════════════════    │
+│                                                                             │
+│  YouTube URL ──→ yt-dlp ──→ WAV Splitter (2min chunks) ──→ Upload API     │
+│                                                                    ↓       │
+│                                                           Processing       │
+│                                                           (denoise/        │
+│                                                            enhance/        │
+│                                                            diarize/        │
+│                                                            transcribe)     │
+│                                                                    ↓       │
+│                                                           data/recordings/ │
+│                                                           index.json       │
+│                                                                             │
+│  2. Training Pipeline                                                        │
+│  ════════════════════════════════════════════════════════════════════    │
+│                                                                             │
+│  recordings/index.json ──→ Select recordings ──→ /api/training/versions     │
+│                                                        ↓                   │
+│                                              Extract audio.wav            │
+│                                              Calculate x-vector            │
+│                                              Generate codec_ids           │
+│                                                        ↓                   │
+│                                              train_lora.py                │
+│                                              ├── forward_sub_talker_       │
+│                                              │    finetune()              │
+│                                              ├── Loss: 0.15 (v12)         │
+│                                              └── 50 epochs, rank=16       │
+│                                                        ↓                   │
+│                                              adapter_model.safetensors    │
+│                                              adapter_config.json          │
+│                                                                             │
+│  3. Weight Merging (Critical for Streaming)                                 │
+│  ════════════════════════════════════════════════════════════════════    │
+│                                                                             │
+│  LoRA Adapter + VoiceDesign Base                                           │
+│       ↓ PeftModel.from_pretrained()                                        │
+│       ↓ merge_and_unload()                                                 │
+│  Merged Model (base + LoRA baked in)                                      │
+│       ↓                                                                    │
+│  • No PEFT wrapper at inference                                           │
+│  • FasterQwen3TTS streaming works                                          │
+│  • CUDA Graph acceleration works                                           │
+│  • Saved as: data/models/merged_qwen3_tts_xiao_s_v12/                    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Training vs Inference Flow
+
+```
+Training Phase:
+┌─────────────────────────────────────────────────────────────┐
+│  Base Model (VoiceDesign) + LoRA Adapter                    │
+│       ↓ training with forward_sub_talker_finetune()          │
+│  LoRA weights saved (adapter_model.safetensors)              │
+└─────────────────────────────────────────────────────────────┘
+
+Inference Phase (Weight Merging):
+┌─────────────────────────────────────────────────────────────┐
+│  LoRA weights ──→ PeftModel ──→ merge_and_unload()          │
+│       ↓                                                      │
+│  Merged model.safetensors (3.8GB)                          │
+│       ↓                                                      │
+│  FasterQwen3TTS.from_pretrained(merged_path)                 │
+│       ↓                                                      │
+│  Streaming + CUDA Graph + Voice Clone ✓                      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Training Results
+
+| Version | Loss | Training Data | Duration | Status |
+|---------|------|---------------|----------|--------|
+| v11 | 8.49 | 2 recordings (~20s) | 5s | Ready |
+| **v12** | **0.15** | 6 YouTube recordings (~436s) | 740s | **Ready** |
+
+### Storage Structure
+
+```
+data/
+├── recordings/
+│   ├── index.json                    # Recording metadata
+│   ├── raw/                          # Original audio
+│   ├── denoised/                     # Noise removed
+│   └── enhanced/                     # Enhanced quality
+│
+├── models/
+│   ├── index.json                    # Version index
+│   ├── xiao_s_v12_20260330_223729/  # Training version
+│   │   ├── adapter/                  # LoRA weights
+│   │   │   ├── adapter_model.safetensors
+│   │   │   └── adapter_config.json
+│   │   └── training_result.json
+│   │
+│   └── merged_qwen3_tts_xiao_s_v12/ # Merged model (for inference)
+│       ├── model.safetensors         # 3.8GB (base + LoRA)
+│       ├── speech_tokenizer/         # Required for TTS
+│       └── config.json
+│
+└── cache/
+    └── huggingface/hub/              # Model cache
+```
+
+---
 
 ---
 

@@ -12,6 +12,7 @@ import json
 import os
 import time
 import uuid
+from pathlib import Path
 from typing import AsyncIterator, Optional
 
 from fastapi import APIRouter, Query, BackgroundTasks
@@ -31,6 +32,37 @@ router = APIRouter()
 
 # Active TTS sessions: session_id -> queue of audio chunks
 _tts_sessions: dict[str, asyncio.Queue] = {}
+
+
+def _get_persona_reference_audio(persona_id: str) -> Optional[str]:
+    """
+    Get reference audio path for a persona.
+
+    Returns path to reference audio file if available, None otherwise.
+    Currently uses the latest processed recording for the persona.
+    """
+    try:
+        from app.services.training import get_version_manager
+        manager = get_version_manager()
+        version = manager.get_active_version(persona_id)
+        if version and version.lora_path:
+            # Check for reference audio in version directory
+            version_dir = Path(version.lora_path)
+            # Look for reference audio (prefer enhanced, then denoised, then raw)
+            for audio_name in ["enhanced_audio.wav", "reference_audio.wav"]:
+                ref_audio = version_dir / audio_name
+                if ref_audio.exists():
+                    return str(ref_audio)
+            # Fall back to first recording's enhanced audio
+            manifest = manager.get_manifest(version.version_id)
+            if manifest and manifest.get("recordings"):
+                first_rec = manifest["recordings"][0]
+                rec_path = Path(first_rec.get("audio_path", ""))
+                if rec_path.exists():
+                    return str(rec_path)
+    except Exception as e:
+        log.warning(f"Failed to get reference audio for {persona_id}: {e}")
+    return None
 
 
 def make_wav_header(num_samples: int, sample_rate: int = 24000, num_channels: int = 1, bits_per_sample: int = 16) -> bytes:
@@ -65,6 +97,7 @@ async def tts_audio_stream(
     emotion: str,
     model_size: str,
     session_id: str,
+    persona_id: Optional[str] = None,
 ) -> AsyncIterator[bytes]:
     """
     Generate TTS audio and yield chunks as they arrive.
@@ -74,6 +107,7 @@ async def tts_audio_stream(
         emotion: Emotion tag string
         model_size: "0.6B" or "1.7B"
         session_id: Session ID for cancellation tracking
+        persona_id: Persona ID for voice clone (optional)
 
     Yields:
         Bytes chunks of WAV audio (header first, then PCM chunks)
@@ -81,9 +115,16 @@ async def tts_audio_stream(
     engine = get_tts_engine(model_size=model_size)
     instruct = get_tts_instruct(emotion)
 
+    # Look up reference audio for voice clone if persona_id is provided
+    reference_audio = None
+    if persona_id:
+        reference_audio = _get_persona_reference_audio(persona_id)
+        if reference_audio:
+            log.info(f"Using voice clone for persona {persona_id}: {reference_audio}")
+
     log.info(
         f"TTS stream started: session={session_id}, emotion={emotion}, "
-        f"instruct={instruct}, text_len={len(text)}"
+        f"instruct={instruct}, voice_clone={reference_audio is not None}, text_len={len(text)}"
     )
 
     sample_rate = 24000
@@ -97,6 +138,7 @@ async def tts_audio_stream(
             text=text,
             instruct=instruct,
             language="Chinese",
+            reference_audio=reference_audio,
         ):
             if event.event == "audio_chunk" and event.audio_data:
                 chunk = event.audio_data
@@ -144,6 +186,7 @@ async def tts_raw_stream(
     emotion: str,
     model_size: str,
     session_id: str,
+    persona_id: Optional[str] = None,
 ) -> AsyncIterator[bytes]:
     """
     Generate TTS audio and yield raw PCM chunks (no WAV header).
@@ -157,9 +200,16 @@ async def tts_raw_stream(
     engine = get_tts_engine(model_size=model_size)
     instruct = get_tts_instruct(emotion)
 
+    # Look up reference audio for voice clone if persona_id is provided
+    reference_audio = None
+    if persona_id:
+        reference_audio = _get_persona_reference_audio(persona_id)
+        if reference_audio:
+            log.info(f"Using voice clone for persona {persona_id}: {reference_audio}")
+
     log.info(
         f"TTS raw stream started: session={session_id}, emotion={emotion}, "
-        f"instruct={instruct}, text_len={len(text)}"
+        f"instruct={instruct}, voice_clone={reference_audio is not None}, text_len={len(text)}"
     )
 
     try:
@@ -168,6 +218,7 @@ async def tts_raw_stream(
             text=text,
             instruct=instruct,
             language="Chinese",
+            reference_audio=reference_audio,
         ):
             if event.event == "audio_chunk" and event.audio_data:
                 yield event.audio_data
@@ -187,6 +238,7 @@ async def tts_stream(
     text: str = Query(..., description="Text to synthesize"),
     emotion: str = Query("默認", description="Emotion tag"),
     model: str = Query("0.6B", description="TTS model size (0.6B or 1.7B)"),
+    persona_id: str = Query(None, description="Persona ID for voice clone"),
 ):
     """
     Stream TTS audio for the given text.
@@ -195,6 +247,7 @@ async def tts_stream(
         text: Text to synthesize (URL encoded)
         emotion: Emotion tag (e.g., 撒嬌, 寵溺)
         model: TTS model size ("0.6B" or "1.7B")
+        persona_id: Persona ID for voice clone (optional)
 
     Returns:
         StreamingResponse with audio/wav content
@@ -202,10 +255,10 @@ async def tts_stream(
     if model not in ("0.6B", "1.7B"):
         model = "0.6B"
 
-    log.info(f"TTS stream request: emotion={emotion}, model={model}, text={text[:50]}...")
+    log.info(f"TTS stream request: emotion={emotion}, model={model}, persona={persona_id}, text={text[:50]}...")
 
     return StreamingResponse(
-        tts_audio_stream(text=text, emotion=emotion, model_size=model, session_id="adhoc"),
+        tts_audio_stream(text=text, emotion=emotion, model_size=model, session_id="adhoc", persona_id=persona_id),
         media_type="audio/wav",
         headers={
             "Content-Disposition": "inline",
@@ -219,6 +272,7 @@ async def tts_raw(
     text: str = Query(..., description="Text to synthesize"),
     emotion: str = Query("默認", description="Emotion tag"),
     model: str = Query("0.6B", description="TTS model size (0.6B or 1.7B)"),
+    persona_id: str = Query(None, description="Persona ID for voice clone"),
 ):
     """
     Stream TTS audio as raw PCM (16-bit, 24kHz, mono).
@@ -229,6 +283,7 @@ async def tts_raw(
         text: Text to synthesize (URL encoded)
         emotion: Emotion tag
         model: TTS model size ("0.6B" or "1.7B")
+        persona_id: Persona ID for voice clone (optional)
 
     Returns:
         StreamingResponse with audio/pcm content
@@ -236,10 +291,10 @@ async def tts_raw(
     if model not in ("0.6B", "1.7B"):
         model = "0.6B"
 
-    log.info(f"TTS raw request: emotion={emotion}, model={model}, text={text[:50]}...")
+    log.info(f"TTS raw request: emotion={emotion}, model={model}, persona={persona_id}, text={text[:50]}...")
 
     return StreamingResponse(
-        tts_raw_stream(text=text, emotion=emotion, model_size=model, session_id="adhoc"),
+        tts_raw_stream(text=text, emotion=emotion, model_size=model, session_id="adhoc", persona_id=persona_id),
         media_type="audio/pcm",
         headers={
             "Content-Disposition": "inline",

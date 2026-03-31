@@ -410,6 +410,75 @@ async def get_speaker_info(recording_id: str):
     raise HTTPException(404, "Recording not found")
 
 
+@router.get("/{recording_id}/segments")
+async def get_recording_segments(recording_id: str):
+    """
+    Get all speaker segments for a recording with enriched metadata.
+
+    Returns list of segments with audio_path, duration, transcription, quality, etc.
+    """
+    for paths in list_all_recordings():
+        if paths.recording_id == recording_id:
+            if not paths.metadata_path.exists():
+                raise HTTPException(404, "Recording metadata not found")
+
+            metadata = RecordingMetadata(paths)
+            segments = metadata.data.get("speaker_segments", [])
+
+            return {
+                "recording_id": recording_id,
+                "persona_id": metadata.data.get("persona_id"),
+                "listener_id": metadata.data.get("listener_id"),
+                "segments": segments,
+                "speaker_labels": metadata.data.get("speaker_labels", {}),
+            }
+
+    raise HTTPException(404, "Recording not found")
+
+
+@router.patch("/{recording_id}/segments/{speaker_id}")
+async def update_segment(
+    recording_id: str,
+    speaker_id: str,
+    persona_id: Optional[str] = None,
+    listener_id: Optional[str] = None,
+):
+    """
+    Update a speaker segment's persona_id or listener_id.
+
+    This is used for labeling who is speaking in the recording.
+    """
+    from app.services.personas import get_persona
+    from app.services.listeners import get_listener
+
+    for paths in list_all_recordings():
+        if paths.recording_id == recording_id:
+            if not paths.metadata_path.exists():
+                raise HTTPException(404, "Recording metadata not found")
+
+            metadata = RecordingMetadata(paths)
+
+            # Validate persona_id if provided
+            if persona_id is not None:
+                persona = get_persona(persona_id)
+                if not persona:
+                    raise HTTPException(400, f"Invalid persona_id: {persona_id}")
+
+            # Validate listener_id if provided
+            if listener_id is not None:
+                listener = get_listener(listener_id)
+                if not listener:
+                    raise HTTPException(400, f"Invalid listener_id: {listener_id}")
+
+            updated = metadata.update_segment(speaker_id, persona_id=persona_id, listener_id=listener_id)
+            if not updated:
+                raise HTTPException(404, f"Speaker segment not found: {speaker_id}")
+
+            return {"status": "updated", "speaker_id": speaker_id, "persona_id": persona_id, "listener_id": listener_id}
+
+    raise HTTPException(404, "Recording not found")
+
+
 @router.post("/{recording_id}/process")
 async def trigger_processing(recording_id: str, background_tasks: BackgroundTasks):
     """

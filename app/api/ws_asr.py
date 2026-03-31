@@ -635,8 +635,13 @@ async def websocket_endpoint(websocket: WebSocket):
                 num_samples = audio_len // 2
                 log.debug(f"Int16 PCM: {num_samples} samples, {audio_len} bytes")
 
-                # Just accumulate audio — VAD/ASR runs only on commit_utterance
-                state_manager.add_audio(session_id, audio_bytes)
+                # Run VAD on each chunk for continuous monitoring + barge-in
+                # process_audio() returns vad_commit dict when silence detected after speech
+                vad_result = state_manager.process_audio(session_id, audio_bytes)
+                if vad_result:
+                    # VAD detected end of speech — notify client to stop recording
+                    log.info(f"[{session_id}] VAD commit: user stopped speaking, sending vad_commit to client")
+                    await websocket.send_text(json.dumps(vad_result))
 
     except WebSocketDisconnect:
         log.info(f"[{session_id}] Client disconnected")

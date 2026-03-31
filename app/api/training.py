@@ -162,63 +162,73 @@ async def get_training_status():
 @router.post("/versions")
 async def create_training(
     persona_id: str,
-    recording_ids: list[str],
+    segment_ids: list[str],
     rank: int = 16,
     num_epochs: int = 10,
     batch_size: int = 4,
-    speaker_selections: Optional[dict[str, str]] = None,
+    recording_ids: Optional[list[str]] = None,
 ):
     """
     Create and start a new training version.
 
     Args:
         persona_id: Target persona to train
-        recording_ids: List of recording IDs to use
+        segment_ids: List of segment identifiers in format "{recording_id}_{speaker_id}"
+                     e.g., ["uuid123_SPEAKER_00", "uuid456_SPEAKER_01"]
         rank: LoRA rank (4, 8, 16, 32)
         num_epochs: Number of training epochs
         batch_size: Batch size
-        speaker_selections: {recording_id: speaker_id} for multi-speaker recordings
+        recording_ids: (deprecated, ignored) List of recording IDs — use segment_ids instead
     """
     from app.services.training import get_training_audio_for_persona
 
     # Validate persona
-    VALID_PERSONA_IDS = {"xiao_s", "caregiver", "elder_gentle", "elder_playful"}
-    if persona_id not in VALID_PERSONA_IDS:
+    from app.services.personas import get_persona
+    if not get_persona(persona_id):
         raise HTTPException(400, f"Invalid persona_id: {persona_id}")
+
+    # Parse segment_ids to extract recording_ids
+    rec_ids_set = set()
+    for seg_id in segment_ids:
+        parts = seg_id.rsplit("_", 1)
+        if len(parts) != 2:
+            raise HTTPException(400, f"Invalid segment_id format: {seg_id} (expected {{recording_id}}_{{speaker_id}})")
+        rec_ids_set.add(parts[0])
+
+    recording_ids = list(rec_ids_set)
 
     # Validate recordings
     all_recordings = list_recordings_metadata()
+    rec_by_id = {rec["recording_id"]: rec for rec in all_recordings}
     selected_recordings = []
     total_duration = 0.0
 
-    for rec in all_recordings:
-        if rec["recording_id"] in recording_ids:
-            if rec.get("status") != "processed":
-                raise HTTPException(400, f"Recording {rec['recording_id']} is not processed")
-            duration = rec.get("duration_seconds", 0) or 0
-            total_duration += duration
-            selected_recordings.append(rec)
+    for rec_id in recording_ids:
+        rec = rec_by_id.get(rec_id)
+        if not rec:
+            raise HTTPException(400, f"Recording not found: {rec_id}")
+        if rec.get("status") != "processed":
+            raise HTTPException(400, f"Recording {rec_id} is not processed")
+        selected_recordings.append(rec)
 
     if len(selected_recordings) != len(recording_ids):
         raise HTTPException(400, "Some recordings not found")
 
-    if total_duration < 10:
-        raise HTTPException(400, f"Total audio duration too short: {total_duration:.1f}s (minimum 10s)")
-
-    # Get audio paths
-    audio_files = get_training_audio_for_persona(persona_id, selected_recordings, speaker_selections)
+    # Get audio paths via segment_ids
+    audio_files = get_training_audio_for_persona(persona_id, selected_recordings, segment_ids)
 
     if not audio_files:
         raise HTTPException(400, "No valid audio files found for training")
+
+    actual_duration = sum(d for _, d, _ in audio_files)
+    if actual_duration < 10:
+        raise HTTPException(400, f"Total audio duration too short: {actual_duration:.1f}s (minimum 10s)")
 
     valid_audio_count = len([p for p, d, _ in audio_files if Path(p).exists()])
     if valid_audio_count == 0:
         raise HTTPException(400, "No audio files exist on disk")
 
     audio_paths = [p for p, _, _ in audio_files]
-    actual_duration = sum(
-        (Path(p).stat().st_size / 48000 / 2) for p in audio_paths if Path(p).exists()
-    )
 
     # Create version
     manager = get_version_manager()
@@ -228,17 +238,18 @@ async def create_training(
         rank=rank,
         num_epochs=num_epochs,
         batch_size=batch_size,
+        segment_ids=segment_ids,
     )
 
     # Save manifest
     manifest = {
         "version_id": version.version_id,
         "persona_id": persona_id,
+        "segment_ids": segment_ids,
         "recordings": [
             {
                 "recording_id": rec["recording_id"],
                 "folder_name": rec.get("folder_name", ""),
-                "speaker_used": speaker_selections.get(rec["recording_id"], "full") if speaker_selections else "full",
                 "audio_path": str(path),
                 "duration_seconds": duration,
             }
@@ -287,6 +298,27 @@ async def create_training(
         "rank": rank,
         "num_epochs": num_epochs,
     }
+
+
+@router.patch("/versions/{version_id}")
+async def update_version(version_id: str, nickname: Optional[str] = None):
+    """
+    Update version metadata.
+
+    Args:
+        version_id: Version ID to update
+        nickname: New nickname for the version (display name)
+    """
+    manager = get_version_manager()
+    version = manager.get_version(version_id)
+    if not version:
+        raise HTTPException(404, "Version not found")
+
+    success = manager.update_version(version_id, nickname=nickname)
+    if not success:
+        raise HTTPException(500, "Failed to update version")
+
+    return {"status": "updated", "version_id": version_id, "nickname": nickname}
 
 
 @router.post("/versions/{version_id}/activate")
@@ -367,3 +399,67 @@ async def cancel_training(version_id: str):
         manager._save_index()
 
     return {"status": "cancelled", "version_id": version_id}
+
+
+@router.post("/versions/{version_id}/preview")
+async def preview_version(version_id: str, text: Optional[str] = None):
+    """
+    Generate preview audio for a training version.
+
+    Activates the version and synthesizes a test phrase to hear the voice.
+    Returns streaming audio/wav.
+
+    Args:
+        version_id: The training version to preview
+        text: Optional custom preview text (default: "你好，這是我的聲音測試。")
+    """
+    from app.services.tts.qwen_tts_engine import get_tts_engine
+
+    manager = get_version_manager()
+    version = manager.get_version(version_id)
+    if not version:
+        raise HTTPException(404, "Version not found")
+
+    if version.status != "ready":
+        raise HTTPException(400, f"Cannot preview version with status '{version.status}'. Must be 'ready'.")
+
+    # Activate the version on TTS engine
+    engine = get_tts_engine()
+    engine.activate_version(version_id)
+
+    # Preview text (use custom or default)
+    preview_text = text.strip() if text and text.strip() else "你好，這是我的聲音測試。"
+
+    async def audio_stream():
+        """Generate audio chunks and yield them as WAV data."""
+        import io
+        import wave
+
+        audio_chunks = []
+        sample_rate = 24000
+
+        async for event in engine.generate_streaming(
+            text=preview_text,
+            instruct="(natural, warm and friendly tone)",
+            language="Chinese",
+        ):
+            if event.event == "audio_chunk" and event.audio_data:
+                audio_chunks.append(event.audio_data)
+
+        if audio_chunks:
+            full_audio = b"".join(audio_chunks)
+            # Convert to WAV format
+            wav_io = io.BytesIO()
+            with wave.open(wav_io, 'wb') as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(sample_rate)
+                wav_file.writeframes(full_audio)
+            wav_io.seek(0)
+            yield wav_io.read()
+
+    return StreamingResponse(
+        audio_stream(),
+        media_type="audio/wav",
+        headers={"Content-Disposition": f"inline; filename=preview_{version_id}.wav"}
+    )

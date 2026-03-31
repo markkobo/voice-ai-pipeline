@@ -556,46 +556,118 @@ Client 重連
 
 ## 11. TTS Integration
 
-### 11.1 Loading LoRA at Runtime
+### 11.1 Weight Merging Approach (IMPLEMENTED)
+
+**Critical Insight**: Using PEFT's `PeftModel` at inference time breaks FasterQwen3TTS streaming and CUDA Graph acceleration.
+
+**Solution**: Weight Merging - merge LoRA weights into base model before inference.
+
+```
+Training Phase:
+  Base Model (VoiceDesign) + LoRA Training → LoRA adapter (adapter_model.safetensors)
+
+Inference Phase:
+  LoRA adapter ──→ PeftModel.from_pretrained()
+                ──→ merge_and_unload()
+                ──→ Merged model (base + LoRA baked in)
+                ──→ FasterQwen3TTS.from_pretrained(merged_path)
+                ──→ Streaming + CUDA Graph ✓
+```
+
+### 11.2 Loading LoRA at Runtime (IMPLEMENTED)
 
 ```python
 # app/services/tts/qwen_tts_engine.py
 
-class QwenTTSEngine:
-    def __init__(self):
-        self.current_lora_path = None
-        self.model = None
+def activate_version(self, version_id: str):
+    """Activate a merged LoRA model for voice cloning."""
+    # Look for merged model directory
+    # e.g., data/models/xiao_s_v12_20260330_223729
+    #   → data/models/merged_qwen3_tts_xiao_s_v12
+    lora_dir = Path(version.lora_path)
+    parent_dir = lora_dir.parent
+    parts = lora_dir.name.split('_')  # ['xiao', 's', 'v12', 'timestamp']
+    version_base = '_'.join(parts[:3])  # 'xiao_s_v12'
+    merged_name = f"merged_qwen3_tts_{version_base}"
+    merged_path = parent_dir / merged_name
 
-    def activate_version(self, version_id: str):
-        """Load LoRA adapter for version."""
-        version = get_version_manager().get_version(version_id)
-        if not version or version.status != "ready":
-            raise ValueError(f"Version {version_id} not ready")
+    if not merged_path.exists():
+        log.warning(f"Merged model not found at: {merged_path}")
+        return
 
-        self.current_lora_path = version.lora_path
-        # Reload model with LoRA
-        self._load_model_with_lora()
+    self._merged_model_path = str(merged_path.resolve())
 
-    def _load_model_with_lora(self):
-        """Load base model + LoRA adapter."""
-        # ...
+    # Reload model if already loaded
+    if self._is_loaded:
+        self._is_loaded = False
+        self._ensure_loaded()
 ```
 
-### 11.2 Inference with LoRA
+### 11.3 Merged Model Structure
+
+```
+data/models/merged_qwen3_tts_xiao_s_v12/
+├── model.safetensors         # 3.8GB (base + LoRA merged)
+├── speech_tokenizer/         # Required by Qwen3TTSModel
+├── config.json               # From VoiceDesign base
+├── generation_config.json
+├── merges.txt
+├── preprocessor_config.json
+├── tokenizer_config.json
+└── vocab.json
+```
+
+### 11.4 Key Implementation Details
+
+1. **Base Model**: Must use `Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign` (not Base model) for merging
+2. **LoRA Target Modules**: `["q_proj", "k_proj", "v_proj", "o_proj"]` on both `talker.model` and `code_predictor`
+3. **PEFT Config**: `task_type="CAUSAL_LM"`, `r=16`, `lora_alpha=32`, `lora_dropout=0.05`
+
+### 11.5 Training Method (IMPLEMENTED)
 
 ```python
-def synthesize(self, text, emotion_instruct):
-    if self.current_lora_path:
-        # Use LoRA adapter
-        audio = self.model.generate(
-            text,
-            adapter_path=self.current_lora_path,
-            emotion=emotion_instruct,
-        )
-    else:
-        # Use base model
-        audio = self.model.generate(text, emotion=emotion_instruct)
-    return audio
+# forward_sub_talker_finetune (Qwen3-TTS native training method)
+for step in range(seq_len - 1):
+    codec_ids = sample_codes[step].to(device)
+
+    # Get talker embeddings for first code group
+    audio_embeds = []
+    embed = model.talker.get_input_embeddings()(codec_ids[0].unsqueeze(0))
+    audio_embeds.append(embed)
+
+    # Get code_predictor embeddings for remaining code groups
+    for g in range(1, num_code_groups):
+        embed = model.talker.code_predictor.get_input_embeddings()[g-1](
+            codec_ids[g].unsqueeze(0))
+        audio_embeds.append(embed)
+
+    audio_embeds = torch.stack(audio_embeds, dim=1).squeeze(0)
+    talker_hidden = audio_embeds.mean(dim=0, keepdim=True)
+
+    # Forward with loss
+    _, loss = model.talker.forward_sub_talker_finetune(
+        codec_ids=codec_ids_batch,
+        talker_hidden_states=talker_hidden_batch
+    )
+
+    if loss is not None and not torch.isnan(loss):
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+```
+
+### 11.6 Inference with Merged Model
+
+```python
+# Works with FasterQwen3TTS streaming + CUDA Graph
+for audio_chunk, sr, timing in self._model.generate_voice_design_streaming(
+    text=text,
+    instruct=final_instruct,
+    language=language,
+    chunk_size=12,
+):
+    audio_bytes = (audio_chunk * 32767).astype(np.int16).tobytes()
+    yield TTSStreamEvent(event="audio_chunk", audio_data=audio_bytes, sample_rate=sr)
 ```
 
 ---
@@ -643,13 +715,20 @@ def synthesize(self, text, emotion_instruct):
 ## 15. Milestones
 
 - [x] M4.1: RFC 規劃 (本文檔)
-- [ ] M4.2: Training API endpoints + SSE
-- [ ] M4.3: Version Manager 擴展 (manifest)
-- [ ] M4.4: LoRA Trainer implementation
-- [ ] M4.5: Background job runner + progress tracking
-- [ ] M4.6: Training time estimation (pre-training)
-- [ ] M4.7: Progress UI (epoch, loss, %, ETA)
-- [ ] M4.8: Training Selection UI
-- [ ] M4.9: Model Summary UI
-- [ ] M4.10: TTS LoRA integration
-- [ ] M4.11: Integration tests
+- [x] M4.2: Training API endpoints + SSE
+- [x] M4.3: Version Manager 擴展 (manifest)
+- [x] M4.4: LoRA Trainer implementation
+- [x] M4.5: Background job runner + progress tracking
+- [x] M4.6: Training time estimation (pre-training)
+- [x] M4.7: Progress UI (epoch, loss, %, ETA)
+- [x] M4.8: Training Selection UI (uses recordings UI)
+- [x] M4.9: Model Summary UI (versions list with preview)
+- [x] M4.10: TTS LoRA integration (weight merging approach)
+- [x] M4.11: Integration tests (v12 training successful, loss=0.15)
+
+**Completed (2026-03-31)**:
+- Weight merging implemented for FasterQwen3TTS streaming compatibility
+- v12 training: 436s audio, 50 epochs, rank=16, loss=0.15
+- Merged model: data/models/merged_qwen3_tts_xiao_s_v12/
+- Training Selection UI (M4.8): Persona/recording selection with speaker labeling
+- Model Summary UI (M4.9): Active badge, preview button, recording details, version sorting

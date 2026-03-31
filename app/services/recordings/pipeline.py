@@ -12,6 +12,7 @@ Pipeline steps:
 import logging
 import os
 import time
+import threading
 from pathlib import Path
 from typing import Optional, Callable
 from dataclasses import dataclass
@@ -23,6 +24,10 @@ from .metadata import RecordingMetadata
 from .quality import AudioQualityAnalyzer
 
 logger = logging.getLogger(__name__)
+
+# Semaphore to serialize CUDA transcription and prevent OOM
+# Only one transcription can run on CUDA at a time
+_cuda_transcribe_lock = threading.Semaphore(1)
 
 # Retry configuration
 MAX_RETRIES = 3
@@ -482,11 +487,32 @@ class AudioProcessingPipeline:
                 speaker_audio[speaker_id].append(full_audio[start_sample:end_sample])
 
             # Save each speaker's audio
+            speaker_audio_data = []
             for speaker_id, audio_chunks in speaker_audio.items():
                 speaker_audio_combined = np.concatenate(audio_chunks)
                 speaker_path = self.paths.speakers_folder / f"{speaker_id}.wav"
                 sf.write(str(speaker_path), speaker_audio_combined, sample_rate)
                 self._log(f"Extracted {speaker_id}: {len(speaker_audio_combined)} samples ({len(audio_chunks)} segments)")
+
+                # Duration in seconds
+                duration_sec = len(speaker_audio_combined) / sample_rate
+                # Simple quality proxy: longer audio = more usable (capped at 30s)
+                quality_score = min(1.0, duration_sec / 30.0)
+                # Training ready: at least 3s of audio
+                training_ready = duration_sec >= 3.0 and quality_score >= 0.1
+
+                speaker_audio_data.append({
+                    "speaker_id": speaker_id,
+                    "duration_seconds": duration_sec,
+                    "audio_path": str(speaker_path),
+                    "transcription": self.metadata._data.get("transcription", {}).get("text", ""),
+                    "transcription_confidence": self.metadata._data.get("transcription", {}).get("confidence", 0.0),
+                    "quality_score": round(quality_score, 3),
+                    "training_ready": training_ready,
+                })
+
+            # Enrich segments with extracted data
+            self.metadata.enrich_speaker_segments(speaker_audio_data)
 
             self._log(f"Speaker extraction complete: {len(speaker_audio)} speakers")
 
@@ -511,63 +537,72 @@ class AudioProcessingPipeline:
             try:
                 from faster_whisper import WhisperModel
 
-                # Use small model for speed, medium for quality
-                # auto-detect GPU and use it if available
-                model = WhisperModel(
-                    "medium",  # Model size: tiny/base/small/medium/large
-                    device="cuda" if __import__('torch').cuda.is_available() else "cpu",
-                    compute_type="float16" if __import__('torch').cuda.is_available() else "int8"
-                )
+                # Serialize CUDA transcription to prevent OOM from parallel runs
+                # Only hold lock during model load + transcription, not during retry sleep
+                with _cuda_transcribe_lock:
+                    # Use small model for speed, medium for quality
+                    # auto-detect GPU and use it if available
+                    model = WhisperModel(
+                        "medium",  # Model size: tiny/base/small/medium/large
+                        device="cuda" if __import__('torch').cuda.is_available() else "cpu",
+                        compute_type="float16" if __import__('torch').cuda.is_available() else "int8"
+                    )
 
-                self._log("Whisper model loaded, starting transcription...")
+                    self._log("Whisper model loaded, starting transcription...")
 
-                # Run transcription
-                segments, info = model.transcribe(
-                    str(audio_path),
-                    language="zh",  # Chinese
-                    beam_size=5,
-                    vad_filter=True,  # Voice activity detection filter
-                )
+                    # Run transcription
+                    segments, info = model.transcribe(
+                        str(audio_path),
+                        language="zh",  # Chinese
+                        beam_size=5,
+                        vad_filter=True,  # Voice activity detection filter
+                    )
 
-                # Collect results
-                transcription_segments = []
-                full_text = []
-                total_confidence = 0
-                segment_count = 0
+                    # Collect results
+                    transcription_segments = []
+                    full_text = []
+                    total_confidence = 0
+                    segment_count = 0
 
-                for segment in segments:
-                    seg_dict = {
-                        "start": segment.start,
-                        "end": segment.end,
-                        "text": segment.text.strip()
-                    }
-                    transcription_segments.append(seg_dict)
-                    full_text.append(seg_dict["text"])
-                    if segment.avg_logprob is not None:
-                        total_confidence += segment.avg_logprob
-                        segment_count += 1
+                    for segment in segments:
+                        seg_dict = {
+                            "start": segment.start,
+                            "end": segment.end,
+                            "text": segment.text.strip()
+                        }
+                        transcription_segments.append(seg_dict)
+                        full_text.append(seg_dict["text"])
+                        if segment.avg_logprob is not None:
+                            total_confidence += segment.avg_logprob
+                            segment_count += 1
 
-                transcription_text = "".join(full_text).strip()
+                    transcription_text = "".join(full_text).strip()
 
-                # Calculate average confidence from log probabilities
-                if segment_count > 0:
-                    avg_logprob = total_confidence / segment_count
-                    # Convert log probability to confidence (0-1)
-                    confidence = min(1.0, max(0.0, np.exp(avg_logprob)))
-                else:
-                    confidence = 0.0
+                    # Calculate average confidence from log probabilities
+                    if segment_count > 0:
+                        avg_logprob = total_confidence / segment_count
+                        # Convert log probability to confidence (0-1)
+                        confidence = min(1.0, max(0.0, np.exp(avg_logprob)))
+                    else:
+                        confidence = 0.0
 
-                elapsed_ms = int((time.time() - start_time) * 1000)
+                    elapsed_ms = int((time.time() - start_time) * 1000)
 
-                self.metadata.update_transcription(
-                    text=transcription_text,
-                    confidence=confidence,
-                    segments=transcription_segments
-                )
-                self.metadata.save_transcription_text(transcription_text)
+                    self.metadata.update_transcription(
+                        text=transcription_text,
+                        confidence=confidence,
+                        segments=transcription_segments
+                    )
+                    self.metadata.save_transcription_text(transcription_text)
 
-                self._log(f"Transcription complete: {elapsed_ms}ms, confidence={confidence:.2f}")
-                self._log(f"Transcription text: {transcription_text[:100]}...")
+                    self._log(f"Transcription complete: {elapsed_ms}ms, confidence={confidence:.2f}")
+                    self._log(f"Transcription text: {transcription_text[:100]}...")
+
+                    # Free GPU memory after transcription
+                    del model
+                    if __import__('torch').cuda.is_available():
+                        __import__('torch').cuda.empty_cache()
+
                 break
 
             except Exception as e:

@@ -30,7 +30,8 @@ class TrainingVersion:
     version_id: str  # e.g., "v1_20260329_143022"
     persona_id: str
     status: str  # "training", "ready", "failed"
-    base_model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
+    nickname: Optional[str] = None
+    base_model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
     lora_path: Optional[str] = None
     rank: int = 16
     learning_rate: float = 1e-4
@@ -39,6 +40,7 @@ class TrainingVersion:
     final_loss: Optional[float] = None
     training_time_seconds: Optional[int] = None
     recording_ids_used: list[str] = field(default_factory=list)
+    segment_ids_used: list[str] = field(default_factory=list)  # ["recId_speakerId", ...]
     num_recordings_used: int = 0  # Deprecated: use len(recording_ids_used) instead
     created_at: Optional[str] = None
     completed_at: Optional[str] = None
@@ -46,6 +48,7 @@ class TrainingVersion:
     def to_dict(self) -> dict:
         d = asdict(self)
         d["num_recordings_used"] = len(self.recording_ids_used)
+        d["display_name"] = self.nickname or self.version_id
         return d
 
 
@@ -96,6 +99,7 @@ class VersionManager:
         learning_rate: float = 1e-4,
         num_epochs: int = 10,
         batch_size: int = 4,
+        segment_ids: list[str] = None,
     ) -> TrainingVersion:
         """Create a new training version."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -107,6 +111,7 @@ class VersionManager:
             persona_id=persona_id,
             status="training",
             recording_ids_used=recording_ids,
+            segment_ids_used=segment_ids or [],
             rank=rank,
             learning_rate=learning_rate,
             num_epochs=num_epochs,
@@ -161,6 +166,16 @@ class VersionManager:
         self._save_index()
 
         logger.info(f"[TRAINING] Activated version: {version_id}")
+        return True
+
+    def update_version(self, version_id: str, nickname: Optional[str] = None) -> bool:
+        """Update version metadata (e.g., nickname)."""
+        version = self.get_version(version_id)
+        if not version:
+            return False
+        if nickname is not None:
+            version.nickname = nickname
+        self._save_index()
         return True
 
     def update_version_status(
@@ -264,93 +279,65 @@ def get_version_manager() -> VersionManager:
 def get_training_audio_for_persona(
     persona_id: str,
     selected_recordings: list[dict],
-    speaker_selections: dict[str, str] = None,
+    segment_ids: list[str] = None,
 ) -> list[tuple[Path, float, str]]:
     """
-    Get training audio paths for a persona.
+    Get training audio paths for a persona using segment_ids.
 
     Args:
         persona_id: Target persona to train
-        selected_recordings: List of recording metadata dicts
-        speaker_selections: {recording_id: speaker_id} - which speaker to use per recording
+        selected_recordings: List of recording metadata dicts (for fallback path lookup)
+        segment_ids: List of segment identifiers in format "{recording_id}_{speaker_id}"
+                     e.g., "uuid123_SPEAKER_00"
 
     Returns:
         List of (audio_path, duration_seconds, recording_id)
     """
-    from app.services.recordings import RecordingPaths, RecordingMetadata
+    from app.services.recordings import get_recording_by_folder, RecordingMetadata
 
+    # Build recording lookup by rec_id
+    rec_by_id = {rec["recording_id"]: rec for rec in selected_recordings}
+
+    # Build segment lookup: {recId_speakerId: {rec, paths, metadata}}
     audio_files = []
 
-    for rec in selected_recordings:
-        rec_id = rec["recording_id"]
-        folder_name = rec.get("folder_name", "")
-
-        # Find recording paths
-        paths = None
-        for rp in RecordingPaths.__subclasses__() or []:
-            pass
-
-        # Find by folder name
-        recordings_dir = Path("/workspace/voice-ai-pipeline-1/data/recordings/raw")
-        for folder in recordings_dir.iterdir():
-            if folder.name == folder_name:
-                # Reconstruct RecordingPaths
-                parts = folder.name.split("_")
-                if len(parts) >= 3:
-                    listener_id = parts[0]
-                    # Find persona_id
-                    persona_candidate = "_".join(parts[1:-2])
-                    timestamp = "_".join(parts[-2:])
-                    if listener_id in {"child", "mom", "dad", "friend", "reporter", "elder", "default"}:
-                        paths = RecordingPaths(
-                            listener_id=listener_id,
-                            persona_id=rec.get("persona_id", "xiao_s"),
-                            timestamp=timestamp,
-                            recording_id=rec_id,
-                        )
-                break
-
-        if not paths:
+    for seg_id in (segment_ids or []):
+        # Parse segment_id = "{recording_id}_{speaker_id}"
+        parts = seg_id.rsplit("_", 1)
+        if len(parts) != 2:
+            logger.warning(f"[TRAINING] Invalid segment_id format: {seg_id}")
             continue
 
-        # Check speaker labels
-        speaker_labels = rec.get("speaker_labels", {})
+        rec_id, speaker_id = parts
+
+        # Find recording
+        rec = rec_by_id.get(rec_id)
+        if not rec:
+            logger.warning(f"[TRAINING] Recording not found for segment: {seg_id}")
+            continue
+
+        folder_name = rec.get("folder_name", "")
+        paths = get_recording_by_folder(folder_name)
+        if not paths:
+            logger.warning(f"[TRAINING] Could not find recording folder: {folder_name}")
+            continue
+
+        # Get speaker audio path
+        speaker_audio = paths.speakers_folder / f"{speaker_id}.wav"
+        if not speaker_audio.exists():
+            logger.warning(f"[TRAINING] Speaker audio not found: {speaker_audio}")
+            continue
+
+        # Get duration from metadata (enriched segments have duration_seconds)
         metadata = RecordingMetadata(paths)
         metadata.reload()
+        duration = 30.0  # default fallback
+        for seg in metadata.data.get("speaker_segments", []):
+            if seg.get("speaker_id") == speaker_id and seg.get("duration_seconds"):
+                duration = seg["duration_seconds"]
+                break
 
-        speaker_labels = metadata.data.get("speaker_labels", {})
-
-        # Determine which speaker to use
-        speaker_to_use = None
-
-        if speaker_selections and rec_id in speaker_selections:
-            # User explicitly selected a speaker
-            speaker_to_use = speaker_selections[rec_id]
-        elif speaker_labels:
-            # Find speaker labeled as target persona
-            for speaker_id, label in speaker_labels.items():
-                if label == persona_id:
-                    speaker_to_use = speaker_id
-                    break
-
-        # Get audio path
-        audio_path = None
-
-        if speaker_to_use and speaker_to_use != "full":
-            # Use specific speaker
-            speaker_audio = paths.speakers_folder / f"{speaker_to_use}.wav"
-            if speaker_audio.exists():
-                audio_path = speaker_audio
-        elif paths.enhanced_audio_path.exists():
-            # Use full enhanced audio
-            audio_path = paths.enhanced_audio_path
-        elif paths.denoised_audio_path.exists():
-            audio_path = paths.denoised_audio_path
-        elif paths.raw_audio_path.exists():
-            audio_path = paths.raw_audio_path
-
-        if audio_path and audio_path.exists():
-            duration = rec.get("duration_seconds", 0) or 30.0  # Estimate if unknown
-            audio_files.append((audio_path, duration, rec_id))
+        audio_files.append((speaker_audio, duration, rec_id))
+        logger.info(f"[TRAINING] Added segment: {speaker_id} from {rec_id[:8]} ({duration:.1f}s)")
 
     return audio_files

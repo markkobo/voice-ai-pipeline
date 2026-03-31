@@ -26,7 +26,7 @@ class TrainingConfig:
     batch_size: int = 4
     warmup_steps: int = 100
     gradient_accumulation_steps: int = 4
-    base_model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
+    base_model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 
 
 @dataclass
