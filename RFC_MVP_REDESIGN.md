@@ -465,14 +465,14 @@ data/
 
 ## 10. Milestones
 
-- [ ] M2.1: Persona/Listener API + CRUD
-- [ ] M2.2: Recording segment API + Tree View UI
-- [ ] M2.3: Playback bar with seek + Parse/Re-parse
-- [ ] M2.4: Inline persona/listener editing for segments
-- [ ] M3.1: Training page read-only tree view + listener filter
-- [ ] M3.2: Segment multi-select for training
-- [ ] M3.3: Model nickname edit + delete
-- [ ] M3.4: "Jump to Conversation" button
-- [ ] M4.1: Conversation model version dropdown with nicknames
-- [ ] M4.2: Start/Stop toggle button
-- [ ] M4.3: Version info tooltip
+- [x] M2.1: Persona/Listener API + CRUD
+- [x] M2.2: Recording segment API + Tree View UI
+- [x] M2.3: Playback bar with seek + Parse/Re-parse
+- [x] M2.4: Inline persona/listener editing for segments
+- [x] M3.1: Training page read-only tree view + listener filter
+- [x] M3.2: Segment multi-select for training
+- [x] M3.3: Model nickname edit + delete
+- [x] M3.4: "Jump to Conversation" button
+- [x] M4.1: Conversation model version dropdown with nicknames
+- [x] M4.2: Start/Stop toggle button
+- [x] M4.3: Version info tooltip
