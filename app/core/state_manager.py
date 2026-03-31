@@ -72,6 +72,10 @@ class SessionState:
         self.tts_task = None
         self.tts_cancellation_event = None
 
+        # VAD tracking
+        self._vad_had_speech = False  # True if we detected speech in this utterance
+        self._vad_committed = False   # True if we've already committed this utterance
+
         # Model
         self.llm_model = None
 
@@ -209,14 +213,14 @@ class StateManager:
 
     def process_audio(self, session_id: str, audio_chunk: bytes) -> Optional[Dict[str, Any]]:
         """
-        Process audio chunk through VAD.
+        Process audio chunk through VAD for continuous monitoring.
 
-        Args:
-            session_id: Session identifier
-            audio_chunk: Binary audio data
+        SileroVAD.detect() returns (is_commit, prob):
+          - is_commit=True  → silence after sufficient speech → end of utterance
+          - is_commit=False → currently in speech or pre-speech silence
 
         Returns:
-            None if speech continues, dict if VAD commits utterance
+            None if speech continues, dict if VAD commits (auto-send)
         """
         state = self._sessions.get(session_id)
         if not state:
@@ -225,35 +229,35 @@ class StateManager:
         if not state.is_configured:
             raise RuntimeError("Session not configured")
 
-        # Cancel any ongoing LLM + TTS when new speech is detected (barge-in)
-        is_speaking, energy = state.vad.detect(audio_chunk)
-        if is_speaking:
-            self.cancel_llm_task(session_id)
-            self.cancel_tts_task(session_id)
+        # Run VAD detection
+        is_commit, avg_prob = state.vad.detect(audio_chunk)
 
         # Accumulate audio
         state.audio_buffer.extend(audio_chunk)
 
-        # VAD detection telemetry
-        vad_start = time.perf_counter()
-        # Already computed above, just record timing
-        vad_latency = time.perf_counter() - vad_start
-        state.vad_latency_ms = int(vad_latency * 1000)
+        # Track speech state
+        if not is_commit:
+            state._vad_had_speech = True
 
-        metrics.vad_latency.labels(
-            component="vad",
-            model="energy"
-        ).observe(vad_latency)
+        # Barge-in: user starts speaking in an active (not-yet-committed) utterance
+        # SileroVAD returns is_commit=False during active speech
+        if not is_commit and state._vad_had_speech and not state._vad_committed:
+            log.info(f"[VAD] Barge-in detected (new speech in active utterance)")
+            self.cancel_llm_task(session_id)
+            self.cancel_tts_task(session_id)
 
-        # Return commit signal if VAD detected end of speech
-        if is_speaking:
+        # End-of-speech: silence after sufficient speech → commit (auto-send)
+        if is_commit and state._vad_had_speech and not state._vad_committed:
+            log.info(f"[VAD] End of speech (silence detected), committing")
+            state._vad_committed = True  # Prevent double-commit
+            state.vad.reset()  # Reset VAD for next utterance
+            state._vad_had_speech = False
+            state.utterance_id = str(uuid.uuid4())  # New ID for next utterance
             return {
                 "type": "vad_commit",
                 "utterance_id": state.utterance_id,
-                "energy": energy,
-                "telemetry": {
-                    "vad_latency_ms": state.vad_latency_ms,
-                }
+                "energy": avg_prob,
+                "telemetry": {"vad_latency_ms": state.vad_latency_ms}
             }
 
         return None
@@ -424,3 +428,5 @@ class StateManager:
             # Reset VAD state too
             if hasattr(state.vad, "reset"):
                 state.vad.reset()
+            state._vad_committed = False
+            state._vad_had_speech = False

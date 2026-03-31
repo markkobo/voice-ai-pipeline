@@ -808,15 +808,10 @@ UI_HTML = """
         }
 
         if (msg.type === 'vad_commit') {
-            log('VAD commit: silence detected, utterance finalizing');
-            // Server VAD detected end of speech — reset UI for next utterance
-            // (audio already sent via commit_utterance)
+            log('VAD commit: silence detected, auto-sending utterance');
+            // Server VAD detected end of speech — send accumulated audio
             if (isRecording) {
-                // Should already be false after stopRecordingAndSend, but reset anyway
-                isRecording = false;
-                if (recordBtn) recordBtn.textContent = '🎤 開始錄音';
-                commitBtn.disabled = true;
-                cancelBtn.disabled = true;
+                stopRecordingAndSend();  // Send PCM + commit_utterance to server
             }
         }
 
