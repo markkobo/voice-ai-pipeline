@@ -9,6 +9,7 @@
 #   --port PORT   Override default port 8080
 #   --force       Force full restart even if code hasn't changed
 #   --code        Only restart if Python code changed (default: auto-detect)
+#   --watch       Watch for file changes and auto-restart (background daemon)
 #   --ui          Only check UI is accessible (no restart)
 #   --help        Show this help
 
@@ -25,6 +26,7 @@ PORT="${PORT:-8080}"
 LOG_FILE="/tmp/voice-ai-server.log"
 PID_FILE="/tmp/voice-ai-server.pid"
 LAST_COMMIT_FILE="/tmp/voice-ai-last-commit.txt"
+WATCHER_PID_FILE="/tmp/voice-ai-watcher.pid"
 
 # Parse arguments
 MODE="auto"
@@ -35,6 +37,7 @@ while [[ $# -gt 0 ]]; do
         --port)      PORT="$2"; shift 2 ;;
         --force)     MODE="force"; shift ;;
         --code)      MODE="code"; shift ;;
+        --watch)     MODE="watch"; shift ;;
         --ui)        MODE="ui"; shift ;;
         --help)
             grep "^#" "$0" | head -15 | sed 's/^# //'
@@ -43,13 +46,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Check if server is currently running
 is_running() {
     if [ -f "$PID_FILE" ]; then
         local pid=$(cat "$PID_FILE")
         kill -0 "$pid" 2>/dev/null && return 0
     fi
-    # Also check by port
     lsof -ti :$PORT &>/dev/null && return 0
     return 1
 }
@@ -62,100 +63,36 @@ get_pid() {
     fi
 }
 
-# Get last git commit hash for code change detection
 last_git_commit() {
     git -C /workspace/voice-ai-pipeline-1 rev-parse HEAD 2>/dev/null
 }
 
-# Check if code changed since last restart
 code_changed() {
     local current_commit=$(last_git_commit)
     local last_commit=""
-
     if [ -f "$LAST_COMMIT_FILE" ]; then
         last_commit=$(cat "$LAST_COMMIT_FILE")
     fi
-
-    # Changed if commits differ or file doesn't exist
     [ "$current_commit" != "$last_commit" ]
 }
 
-echo -e "${YELLOW}=== Voice AI Smart Restart ===${NC}"
-echo "Mode: $MODE | Port: $PORT"
+# =============================================================================
+# Stop server (graceful, with fallback to kill -9)
+# =============================================================================
+stop_server() {
+    echo -e "${YELLOW}[Stop]${NC} Stopping server..."
 
-# =============================================================================
-# MODE: ui (no restart — just verify UI is accessible)
-# =============================================================================
-if [ "$MODE" = "ui" ]; then
-    echo -e "${CYAN}[UI Check]${NC} Verifying server is accessible..."
-    if is_running && curl -s "http://localhost:$PORT/health" > /dev/null 2>&1; then
-        echo -e "${GREEN}✓ Server is running and healthy${NC}"
-        echo "  UI: http://localhost:$PORT/ui"
-        exit 0
-    else
-        echo -e "${RED}✗ Server not running${NC}"
-        echo "  Run without --ui to restart"
-        exit 1
-    fi
-fi
-
-# =============================================================================
-# Check current server status
-# =============================================================================
-if is_running; then
-    PID=$(get_pid)
-    echo -e "${GREEN}✓ Server already running (PID: $PID)${NC}"
-
-    case "$MODE" in
-        auto)
-            if code_changed; then
-                echo -e "${YELLOW}[Code Change Detected]${NC} Need to restart"
-            else
-                echo -e "${CYAN}[No Change]${NC} Server already up-to-date"
-                echo ""
-                echo -e "  ${CYAN}Hint:${NC} If you just want to verify, run: $0 --ui"
-                echo -e "  ${CYAN}Hint:${NC} To force restart, run: $0 --force"
-                echo ""
-                # Just verify endpoints are healthy
-                if curl -s "http://localhost:$PORT/health" > /dev/null 2>&1; then
-                    echo -e "${GREEN}✓ All endpoints OK${NC}"
-                    echo "  Main UI: http://localhost:$PORT/ui"
-                    exit 0
-                else
-                    echo -e "${RED}✗ Server unhealthy, forcing restart${NC}"
-                    MODE="force"
-                fi
-            fi
-            ;;
-        force)
-            echo -e "${YELLOW}[Force Restart]${NC}"
-            ;;
-    esac
-else
-    echo -e "${YELLOW}[Cold Start]${NC} Server not running, starting fresh"
-    MODE="force"
-fi
-
-# =============================================================================
-# Restart needed — kill old process
-# =============================================================================
-if [ "$MODE" = "force" ] || [ "$MODE" = "auto" ]; then
-    echo -e "${YELLOW}[1/4] Stopping existing server...${NC}"
-
-    # Kill by PID file
     if [ -f "$PID_FILE" ]; then
         OLD_PID=$(cat "$PID_FILE")
         if kill -0 "$OLD_PID" 2>/dev/null; then
             kill "$OLD_PID" 2>/dev/null || true
-            # Wait for graceful shutdown
             for i in {1..5}; do
                 if ! kill -0 "$OLD_PID" 2>/dev/null; then
-                    echo -e "${GREEN}✓ Server stopped gracefully (PID $OLD_PID)${NC}"
+                    echo -e "${GREEN}✓ Stopped gracefully (PID $OLD_PID)${NC}"
                     break
                 fi
                 sleep 1
             done
-            # Force kill if still alive
             if kill -0 "$OLD_PID" 2>/dev/null; then
                 kill -9 "$OLD_PID" 2>/dev/null || true
                 echo -e "${YELLOW}✓ Force killed PID $OLD_PID${NC}"
@@ -164,7 +101,7 @@ if [ "$MODE" = "force" ] || [ "$MODE" = "auto" ]; then
         rm -f "$PID_FILE"
     fi
 
-    # Kill any stray processes on ports
+    # Kill stray processes on ports
     for pid in $(lsof -ti :$PORT 2>/dev/null || true); do
         [ "$pid" = "$OLD_PID" ] && continue
         kill "$pid" 2>/dev/null || true
@@ -174,13 +111,13 @@ if [ "$MODE" = "force" ] || [ "$MODE" = "auto" ]; then
     done
 
     sleep 2
-fi
+}
 
 # =============================================================================
-# Start server (only if killed or cold start)
+# Start server (returns PID)
 # =============================================================================
-if [ "$MODE" = "force" ] || [ "$MODE" = "auto" ] || ! is_running; then
-    echo -e "${YELLOW}[2/4] Starting server on port $PORT...${NC}"
+start_server() {
+    echo -e "${YELLOW}[Start]${NC} Starting server on port $PORT..."
 
     export USE_MOCK_TTS="${USE_MOCK_TTS:-false}"
     export USE_QWEN_ASR="${USE_QWEN_ASR:-true}"
@@ -191,49 +128,50 @@ if [ "$MODE" = "force" ] || [ "$MODE" = "auto" ] || ! is_running; then
     SERVER_PID=$!
     echo $SERVER_PID > "$PID_FILE"
 
-    # Record commit hash for next time
+    # Record commit hash
     last_git_commit > "$LAST_COMMIT_FILE"
 
     echo "  PID: $SERVER_PID | Log: $LOG_FILE"
+}
 
-    # =============================================================================
-    # Wait for startup
-    # =============================================================================
-    echo -e "${YELLOW}[3/4] Waiting for server ready...${NC}"
+# =============================================================================
+# Wait for server to be ready
+# =============================================================================
+wait_ready() {
+    echo -e "${YELLOW}[Wait]${NC} Waiting for server ready..."
 
     max_wait=120
     counter=0
     while [ $counter -lt $max_wait ]; do
         if curl -s "http://localhost:$PORT/health" > /dev/null 2>&1; then
-            echo -e "${GREEN}✓ Server ready!${NC}"
-            break
+            echo -e "${GREEN}✓ Ready!${NC}"
+            return 0
         fi
 
         if ! kill -0 $SERVER_PID 2>/dev/null; then
             echo -e "${RED}✗ Server crashed!${NC}"
             tail -20 "$LOG_FILE"
-            exit 1
+            return 1
         fi
 
         if [ $((counter % 15)) -eq 0 ]; then
-            echo "  Still starting... ($counter/$max_wait)s"
+            echo "  Starting... ($counter/$max_wait)s"
         fi
         sleep 1
         counter=$((counter + 1))
     done
 
-    if [ $counter -ge $max_wait ]; then
-        echo -e "${RED}✗ Startup timeout!${NC}"
-        tail -30 "$LOG_FILE"
-        exit 1
-    fi
+    echo -e "${RED}✗ Startup timeout!${NC}"
+    tail -30 "$LOG_FILE"
+    return 1
+}
 
-    # =============================================================================
-    # Verify endpoints
-    # =============================================================================
-    echo -e "${YELLOW}[4/4] Verifying endpoints...${NC}"
-
-    all_ok=true
+# =============================================================================
+# Verify endpoints
+# =============================================================================
+verify_endpoints() {
+    echo -e "${YELLOW}[Verify]${NC} Checking endpoints..."
+    local all_ok=true
     for ep in "/health" "/api/personas" "/api/listeners" "/api/training/versions"; do
         if curl -s "http://localhost:$PORT$ep" > /dev/null 2>&1; then
             echo -e "  ${GREEN}✓$ep${NC}"
@@ -242,21 +180,176 @@ if [ "$MODE" = "force" ] || [ "$MODE" = "auto" ] || ! is_running; then
             all_ok=false
         fi
     done
+    [ "$all_ok" = true ]
+}
+
+# =============================================================================
+# Full restart (stop + start + wait + verify)
+# =============================================================================
+do_restart() {
+    local reason="${1:-code change}"
+    echo -e "${CYAN}[Restart]${NC} Restarting: $reason"
+
+    stop_server
+    start_server
+
+    if ! wait_ready; then
+        echo -e "${RED}✗ Restart failed${NC}"
+        return 1
+    fi
+
+    verify_endpoints
 
     echo ""
-    echo -e "${GREEN}=== Server Ready ===${NC}"
-    echo ""
+    echo -e "${GREEN}=== Server Ready (PID $(get_pid)) ===${NC}"
     echo "  Main UI:      http://localhost:$PORT/ui"
-    echo "  Recordings:    http://localhost:$PORT/ui/recordings"
-    echo "  Training:     http://localhost:$PORT/ui/training"
+    echo "  Recordings:   http://localhost:$PORT/ui/recordings"
+    echo "  Training:      http://localhost:$PORT/ui/training"
     echo "  API Docs:     http://localhost:$PORT/docs"
     echo "  Metrics:      http://localhost:$PORT:9090/metrics"
-    echo "  Log:          $LOG_FILE"
-    echo "  PID:          $SERVER_PID"
+}
+
+# =============================================================================
+# Watch mode: background daemon that monitors code and auto-restarts
+# =============================================================================
+do_watch() {
+    echo -e "${YELLOW}=== Watch Mode ===${NC}"
+    echo "Monitoring code changes and auto-restarting server..."
+    echo "PID file: $WATCHER_PID_FILE"
     echo ""
 
-    if [ "$all_ok" = false ]; then
-        echo -e "${YELLOW}Some endpoints failed. Recent log:${NC}"
-        tail -10 "$LOG_FILE"
+    # Kill existing watcher if any
+    if [ -f "$WATCHER_PID_FILE" ]; then
+        OLD_WATCHER=$(cat "$WATCHER_PID_FILE")
+        kill "$OLD_WATCHER" 2>/dev/null || true
+        rm -f "$WATCHER_PID_FILE"
     fi
-fi
+
+    # Check prerequisites
+    if ! command -v inotifywait &>/dev/null; then
+        echo -e "${YELLOW}Installing inotify-tools...${NC}"
+        sudo apt-get install -y inotify-tools 2>/dev/null || apt install -y inotify-tools 2>/dev/null || true
+    fi
+
+    if ! command -v inotifywait &>/dev/null; then
+        echo -e "${RED}inotifywait not available. Install inotify-tools.${NC}"
+        echo "  Debian/Ubuntu: sudo apt install inotify-tools"
+        echo "  Or use --code mode instead of --watch"
+        exit 1
+    fi
+
+    # Start watching in background
+    (
+        LAST_COMMIT=$(last_git_commit 2>/dev/null)
+
+        # Watch app/, telemetry/, and scripts/ directories
+        # Exclude: __pycache__, .pyc, .pyo, data/, .git/
+        inotifywait -m -r \
+            --exclude '(__pycache__|\.pyc|\.pyo|\.git|data|\.claude)' \
+            -e modify,create,delete \
+            /workspace/voice-ai-pipeline-1/app \
+            /workspace/voice-ai-pipeline-1/telemetry \
+            /workspace/voice-ai-pipeline-1/scripts \
+            2>/dev/null | while read directory filename event; do
+
+            # Check if it's a Python file or shell script
+            if [[ "$filename" =~ \.(py|sh)$ ]]; then
+                CURRENT_COMMIT=$(last_git_commit 2>/dev/null)
+
+                if [ "$CURRENT_COMMIT" != "$LAST_COMMIT" ]; then
+                    echo ""
+                    echo -e "${CYAN}[$(date '+%H:%M:%S')]${NC} Code changed (git commit updated), triggering restart..."
+                    LAST_COMMIT="$CURRENT_COMMIT"
+
+                    # Trigger restart via SIGUSR1 if server supports it,
+                    # otherwise do a full restart
+                    if is_running; then
+                        echo "  Stopping server..."
+                        stop_server
+                        sleep 1
+                        start_server
+                        if wait_ready; then
+                            verify_endpoints
+                            echo -e "${GREEN}[$(date '+%H:%M:%S')]${NC} Auto-restart complete"
+                        fi
+                    fi
+                fi
+            fi
+        done
+    ) &
+    WATCHER_PID=$!
+    echo $WATCHER_PID > "$WATCHER_PID_FILE"
+
+    echo -e "${GREEN}✓ Watcher started (PID $WATCHER_PID)${NC}"
+    echo ""
+    echo "Watching for .py and .sh changes in:"
+    echo "  app/  telemetry/  scripts/"
+    echo ""
+    echo "Server:"
+    if is_running; then
+        echo -e "  ${GREEN}✓ Running (PID $(get_pid))${NC}"
+        echo "  UI: http://localhost:$PORT/ui"
+    else
+        echo -e "  ${RED}✗ Not running${NC}"
+    fi
+    echo ""
+    echo "To stop watcher: kill \$(cat $WATCHER_PID_FILE)"
+    echo "Or: pkill -f 'inotifywait.*voice-ai'"
+    echo ""
+}
+
+# =============================================================================
+# Main
+# =============================================================================
+echo -e "${YELLOW}=== Voice AI Smart Restart ===${NC}"
+echo "Mode: $MODE | Port: $PORT"
+
+case "$MODE" in
+    ui)
+        echo -e "${CYAN}[UI Check]${NC}"
+        if is_running && curl -s "http://localhost:$PORT/health" > /dev/null 2>&1; then
+            echo -e "${GREEN}✓ Server healthy (PID $(get_pid))${NC}"
+            echo "  http://localhost:$PORT/ui"
+            exit 0
+        else
+            echo -e "${RED}✗ Server not running${NC}"
+            exit 1
+        fi
+        ;;
+
+    watch)
+        do_watch
+        ;;
+
+    auto)
+        if is_running; then
+            PID=$(get_pid)
+            echo -e "${GREEN}✓ Server running (PID $PID)${NC}"
+
+            if code_changed; then
+                echo -e "${YELLOW}[Code Changed]${NC}"
+                do_restart "Python code updated"
+            else
+                echo -e "${CYAN}[No Change]${NC} Server up-to-date"
+                if curl -s "http://localhost:$PORT/health" > /dev/null 2>&1; then
+                    echo -e "${GREEN}✓ Endpoints OK${NC}"
+                    echo "  http://localhost:$PORT/ui"
+                else
+                    echo -e "${YELLOW}Endpoints unhealthy, restarting...${NC}"
+                    do_restart "unhealthy endpoints"
+                fi
+            fi
+        else
+            echo -e "${YELLOW}[Cold Start]${NC}"
+            do_restart "cold start"
+        fi
+        ;;
+
+    force|code)
+        if is_running; then
+            do_restart "force restart"
+        else
+            do_restart "cold start"
+        fi
+        ;;
+esac
