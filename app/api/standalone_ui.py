@@ -226,6 +226,7 @@ UI_HTML = """
     let accumulatedChunks = [];  // Accumulated PCM ArrayBuffers
     let isThinking = false;  // Track if AI is processing
     let selectedVersionId = null;  // Selected TTS version ID from dropdown
+    let wsBinaryActive = false;  // True when WS binary TTS chunks are streaming
 
     // AudioWorklet for streaming PCM playback
     let audioWorkletNode = null;
@@ -896,6 +897,14 @@ UI_HTML = """
             var thisUrl = msg.stream_url;
             log('TTS ready: emotion=' + emotion + ' text=' + msg.text);
 
+            // Skip HTTP fetch if WS binary TTS is already streaming
+            // WS binary chunks (ArrayBuffer) provide sentence-level streaming
+            // HTTP fallback (tts_ready) would cause duplicate overlapping audio
+            if (wsBinaryActive) {
+                log('TTS skip HTTP fetch (WS binary active)');
+                return;
+            }
+
             // 如果 URL 一樣，跳過（避免重複播放）
             if (thisUrl === lastPlayedUrl) {
                 log('TTS skip same url');
@@ -917,6 +926,7 @@ UI_HTML = """
 
         if (msg.type === 'tts_start') {
             // New sentence TTS starting over WebSocket — prepare AudioWorklet for immediate playback
+            wsBinaryActive = true;  // Mark WS binary as active to suppress HTTP fetch
             // Flush any pending streaming audio so new chunks take priority
             if (audioWorkletNode) {
                 audioWorkletNode.port.postMessage({ type: 'flush' });
@@ -940,6 +950,7 @@ UI_HTML = """
             ttsText = '';
             ttsEmotion = '';
             isThinking = false;
+            wsBinaryActive = false;  // Reset so next tts_ready can use HTTP fallback if needed
             document.getElementById('thinkingIndicator').style.display = 'none';
             log('LLM done - queue has ' + audioQueue.length + ' items waiting');
         }
@@ -949,6 +960,7 @@ UI_HTML = """
             // Clear audio queue and stop playing
             audioQueue = [];
             isAudioPlaying = false;
+            wsBinaryActive = false;  // Reset WS binary flag
             if (currentAudio) {
                 try { currentAudio.pause(); } catch(e) {}
                 try { currentAudio.cancel(); } catch(e) {}
