@@ -166,7 +166,7 @@ UI_HTML = """
         </div>
 
         <div class="controls">
-            <button id="recordBtn" class="primary" disabled onclick="toggleConversation()">🎤 開始對話</button>
+            <button id="recordBtn" class="primary" disabled>🎤 開始對話</button>
             <button id="commitBtn" disabled onclick="window.__commitBtnClicked()">✋ 強制送出</button>
             <button id="cancelBtn" disabled>⏹ 取消</button>
         </div>
@@ -595,7 +595,7 @@ UI_HTML = """
         ws.onopen = () => {
             setStatus('connected');
             isConversationActive = true;
-            if (recordBtn) recordBtn.textContent = '⏹ 停止對話';
+            if (recordBtn) recordBtn.disabled = false;
             if (commitBtn) commitBtn.disabled = false;
             if (cancelBtn) cancelBtn.disabled = false;
             log('WS connected');
@@ -631,7 +631,10 @@ UI_HTML = """
 
         ws.onclose = () => {
             setStatus('disconnected');
-            recordBtn.disabled = true;
+            if (recordBtn) {
+                recordBtn.disabled = true;
+                recordBtn.textContent = '🎤 開始對話';
+            }
             commitBtn.disabled = true;
             cancelBtn.disabled = true;
             if (isRecording) {
@@ -653,8 +656,6 @@ UI_HTML = """
             }
             log('WS disconnected');
             isConversationActive = false;
-            const recordBtn = document.getElementById('recordBtn');
-            if (recordBtn) recordBtn.textContent = '🎤 開始對話';
         };
 
         ws.onerror = (e) => log('WS error: ' + JSON.stringify(e));
@@ -1084,7 +1085,7 @@ UI_HTML = """
             log('start_speech sent');
 
             setStatus('recording');
-            recordBtn.textContent = '🔴 錄音中...';
+            if (recordBtn) recordBtn.textContent = '⏹ 停止對話';
             commitBtn.disabled = false;
             cancelBtn.disabled = false;
             log('Recording started (raw PCM via onaudioprocess)');
