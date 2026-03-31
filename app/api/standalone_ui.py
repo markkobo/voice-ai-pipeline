@@ -166,9 +166,7 @@ UI_HTML = """
         </div>
 
         <div class="controls">
-            <button id="recordBtn" class="primary" disabled>🎤 開始對話</button>
-            <button id="commitBtn" disabled onclick="window.__commitBtnClicked()">✋ 強制送出</button>
-            <button id="cancelBtn" disabled>⏹ 取消</button>
+            <button id="recordBtn" class="primary" disabled onclick="toggleRecording()">🎤 開始錄音</button>
         </div>
 
         <div class="conversation" id="conversation">
@@ -224,7 +222,6 @@ UI_HTML = """
     let recordingStream = null;
     let accumulatedChunks = [];  // Accumulated PCM ArrayBuffers
     let isThinking = false;  // Track if AI is processing
-    let isConversationActive = false;  // Toggle state for conversation
     let selectedVersionId = null;  // Selected TTS version ID from dropdown
 
     // AudioWorklet for streaming PCM playback
@@ -539,8 +536,6 @@ UI_HTML = """
 
     const statusEl = document.getElementById('status');
     const recordBtn = document.getElementById('recordBtn');
-    const commitBtn = document.getElementById('commitBtn');
-    const cancelBtn = document.getElementById('cancelBtn');
     const convEl = document.getElementById('conversation');
     const debugEl = document.getElementById('debug');
     const debugContent = document.getElementById('debugContent');
@@ -594,10 +589,7 @@ UI_HTML = """
 
         ws.onopen = () => {
             setStatus('connected');
-            isConversationActive = true;
             if (recordBtn) recordBtn.disabled = false;
-            if (commitBtn) commitBtn.disabled = false;
-            if (cancelBtn) cancelBtn.disabled = false;
             log('WS connected');
             // Send config
             ws.send(JSON.stringify({
@@ -633,10 +625,8 @@ UI_HTML = """
             setStatus('disconnected');
             if (recordBtn) {
                 recordBtn.disabled = true;
-                recordBtn.textContent = '🎤 開始對話';
+                recordBtn.textContent = '🎤 開始錄音';
             }
-            commitBtn.disabled = true;
-            cancelBtn.disabled = true;
             if (isRecording) {
                 // Clean up audio nodes without sending
                 if (scriptProcessor) { scriptProcessor.disconnect(); scriptProcessor = null; }
@@ -655,7 +645,6 @@ UI_HTML = """
                 try { audioWorkletNode.port.postMessage({ type: 'flush' }); } catch(e) {}
             }
             log('WS disconnected');
-            isConversationActive = false;
         };
 
         ws.onerror = (e) => log('WS error: ' + JSON.stringify(e));
@@ -749,29 +738,16 @@ UI_HTML = """
         }, 3000);
     }
 
-    // Toggle conversation start/stop
-    function toggleConversation() {
-        if (!isConversationActive) {
-            // Start conversation
-            connect();
+    // Toggle recording start/stop
+    function toggleRecording() {
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+            log('WS not open, cannot toggle recording');
+            return;
+        }
+        if (isRecording) {
+            stopRecordingAndSend();
         } else {
-            // Stop conversation
-            if (ws) {
-                ws.close();
-                ws = null;
-            }
-            // Stop any ongoing recording
-            if (isRecording) {
-                stopRecording();
-            }
-            // Stop any playing audio
-            if (currentAudio) {
-                try { currentAudio.pause(); } catch(e) {}
-                currentAudio = null;
-            }
-            if (audioWorkletNode) {
-                try { audioWorkletNode.port.postMessage({ type: 'stop' }); } catch(e) {}
-            }
+            startRecording();
         }
     }
 
@@ -807,7 +783,6 @@ UI_HTML = """
         if (msg.type === 'asr_result') {
             log('ASR result: is_final=' + msg.is_final + ' text=' + (msg.text || '(empty)'));
             addMessage('user', msg.text || '(no text)');
-            commitBtn.disabled = false;
         }
 
         if (msg.type === 'vad_commit') {
@@ -1085,10 +1060,8 @@ UI_HTML = """
             log('start_speech sent');
 
             setStatus('recording');
-            if (recordBtn) recordBtn.textContent = '⏹ 停止對話';
-            commitBtn.disabled = false;
-            cancelBtn.disabled = false;
-            log('Recording started (raw PCM via onaudioprocess)');
+            if (recordBtn) recordBtn.textContent = '⏹ 停止錄音';
+            log('Recording started');
         } catch (e) {
             log('Mic error: ' + e.message);
             alert('無法訪問麥克風: ' + e.message);
@@ -1115,7 +1088,7 @@ UI_HTML = """
             recordingStream = null;
         }
         isRecording = false;
-        recordBtn.textContent = '🎤 按住說話';
+        if (recordBtn) recordBtn.textContent = '🎤 開始錄音';
 
         // Send accumulated audio as one combined ArrayBuffer
         if (accumulatedChunks.length > 0) {
@@ -1142,49 +1115,6 @@ UI_HTML = """
 
         setStatus(ws && ws.readyState === WebSocket.OPEN ? 'connected' : 'disconnected');
     }
-
-    recordBtn.addEventListener('mousedown', startRecording);
-    recordBtn.addEventListener('mouseup', stopRecordingAndSend);
-    recordBtn.addEventListener('mouseleave', stopRecordingAndSend);
-    recordBtn.addEventListener('touchstart', (e) => { e.preventDefault(); startRecording(); });
-    recordBtn.addEventListener('touchend', stopRecordingAndSend);
-
-    window.__commitBtnClicked = function() {
-        log('COMMIT BTN CLICKED: isRecording=' + isRecording + ', ws.readyState=' + (ws ? ws.readyState : 'null') + ', chunks=' + accumulatedChunks.length);
-        if (isRecording) {
-            log('COMMIT: stopping recording');
-            stopRecordingAndSend();
-        } else if (accumulatedChunks.length > 0) {
-            log('COMMIT: sending pending audio...');
-            let totalSamples = 0;
-            for (const chunk of accumulatedChunks) totalSamples += chunk.byteLength / 2;
-            const combined = new Int16Array(totalSamples);
-            let offset = 0;
-            for (const chunk of accumulatedChunks) { combined.set(new Int16Array(chunk), offset); offset += new Int16Array(chunk).length; }
-            ws.send(combined.buffer);
-            accumulatedChunks = [];
-        }
-        if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'control', action: 'commit_utterance' }));
-            log('commit_utterance SENT');
-        } else {
-            log('WS NOT OPEN, cannot send commit');
-        }
-        commitBtn.disabled = true;
-    };
-
-    commitBtn.addEventListener('click', window.__commitBtnClicked);
-
-    window.__cancelBtnClicked = function() {
-        log('CANCEL BTN CLICKED');
-        if (isRecording) stopRecordingAndSend();
-        if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'control', action: 'cancel' }));
-            log('cancel SENT');
-        }
-        cancelBtn.disabled = true;
-    };
-    cancelBtn.addEventListener('click', window.__cancelBtnClicked);
 
     listenerEl.addEventListener('change', () => {
         if (ws && ws.readyState === WebSocket.OPEN) {
