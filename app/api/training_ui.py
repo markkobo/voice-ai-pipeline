@@ -1321,7 +1321,7 @@ async def training_page():
                                     </div>
                                 </div>
                                 <div class="version-meta">
-                                    ${v.status === 'training' ? '🔄 訓練中' : v.status === 'ready' ? '✓ 就緒' : '✕ 失敗'} |
+                                    ${v.status === 'training' ? '🔄 訓練中' : v.status === 'merging' ? '⚙️ 合併中' : v.status === 'ready' ? '✓ 就緒' : '✕ 失敗'} |
                                     完成: ${completedDate}
                                 </div>
                                 <div class="version-stats">

@@ -155,7 +155,12 @@ class FasterQwenTTSEngine:
             return
 
         # Convert to absolute path for proper loading
-        self._merged_model_path = str(merged_path.resolve())
+        merged_path_str = str(merged_path.resolve())
+        if self._merged_model_path == merged_path_str and self._is_loaded:
+            log.info(f"[TTS] Merged model already active: {merged_path}")
+            return
+
+        self._merged_model_path = merged_path_str
         self._current_lora_path = str(lora_dir)
         log.info(f"[TTS] Activated merged model: {merged_path}")
 

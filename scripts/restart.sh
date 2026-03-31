@@ -116,7 +116,7 @@ echo "Log file: $LOG_FILE"
 # Step 4: Wait for server to start
 echo -e "${YELLOW}[4/5] Waiting for server startup...${NC}"
 
-max_wait=60
+max_wait=120
 counter=0
 while [ $counter -lt $max_wait ]; do
     if curl -s "http://localhost:$PORT/health" > /dev/null 2>&1; then

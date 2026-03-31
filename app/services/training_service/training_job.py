@@ -458,6 +458,67 @@ if __name__ == "__main__":
                     error=f"Training script exited with code {process.returncode}\n{stdout[-500:]}",
                 )
 
+            # Auto-merge after successful training
+            if self._result.success and not self._cancelled:
+                logger.info(f"[TRAINING:{self.version_id[:8]}] Training succeeded, starting merge...")
+                try:
+                    # Update status to merging
+                    tracker_file = self.version_dir / "progress.json"
+                    if tracker_file.exists():
+                        with open(tracker_file) as f:
+                            prog = json.load(f)
+                        prog["status"] = "merging"
+                        prog["progress_pct"] = 100
+                        with open(tracker_file, "w") as f:
+                            json.dump(prog, f)
+
+                    merged_path = merge_lora(self.version_dir)
+                    if merged_path and merged_path.exists():
+                        logger.info(f"[TRAINING:{self.version_id[:8]}] Merge complete: {merged_path}")
+
+                        # Update tracker status
+                        if tracker_file.exists():
+                            with open(tracker_file) as f:
+                                prog = json.load(f)
+                            prog["status"] = "ready"
+                            with open(tracker_file, "w") as f:
+                                json.dump(prog, f)
+
+                        # Auto-activate the new merged model
+                        try:
+                            from app.services.tts import get_tts_engine
+                            engine = get_tts_engine()
+                            # Extract version_id from version_dir name (e.g. xiao_s_v12_20260330_223729)
+                            # The TrainingVersion.version_id is the first part (e.g. v12_20260330_223729)
+                            # We need to find the right version_id for the version manager
+                            # Use the version_dir name to find matching version
+                            from app.services.training import get_version_manager
+                            vm = get_version_manager()
+                            # Find version by lora_path matching our version_dir
+                            matching = [v for v in vm.list_versions() if v.lora_path and Path(v.lora_path) == self.version_dir]
+                            if matching:
+                                latest = matching[0]
+                                logger.info(f"[TRAINING:{self.version_id[:8]}] Auto-activating version: {latest.version_id}")
+                                engine.activate_version(latest.version_id)
+                            else:
+                                logger.warning(f"[TRAINING:{self.version_id[:8]}] No matching version found in manager")
+                        except Exception as act_err:
+                            logger.warning(f"[TRAINING:{self.version_id[:8]}] Auto-activate failed: {act_err}")
+                    else:
+                        logger.error(f"[TRAINING:{self.version_id[:8]}] Merge failed or returned None")
+                        # Update status to failed since merge is critical
+                        if tracker_file.exists():
+                            with open(tracker_file) as f:
+                                prog = json.load(f)
+                            prog["status"] = "failed"
+                            prog["error_message"] = "Merge failed"
+                            with open(tracker_file, "w") as f:
+                                json.dump(prog, f)
+                except Exception as merge_err:
+                    logger.error(f"[TRAINING:{self.version_id[:8]}] Merge exception: {merge_err}")
+                    import traceback
+                    traceback.print_exc()
+
         except Exception as e:
             logger.error(f"[TRAINING:{self.version_id[:8]}] Training error: {e}")
             self._result = TrainingResult(success=False, error=str(e))
@@ -474,3 +535,161 @@ if __name__ == "__main__":
     def is_running(self) -> bool:
         """Check if training is still running."""
         return self._thread is not None and self._thread.is_alive()
+
+
+# =============================================================================
+# LoRA Merge
+# =============================================================================
+
+def merge_lora(lora_dir: Path, base_model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign") -> Optional[Path]:
+    """
+    Merge LoRA adapter weights into base Qwen3-TTS model and save.
+
+    This replaces PEFT's merge_and_unload() which was removed in PEFT 0.18.
+    Instead we manually compute: W_merged = W_base + (alpha/rank) * W_B @ W_A
+
+    Args:
+        lora_dir: Path to version directory containing adapter/ (e.g. data/models/xiao_s_v12_timestamp)
+        base_model: HuggingFace model ID for base Qwen3-TTS
+
+    Returns:
+        Path to merged model directory, or None if merge failed
+    """
+    import re
+    import shutil
+    import torch
+    from safetensors.torch import load_file, save_file
+    from huggingface_hub import snapshot_download
+
+    adapter_path = lora_dir / "adapter"
+    if not adapter_path.exists():
+        logger.error(f"[MERGE] Adapter not found: {adapter_path}")
+        return None
+
+    adapter_file = adapter_path / "adapter_model.safetensors"
+    if not adapter_file.exists():
+        logger.error(f"[MERGE] adapter_model.safetensors not found: {adapter_file}")
+        return None
+
+    # Compute merged model path
+    # e.g. xiao_s_v12_20260330_223729 -> xiao_s_v12 -> merged_qwen3_tts_xiao_s_v12
+    parts = lora_dir.name.split('_')
+    version_base = '_'.join(parts[:3])  # first 3 parts
+    merged_name = f"merged_qwen3_tts_{version_base}"
+    merged_path = lora_dir.parent / merged_name
+
+    if merged_path.exists():
+        logger.info(f"[MERGE] Merged model already exists: {merged_path}")
+        return merged_path
+
+    logger.info(f"[MERGE] Starting merge: {adapter_file} -> {merged_path}")
+
+    # Load adapter state dict
+    adapter_state = load_file(adapter_file)
+    logger.info(f"[MERGE] Loaded {len(adapter_state)} adapter keys")
+
+    # Load LoRA config to get rank and alpha
+    config_file = adapter_path / "adapter_config.json"
+    if config_file.exists():
+        with open(config_file) as f:
+            lora_config = json.load(f)
+        rank = lora_config.get("r", 16)
+        lora_alpha = lora_config.get("lora_alpha", rank * 2)
+        scaling = lora_alpha / rank
+    else:
+        rank = 16
+        scaling = 2.0
+
+    logger.info(f"[MERGE] LoRA rank={rank}, alpha={lora_alpha}, scaling={scaling}")
+
+    # Download base model files (don't load full model into memory)
+    logger.info(f"[MERGE] Downloading base model: {base_model}")
+    try:
+        base_model_path = Path(snapshot_download(base_model, allow_patterns=["*.safetensors", "*.json", "*.txt", "*.model"]))
+    except Exception as e:
+        logger.error(f"[MERGE] Failed to download base model: {e}")
+        return None
+
+    # Build base model state dict from safetensors
+    base_state = {}
+    base_safetensor_files = list(base_model_path.glob("*.safetensors"))
+    for sf in base_safetensor_files:
+        state = load_file(sf)
+        base_state.update(state)
+
+    logger.info(f"[MERGE] Loaded {len(base_state)} base model keys")
+
+    # Build mapping: for each base key, find its LoRA A and B keys
+    # Adapter key pattern: talker.code_predictor.base_model.model.model.layers.{i}.self_attn.{proj}.lora_A.codec_lora.weight
+    # Base key pattern:     talker.code_predictor.model.layers.{i}.self_attn.{proj}.weight
+    #
+    # Strip "base_model.model.model." prefix and ".lora_A.codec_lora" suffix
+    lora_pattern = re.compile(
+        r'^(talker\.code_predictor\.)base_model\.model\.model\.(.+)\.lora_A\.codec_lora\.weight$'
+    )
+    # Also build W_A and W_B storage
+    lora_params: dict[str, dict] = {}  # base_key -> {'A': tensor, 'B': tensor}
+
+    for key, tensor in adapter_state.items():
+        # Try LoRA A pattern
+        match_A = lora_pattern.match(key)
+        if match_A:
+            prefix = match_A.group(1)  # "talker.code_predictor."
+            base_suffix = match_A.group(2)  # e.g. "model.layers.0.self_attn.q_proj"
+            base_key = f"{prefix}{base_suffix}.weight"
+            if base_key not in lora_params:
+                lora_params[base_key] = {}
+            lora_params[base_key]['A'] = tensor
+            continue
+
+        # Try LoRA B pattern
+        lora_pattern_B = re.compile(
+            r'^(talker\.code_predictor\.)base_model\.model\.model\.(.+)\.lora_B\.codec_lora\.weight$'
+        )
+        match_B = lora_pattern_B.match(key)
+        if match_B:
+            prefix = match_B.group(1)
+            base_suffix = match_B.group(2)
+            base_key = f"{prefix}{base_suffix}.weight"
+            if base_key not in lora_params:
+                lora_params[base_key] = {}
+            lora_params[base_key]['B'] = tensor
+
+    logger.info(f"[MERGE] Found {len(lora_params)} LoRA parameter groups to merge")
+
+    # Apply merge
+    merged_state = dict(base_state)  # start with base
+    for base_key, lora_pair in lora_params.items():
+        if 'A' not in lora_pair or 'B' not in lora_pair:
+            logger.warning(f"[MERGE] Missing A or B for {base_key}, skipping")
+            continue
+        W_A = lora_pair['A']  # (rank, in_features)
+        W_B = lora_pair['B']  # (out_features, rank)
+        W_base = base_state.get(base_key)
+        if W_base is None:
+            logger.warning(f"[MERGE] Base key not found: {base_key}")
+            continue
+        # W_merged = W_base + scaling * W_B @ W_A
+        W_merged = W_base.float() + (scaling * W_B.float() @ W_A.float()).to(W_base.dtype)
+        merged_state[base_key] = W_merged
+        logger.debug(f"[MERGE] Merged {base_key}: base={W_base.shape}, delta_norm={torch.norm(W_merged - W_base.float()).item():.4f}")
+
+    # Create merged model directory
+    merged_path.mkdir(parents=True, exist_ok=True)
+
+    # Copy all base model files, replacing safetensors with merged
+    for item in base_model_path.iterdir():
+        if item.suffix == ".safetensors":
+            continue  # Skip base safetensors, we'll write our merged one
+        dest = merged_path / item.name
+        if item.is_dir():
+            shutil.copytree(item, dest, dirs_exist_ok=True)
+        else:
+            shutil.copy2(item, dest)
+
+    # Save merged safetensor
+    logger.info(f"[MERGE] Saving merged model to {merged_path}")
+    save_file(merged_state, merged_path / "model.safetensors")
+
+    logger.info(f"[MERGE] Done! Merged model saved to: {merged_path}")
+    return merged_path

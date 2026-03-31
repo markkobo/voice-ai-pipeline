@@ -111,19 +111,13 @@ async def startup_event():
     async def preload_tts():
         from app.services.tts import get_tts_engine
         engine = get_tts_engine()
-        logger.info("Warming up TTS model (CUDA graphs)...")
-        loop = asyncio.get_event_loop()
-        # warmup is sync, run in executor to not block
-        await loop.run_in_executor(None, engine.warmup)
-        logger.info("TTS model warmed up")
 
-        # Auto-activate latest merged model if available (voice cloning)
+        # Auto-activate latest merged model BEFORE warmup to avoid loading base model twice
         try:
             from app.services.training import get_version_manager
             vm = get_version_manager()
             ready = [v for v in vm.list_versions() if v.status == "ready"]
             if ready:
-                # Sort by version_id (which contains timestamp) descending
                 ready.sort(key=lambda v: v.version_id, reverse=True)
                 latest = ready[0]
                 logger.info(f"Auto-activating latest merged model: {latest.version_id}")
@@ -132,6 +126,12 @@ async def startup_event():
                 logger.info("No ready merged models found, using base VoiceDesign")
         except Exception as e:
             logger.warning(f"Could not auto-activate merged model: {e}")
+
+        # Now warmup — will load whichever model is active (merged or base)
+        logger.info("Warming up TTS model (CUDA graphs)...")
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, engine.warmup)
+        logger.info("TTS model warmed up")
 
     # Wait for ASR preload to complete before accepting connections
     # This prevents race condition where request comes in before model is loaded
