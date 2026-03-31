@@ -226,29 +226,70 @@ class FasterQwenTTSEngine:
                     chunk_queue.put(None)
                 except Exception as e:
                     log.error(f"Chunk producer error: {e}")
+                    # Mark fallback for next call so we don't retry the failing streaming path
+                    self._use_fallback = True
                     chunk_queue.put(e)
 
             import concurrent.futures
             pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             future = pool.submit(chunk_producer)
 
+            streaming_err = None
             while True:
                 result = await loop.run_in_executor(None, chunk_queue.get)
                 if result is None:
                     break
                 if isinstance(result, Exception):
-                    yield TTSStreamEvent(event="error", error=str(result))
+                    streaming_err = result
                     break
                 audio_bytes, sr = result
                 yield TTSStreamEvent(event="audio_chunk", audio_data=audio_bytes, sample_rate=sr)
+
+            pool.shutdown(wait=False)
+
+            # If streaming failed, fall back to non-streaming within the same call
+            if streaming_err is not None:
+                log.warning(f"Streaming failed ({streaming_err}), falling back to non-streaming")
+                raw_model = self._raw_model if self._raw_model is not None else self._model
+                def generate():
+                    try:
+                        audio_arrays, sr = raw_model.generate_voice_design(
+                            text=text,
+                            instruct=final_instruct,
+                            language=language,
+                        )
+                        if isinstance(audio_arrays, (list, tuple)):
+                            full_audio = np.concatenate(audio_arrays) if len(audio_arrays) > 1 else audio_arrays[0]
+                        else:
+                            full_audio = audio_arrays
+                        audio_bytes = (full_audio * 32767).astype(np.int16).tobytes()
+                        return audio_bytes, sr or 24000, None
+                    except Exception as e:
+                        log.error(f"Fallback generation error: {e}")
+                        return None, 24000, None
+
+                result = await loop.run_in_executor(None, generate)
+                if result is None or result[0] is None:
+                    yield TTSStreamEvent(event="error", error="Fallback also failed")
+                    return
+                audio_bytes, sr, _ = result
+                yield TTSStreamEvent(event="audio_chunk", audio_data=audio_bytes, sample_rate=sr)
+                yield TTSStreamEvent(event="done")
+                return
+
+            yield TTSStreamEvent(event="done")
+            return
 
             pool.shutdown(wait=False)
             yield TTSStreamEvent(event="done")
             return
 
         # Fallback path (non-streaming)
+        # Triggered when: (a) _raw_model was loaded as primary model, OR
+        # (b) streaming path failed with CUDA graph error (_use_fallback=True, _raw_model=None)
         if self._use_fallback or self._raw_model is not None:
-            raw_model = self._raw_model
+            # Use _raw_model if available, otherwise fall back to self._model.generate_voice_design
+            raw_model = self._raw_model if self._raw_model is not None else self._model
             def generate():
                 try:
                     audio_arrays, sr = raw_model.generate_voice_design(
@@ -265,15 +306,6 @@ class FasterQwenTTSEngine:
                 except Exception as e:
                     log.error(f"Generation error: {e}")
                     return None, 24000, None
-
-            result = await loop.run_in_executor(None, generate)
-            if result is None or result[0] is None:
-                yield TTSStreamEvent(event="error", error="No audio generated")
-                return
-            audio_bytes, sr, _ = result
-            yield TTSStreamEvent(event="audio_chunk", audio_data=audio_bytes, sample_rate=sr)
-            yield TTSStreamEvent(event="done")
-            return
 
             result = await loop.run_in_executor(None, generate)
             if result is None or result[0] is None:
