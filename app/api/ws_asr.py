@@ -21,7 +21,11 @@ Protocol:
     {"type": "llm_start", "ttft_seconds": 0.3}
     {"type": "llm_token", "content": "「", "emotion": null}
     {"type": "llm_token", "content": "好", "emotion": "寵溺"}  <- first emotion detected
+    Binary PCM chunks (16-bit, 24kHz, mono) sent as WebSocket binary frames
+    for each complete sentence as TTS generates them — plays immediately on client
+    {"type": "tts_start", "sentence_idx": 0}  <- sent before first binary chunk
     {"type": "tts_ready", "text": "「好啦～", "emotion": "寵溺", "instruct": "(gentle...)", "stream_url": "/api/tts/stream?..."}
+    (tts_ready still sent at llm_done for backward compat + final chunk)
     {"type": "llm_done", "text": "「寵溺好啦～...", "total_tokens": 10}
     {"type": "llm_cancelled"}  <- barge-in
     {"type": "vad_commit"}  <- VAD detected end of speech
@@ -36,18 +40,110 @@ import struct
 import subprocess
 import time
 import uuid
-from typing import Optional
+from typing import AsyncIterator, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.core.state_manager import StateManager
 from app.services.llm import OpenAIClient, MockLLMClient, PersonaManager, PersonaType
-from app.services.tts import EmotionMapper, get_tts_instruct, parse_emotion_tag
+from app.services.tts import EmotionMapper, get_tts_instruct, parse_emotion_tag, get_tts_engine
 from app.logging_config import get_logger
 from telemetry import metrics, rag_retrieval_seconds
 
 
 log = get_logger(__name__, component="ws")
+
+
+async def _stream_tts_sentence(
+    websocket: WebSocket,
+    text: str,
+    emotion: str,
+    model_size: str,
+    persona_id: Optional[str],
+    sentence_idx: int,
+) -> None:
+    """
+    Generate TTS for a complete sentence and stream raw PCM chunks over WebSocket.
+
+    Chunks are sent as binary WebSocket frames as they arrive from the TTS engine,
+    enabling immediate playback on the client (no waiting for full response).
+
+    Args:
+        websocket: Client WebSocket connection
+        text: Sentence text to synthesize
+        emotion: Emotion tag string
+        model_size: "0.6B" or "1.7B"
+        persona_id: Persona ID for voice clone (optional)
+        sentence_idx: Index of this sentence in the utterance (for tracking)
+    """
+    if not text or not text.strip():
+        return
+
+    engine = get_tts_engine(model_size=model_size)
+    instruct = get_tts_instruct(emotion)
+
+    # Look up reference audio for voice clone (optional — pass None if unavailable)
+    reference_audio = None
+    if persona_id:
+        try:
+            # Try to get persona reference audio for voice clone
+            # This is optional — streaming works without it
+            from app.services.recordings import pipeline as rec_pipeline
+            # Persona reference audio path would go here if implemented
+        except Exception:
+            pass
+
+    stream_start = time.perf_counter()
+
+    try:
+        # Signal TTS start so client can prepare AudioWorklet
+        await websocket.send_text(json.dumps({
+            "type": "tts_start",
+            "sentence_idx": sentence_idx,
+            "emotion": emotion,
+        }))
+
+        first_chunk_sent = False
+        async for event in engine.generate_streaming(
+            text=text.strip(),
+            instruct=instruct,
+            language="Chinese",
+            reference_audio=reference_audio,
+        ):
+            if event.event == "audio_chunk" and event.audio_data:
+                chunk = event.audio_data
+
+                # Record time to first chunk
+                if not first_chunk_sent:
+                    ttfc = time.perf_counter() - stream_start
+                    metrics.tts_first_chunk.labels(
+                        component="ws_stream",
+                        model=model_size,
+                    ).observe(ttfc)
+                    log.info(f"TTS first chunk (ws): {ttfc:.3f}s, sentence={sentence_idx}")
+                    first_chunk_sent = True
+
+                # Stream chunk immediately — client plays as it arrives
+                await websocket.send_bytes(chunk)
+
+        # Signal sentence complete
+        await websocket.send_text(json.dumps({
+            "type": "tts_done",
+            "sentence_idx": sentence_idx,
+        }))
+        log.info(f"TTS sentence done: idx={sentence_idx}, text='{text[:30]}...'")
+
+    except Exception as e:
+        log.error(f"TTS streaming error for sentence {sentence_idx}: {e}")
+        try:
+            await websocket.send_text(json.dumps({
+                "type": "tts_error",
+                "sentence_idx": sentence_idx,
+                "error": str(e),
+            }))
+        except Exception:
+            pass
+
 
 router = APIRouter()
 
@@ -167,6 +263,10 @@ def get_llm_client() -> OpenAIClient | MockLLMClient:
 # Emotion tag regex — matches [情感: 撒嬌] or [情感:撒嬌]
 EMOTION_TAG_RE = re.compile(r'^\[情感[:：]\s*(.*?)\]\s*')
 
+# Sentence boundary pattern: Chinese (。！？；) + English (.!?) + closing quotes (」』)
+# Split on these to get complete sentences for early TTS streaming
+SENTENCE_SPLIT_RE = re.compile(r'(?<=[。！？；.!?」』])')
+
 
 async def run_llm_stream(
     websocket: WebSocket,
@@ -210,6 +310,8 @@ async def run_llm_stream(
     tts_text_parts: list[str] = []
     current_emotion: Optional[str] = None
     current_instruct: Optional[str] = None
+    tts_sentence_idx = 0  # Index for tracking sentences streamed to client
+    tts_streaming_tasks: list[asyncio.Task] = []  # Track background TTS tasks
 
     try:
         async for event in client.stream(
@@ -257,9 +359,27 @@ async def run_llm_stream(
                         tts_text_parts.append(cleaned_content)
                         tts_text = "".join(tts_text_parts)
 
-                        # DON'T send tts_ready here — wait for llm_done
-                        # TTS generates audio for COMPLETE text, so early tts_ready
-                        # would cause repetition when full text arrives
+                        # Check for complete sentences and stream TTS as they finish
+                        # This enables low-latency playback: audio starts before LLM is done
+                        parts = SENTENCE_SPLIT_RE.split(tts_text)
+                        if len(parts) > 1:
+                            # At least one complete sentence found
+                            # All parts except the last are complete sentences
+                            for i, part in enumerate(parts[:-1]):
+                                if part.strip():
+                                    # Trigger TTS streaming for this complete sentence
+                                    task = asyncio.create_task(_stream_tts_sentence(
+                                        websocket=websocket,
+                                        text=part,
+                                        emotion=current_emotion or "默認",
+                                        model_size="0.6B",  # Faster model for lower latency
+                                        persona_id=persona_id,
+                                        sentence_idx=tts_sentence_idx,
+                                    ))
+                                    tts_streaming_tasks.append(task)
+                                    tts_sentence_idx += 1
+                            # Keep only the last (incomplete) part for next round
+                            tts_text_parts = [parts[-1]]
 
                     await websocket.send_text(json.dumps({
                         "type": "llm_token",
@@ -283,35 +403,55 @@ async def run_llm_stream(
                 e2e_latency = time.perf_counter() - e2e_start
                 metrics.e2e_latency.labels(component="pipeline").observe(e2e_latency)
 
-                # At llm_done: always send tts_ready with FULL accumulated text if emotion was detected
-                # This ensures the complete response audio is available (even if early tts_ready was sent)
+                # Stream any remaining incomplete sentence (no trailing sentence-ending punctuation)
                 if tts_notified and tts_text_parts:
-                    tts_text = "".join(tts_text_parts)
-                    _, tts_text_clean = parse_emotion_tag(tts_text)
-                    tts_text = tts_text_clean.strip()
-                    if tts_text:
-                        # Clean text for TTS: remove problematic punctuation that causes audio bursts
+                    remaining = "".join(tts_text_parts).strip()
+                    if remaining:
+                        # Clean text for TTS
                         import re
-                        # Remove Chinese quotation marks and other special brackets
-                        tts_text = re.sub(r'[「」『』【】〖〗《》〈〉〘〙〚〛‹›«»]', '', tts_text)
-                        # Remove other problematic chars but keep Chinese, alphanumeric, basic punctuation
-                        tts_text = tts_text.strip()
-                        if tts_text:
-                            import urllib.parse
-                            params = urllib.parse.urlencode({
-                                "text": tts_text,
-                                "emotion": current_emotion,
-                                "model": "0.6B",  # Faster model for better latency
-                            })
-                            stream_url = f"/api/tts/stream?{params}"
-                            await websocket.send_text(json.dumps({
-                                "type": "tts_ready",
-                                "text": tts_text,
-                                "emotion": current_emotion,
-                                "instruct": current_instruct,
-                                "stream_url": stream_url,
-                            }))
-                            log.info(f"TTS text (llm_done final): '{tts_text}', emotion={current_emotion}")
+                        remaining = re.sub(r'[「」『』【】〖〗《》〈〉〘〙〚〛‹›«»]', '', remaining).strip()
+                        if remaining:
+                            task = asyncio.create_task(_stream_tts_sentence(
+                                websocket=websocket,
+                                text=remaining,
+                                emotion=current_emotion or "默認",
+                                model_size="0.6B",
+                                persona_id=persona_id,
+                                sentence_idx=tts_sentence_idx,
+                            ))
+                            tts_streaming_tasks.append(task)
+                            tts_sentence_idx += 1
+
+                # Wait for all sentence TTS streams to finish before sending tts_done
+                if tts_streaming_tasks:
+                    await asyncio.gather(*tts_streaming_tasks, return_exceptions=True)
+                    tts_streaming_tasks.clear()
+
+                # Send tts_ready with full text for backward compatibility
+                # (client that doesn't support ws binary chunks will use HTTP stream)
+                if tts_notified:
+                    full_text = event.content or ""
+                    _, clean_text = parse_emotion_tag(full_text)
+                    clean_text = clean_text.strip()
+                    if clean_text:
+                        import re
+                        clean_text = re.sub(r'[「」『』【】〖〗《》〈〉〘〙〚〛‹›«»]', '', clean_text).strip()
+                    if clean_text:
+                        import urllib.parse
+                        params = urllib.parse.urlencode({
+                            "text": clean_text,
+                            "emotion": current_emotion,
+                            "model": "0.6B",
+                            "persona_id": persona_id or "xiao_s",
+                        })
+                        stream_url = f"/api/tts/stream?{params}"
+                        await websocket.send_text(json.dumps({
+                            "type": "tts_ready",
+                            "text": clean_text,
+                            "emotion": current_emotion,
+                            "instruct": current_instruct,
+                            "stream_url": stream_url,
+                        }))
 
                 await websocket.send_text(json.dumps({
                     "type": "llm_done",
@@ -330,18 +470,32 @@ async def run_llm_stream(
                     session_id=session_id,
                 ).inc(len(accumulated_text))
 
+                # Cancel any in-flight TTS streaming tasks
+                for task in tts_streaming_tasks:
+                    task.cancel()
+                tts_streaming_tasks.clear()
+
                 await websocket.send_text(json.dumps({
                     "type": "llm_cancelled",
                     "partial_text": event.content,
                 }))
 
             elif event.event.value == "error":
+                # Cancel TTS tasks on error too
+                for task in tts_streaming_tasks:
+                    task.cancel()
+                tts_streaming_tasks.clear()
+
                 await websocket.send_text(json.dumps({
                     "type": "llm_error",
                     "error": event.error,
                 }))
 
     finally:
+        # Cancel any remaining TTS streaming tasks
+        for task in tts_streaming_tasks:
+            task.cancel()
+        tts_streaming_tasks.clear()
         state_manager.clear_llm_task(session_id)
 
 

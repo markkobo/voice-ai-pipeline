@@ -615,6 +615,17 @@ UI_HTML = """
             if (typeof e.data === 'string') {
                 const msg = JSON.parse(e.data);
                 handleMessage(msg);
+            } else if (e.data instanceof ArrayBuffer) {
+                // Binary PCM chunk streamed directly from TTS — play immediately
+                const buf = new Int16Array(e.data);
+                if (buf.length > 0 && audioWorkletNode) {
+                    // Ensure AudioContext is running before posting
+                    if (audioContext.state === 'suspended') {
+                        await audioContext.resume();
+                    }
+                    // Send raw PCM to AudioWorklet for immediate playback
+                    audioWorkletNode.port.postMessage({ type: 'pcm', buffer: buf.buffer }, [buf.buffer]);
+                }
             }
         };
 
@@ -898,6 +909,23 @@ UI_HTML = """
             }
         }
 
+        if (msg.type === 'tts_start') {
+            // New sentence TTS starting over WebSocket — prepare AudioWorklet for immediate playback
+            // Flush any pending streaming audio so new chunks take priority
+            if (audioWorkletNode) {
+                audioWorkletNode.port.postMessage({ type: 'flush' });
+            }
+            // Ensure AudioContext is running
+            if (audioContext && audioContext.state === 'suspended') {
+                audioContext.resume();
+            }
+            log('TTS stream started: sentence_idx=' + msg.sentence_idx);
+        }
+
+        if (msg.type === 'tts_done') {
+            log('TTS stream done: sentence_idx=' + msg.sentence_idx);
+        }
+
         if (msg.type === 'llm_done') {
             log('LLM done: text=' + (msg.text || '').substring(0, 80) + ' total_tokens=' + (msg.total_tokens || '?'));
             // Don't clear queue! The full audio is in there waiting to play
@@ -950,7 +978,7 @@ UI_HTML = """
         }
 
         if (msg.type === 'tts_error') {
-            log('TTS ERROR: ' + (msg.error || 'unknown'), 'error');
+            log('TTS stream error: sentence_idx=' + (msg.sentence_idx || '?') + ' error=' + (msg.error || 'unknown'), 'error');
         }
     }
 
