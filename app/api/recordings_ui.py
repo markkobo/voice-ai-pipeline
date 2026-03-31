@@ -26,7 +26,7 @@ async def recordings_page():
             min-height: 100vh;
             padding: 20px;
         }
-        .container { max-width: 900px; margin: 0 auto; }
+        .container { max-width: 1100px; margin: 0 auto; }
 
         /* Header */
         .header {
@@ -46,8 +46,12 @@ async def recordings_page():
             border-radius: 6px;
             cursor: pointer;
             text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
         }
         .back-btn:hover { background: #555; }
+        .header-actions { display: flex; gap: 12px; align-items: center; }
 
         /* Version selector */
         .version-selector {
@@ -226,175 +230,6 @@ async def recordings_page():
         .log-time { color: #666; margin-right: 8px; }
         .log-component { color: #00ff88; margin-right: 8px; }
 
-        /* Recordings List */
-        .recordings-list {
-            margin-top: 20px;
-        }
-        .recording-card {
-            background: #16213e;
-            border-radius: 8px;
-            padding: 15px;
-            margin-bottom: 10px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        .recording-info {
-            flex: 1;
-        }
-        .recording-title {
-            font-weight: 500;
-            margin-bottom: 5px;
-        }
-        .recording-meta {
-            font-size: 0.85rem;
-            color: #888;
-            display: flex;
-            gap: 15px;
-        }
-        .recording-badge {
-            display: inline-block;
-            padding: 2px 8px;
-            border-radius: 4px;
-            font-size: 0.75rem;
-            background: #333;
-        }
-        .recording-badge.ok { background: #00ff8833; color: #00ff88; }
-        .recording-badge.warning { background: #ffcc0033; color: #ffcc00; }
-        .recording-badge.processing { background: #00ccff33; color: #00ccff; }
-        .recording-badge.failed { background: #ff444433; color: #ff4444; }
-        .recording-actions {
-            display: flex;
-            gap: 8px;
-        }
-        .action-btn {
-            background: #333;
-            color: #fff;
-            border: none;
-            padding: 8px 12px;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 0.85rem;
-        }
-        .action-btn:hover { background: #444; }
-        .action-btn.play { background: #00ccff; }
-        .action-btn.play:hover { background: #00aadd; }
-        .action-btn.delete { background: #ff4444; }
-        .action-btn.delete:hover { background: #dd3333; }
-
-        /* Quality indicator */
-        .quality-info {
-            font-size: 0.8rem;
-            color: #888;
-            margin-top: 5px;
-        }
-        .quality-good { color: #00ff88; }
-        .quality-bad { color: #ff4444; }
-
-        /* Inline edit */
-        .edit-btn {
-            background: #333;
-            color: #fff;
-            border: none;
-            padding: 2px 8px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 0.75rem;
-            margin-left: 5px;
-        }
-        .edit-btn:hover { background: #555; }
-        .inline-edit {
-            background: #1a1a2e;
-            color: #fff;
-            border: 1px solid #00ccff;
-            padding: 2px 8px;
-            border-radius: 4px;
-            font-size: 0.85rem;
-            min-width: 100px;
-        }
-        .save-btn {
-            background: #00ccff;
-            color: #000;
-            border: none;
-            padding: 2px 8px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 0.75rem;
-            margin-left: 4px;
-        }
-        .cancel-btn {
-            background: #666;
-            color: #fff;
-            border: none;
-            padding: 2px 8px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 0.75rem;
-            margin-left: 4px;
-        }
-
-        /* Speaker labeling */
-        .speaker-section {
-            margin-top: 10px;
-            padding: 10px;
-            background: #0d1b2a;
-            border-radius: 6px;
-        }
-        .speaker-section-title {
-            font-size: 0.85rem;
-            color: #00ccff;
-            margin-bottom: 8px;
-        }
-        .speaker-row {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            margin-bottom: 6px;
-            font-size: 0.85rem;
-        }
-        .speaker-name {
-            font-family: monospace;
-            color: #aaa;
-            min-width: 100px;
-        }
-        .speaker-select {
-            background: #1a1a2e;
-            color: #fff;
-            border: 1px solid #333;
-            padding: 4px 8px;
-            border-radius: 4px;
-            min-width: 120px;
-        }
-        .speaker-audio-btn {
-            background: #333;
-            color: #fff;
-            border: none;
-            padding: 4px 10px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 0.8rem;
-        }
-        .speaker-audio-btn:hover { background: #444; }
-
-        /* Transcription */
-        .transcription {
-            margin-top: 10px;
-            padding: 10px;
-            background: #0d1b2a;
-            border-radius: 6px;
-            font-size: 0.9rem;
-            color: #ccc;
-            max-height: 100px;
-            overflow-y: auto;
-        }
-
-        /* Empty state */
-        .empty-state {
-            text-align: center;
-            padding: 40px;
-            color: #666;
-        }
-
         /* Loading spinner */
         .loading {
             display: inline-block;
@@ -407,32 +242,494 @@ async def recordings_page():
         }
         @keyframes spin { to { transform: rotate(360deg); } }
 
-        /* Gray out during training */
-        .disabled-overlay {
-            opacity: 0.5;
-            pointer-events: none;
+        /* Toast notifications */
+        .toast-container {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 9999;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
         }
-        .training-indicator {
-            background: #ffcc00;
-            color: #000;
-            padding: 4px 12px;
+        .toast {
+            background: #16213e;
+            color: #fff;
+            padding: 12px 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 0.9rem;
+            animation: toastIn 0.3s ease;
+            max-width: 320px;
+        }
+        .toast.success { border-left: 4px solid #00ff88; }
+        .toast.error { border-left: 4px solid #ff4444; }
+        .toast.info { border-left: 4px solid #00ccff; }
+        .toast.warning { border-left: 4px solid #ffcc00; }
+        .toast.fadeOut { animation: toastOut 0.3s ease forwards; }
+        @keyframes toastIn {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+        @keyframes toastOut {
+            from { transform: translateX(0); opacity: 1; }
+            to { transform: translateX(100%); opacity: 0; }
+        }
+
+        /* ==================== TREE VIEW STYLES ==================== */
+
+        /* Tree view container */
+        .tree-view {
+            margin-top: 15px;
+        }
+
+        /* Filter bar */
+        .filter-bar {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 15px;
+            flex-wrap: wrap;
+        }
+        .filter-bar select {
+            background: #1a1a2e;
+            color: #fff;
+            border: 1px solid #333;
+            padding: 10px 14px;
+            border-radius: 8px;
+            font-size: 14px;
+            min-width: 140px;
+        }
+        .filter-bar input {
+            flex: 1;
+            min-width: 200px;
+            padding: 10px 14px;
+            background: #1a1a2e;
+            color: #fff;
+            border: 1px solid #333;
+            border-radius: 8px;
+            font-size: 14px;
+        }
+
+        /* Empty state */
+        .empty-state {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+
+        /* Recording folder (tree root) */
+        .tree-recording {
+            background: #0d1b2a;
+            border-radius: 8px;
+            margin-bottom: 8px;
+            overflow: hidden;
+        }
+
+        /* Recording header row */
+        .recording-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 15px;
+            cursor: pointer;
+            transition: background 0.15s;
+            user-select: none;
+        }
+        .recording-header:hover {
+            background: #16213e;
+        }
+        .recording-header.expanded {
+            background: #16213e;
+        }
+
+        /* Expand/collapse icon */
+        .expand-icon {
+            width: 20px;
+            height: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            color: #888;
+            transition: transform 0.2s;
+        }
+        .expand-icon.expanded {
+            transform: rotate(90deg);
+        }
+
+        /* Recording title and badges */
+        .recording-title {
+            flex: 1;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        .recording-title-text {
+            color: #fff;
+        }
+        .recording-badge {
+            display: inline-block;
+            padding: 2px 8px;
             border-radius: 4px;
-            font-size: 0.85rem;
-            display: none;
+            font-size: 0.7rem;
+            background: #333;
+            color: #aaa;
         }
-        .training-indicator.visible { display: inline-block; }
+        .recording-badge.ok { background: #00ff8833; color: #00ff88; }
+        .recording-badge.warning { background: #ffcc0033; color: #ffcc00; }
+        .recording-badge.processing { background: #00ccff33; color: #00ccff; animation: pulse 1s infinite; }
+        .recording-badge.failed { background: #ff444433; color: #ff4444; }
+
+        /* Recording meta info */
+        .recording-meta {
+            display: flex;
+            gap: 12px;
+            font-size: 0.8rem;
+            color: #888;
+            align-items: center;
+        }
+        .recording-meta span {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        /* Recording actions */
+        .recording-actions {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+        }
+        .action-btn {
+            background: #333;
+            color: #fff;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            min-height: 36px;
+            min-width: 36px;
+            justify-content: center;
+        }
+        .action-btn:hover { background: #444; }
+        .action-btn.play { background: #00ccff; color: #000; }
+        .action-btn.play:hover { background: #00aadd; }
+        .action-btn.delete { background: #ff4444; }
+        .action-btn.delete:hover { background: #dd3333; }
+        .action-btn.parse { background: #00ff88; color: #000; }
+        .action-btn.parse:hover { background: #00dd77; }
+        .action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        /* Speaker segments container */
+        .segments-container {
+            display: none;
+            padding: 0 15px 15px 45px;
+            border-top: 1px solid #222;
+        }
+        .segments-container.expanded {
+            display: block;
+        }
+
+        /* Segment row */
+        .segment-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 12px;
+            background: #1a1a2e;
+            border-radius: 6px;
+            margin-bottom: 6px;
+            flex-wrap: wrap;
+        }
+
+        /* Speaker icon */
+        .speaker-icon {
+            font-size: 1rem;
+            width: 24px;
+            text-align: center;
+        }
+
+        /* Speaker info */
+        .speaker-info {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            flex: 1;
+            min-width: 200px;
+        }
+        .speaker-name {
+            font-family: monospace;
+            font-size: 0.85rem;
+            color: #00ccff;
+        }
+        .speaker-transcript {
+            font-size: 0.8rem;
+            color: #888;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 300px;
+        }
+
+        /* Persona/Listener dropdowns */
+        .segment-dropdowns {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+        .dropdown-group {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .dropdown-group label {
+            font-size: 0.7rem;
+            color: #666;
+        }
+        .dropdown-group select {
+            background: #16213e;
+            color: #fff;
+            border: 1px solid #333;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            min-width: 80px;
+        }
+        .dropdown-group select:focus {
+            border-color: #00ccff;
+            outline: none;
+        }
+        .add-btn {
+            background: transparent;
+            color: #00ccff;
+            border: 1px dashed #00ccff;
+            padding: 2px 6px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.7rem;
+            min-height: 28px;
+            min-width: 28px;
+        }
+        .add-btn:hover {
+            background: #00ccff22;
+        }
+
+        /* Segment duration */
+        .segment-duration {
+            font-size: 0.8rem;
+            color: #888;
+            font-family: monospace;
+            min-width: 50px;
+            text-align: center;
+        }
+
+        /* Playback controls */
+        .playback-controls {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .play-btn, .pause-btn, .stop-btn {
+            background: #333;
+            color: #fff;
+            border: none;
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            cursor: pointer;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .play-btn:hover, .pause-btn:hover, .stop-btn:hover {
+            background: #444;
+        }
+        .play-btn { background: #00ccff; color: #000; }
+        .play-btn:hover { background: #00aadd; }
+        .pause-btn { background: #ffcc00; color: #000; }
+
+        /* Progress bar */
+        .progress-container {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex: 1;
+            min-width: 120px;
+            max-width: 250px;
+        }
+        .progress-bar {
+            flex: 1;
+            height: 8px;
+            background: #333;
+            border-radius: 4px;
+            cursor: pointer;
+            overflow: hidden;
+            position: relative;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #00ccff, #00ff88);
+            width: 0%;
+            transition: width 0.1s;
+            border-radius: 4px;
+        }
+        .progress-time {
+            font-size: 0.7rem;
+            color: #888;
+            font-family: monospace;
+            min-width: 70px;
+        }
+
+        /* Quality indicator */
+        .quality-indicator {
+            font-size: 0.75rem;
+            padding: 2px 8px;
+            border-radius: 4px;
+            min-width: 60px;
+            text-align: center;
+        }
+        .quality-good { background: #00ff8833; color: #00ff88; }
+        .quality-bad { background: #ff444433; color: #ff4444; }
+
+        /* Processing state */
+        .processing-state {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            background: #ffcc0033;
+            border-radius: 6px;
+            color: #ffcc00;
+            font-size: 0.85rem;
+            margin-bottom: 6px;
+        }
+
+        /* Delete confirmation */
+        .delete-confirm {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: #ff4444;
+            font-size: 0.85rem;
+        }
+        .delete-confirm .action-btn {
+            background: #ff4444;
+        }
+        .delete-confirm .cancel-btn {
+            background: #666;
+        }
+
+        /* Modal for adding persona/listener */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.7);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 10000;
+        }
+        .modal-overlay.visible {
+            display: flex;
+        }
+        .modal-content {
+            background: #16213e;
+            border-radius: 12px;
+            padding: 24px;
+            min-width: 300px;
+            max-width: 400px;
+        }
+        .modal-content h3 {
+            margin-bottom: 16px;
+            color: #fff;
+        }
+        .modal-content input {
+            width: 100%;
+            padding: 10px 14px;
+            background: #1a1a2e;
+            color: #fff;
+            border: 1px solid #333;
+            border-radius: 8px;
+            font-size: 14px;
+            margin-bottom: 12px;
+        }
+        .modal-content input:focus {
+            border-color: #00ccff;
+            outline: none;
+        }
+        .modal-actions {
+            display: flex;
+            gap: 8px;
+            justify-content: flex-end;
+        }
+
+        /* Mobile responsive */
+        @media (max-width: 768px) {
+            .segment-row {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+            .segment-dropdowns {
+                width: 100%;
+                flex-wrap: wrap;
+            }
+            .progress-container {
+                width: 100%;
+                max-width: none;
+            }
+            .recording-meta {
+                display: none;
+            }
+            .filter-bar {
+                flex-direction: column;
+            }
+            .filter-bar select, .filter-bar input {
+                width: 100%;
+            }
+        }
     </style>
 </head>
 <body>
+    <!-- Toast notifications container -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- Modal for adding persona/listener -->
+    <div class="modal-overlay" id="addModal">
+        <div class="modal-content">
+            <h3 id="modalTitle">新增</h3>
+            <input type="text" id="modalInput" placeholder="名稱">
+            <div class="modal-actions">
+                <button class="action-btn" style="background:#666" onclick="closeModal()">取消</button>
+                <button class="action-btn play" onclick="confirmModal()">確認</button>
+            </div>
+        </div>
+    </div>
+
     <div class="container">
         <div class="header">
             <a href="/ui" class="back-btn">← 返回對話</a>
             <h1>錄音管理</h1>
-            <div class="version-selector">
-                <span>版本:</span>
-                <select id="versionSelect">
-                    <option value="default">系統預設</option>
-                </select>
+            <div class="header-actions">
+                <a href="/ui/training" class="back-btn">跳轉到訓練 →</a>
+                <div class="version-selector">
+                    <span>版本:</span>
+                    <select id="versionSelect">
+                        <option value="default">系統預設</option>
+                    </select>
+                </div>
             </div>
         </div>
 
@@ -454,24 +751,11 @@ async def recordings_page():
                 <div class="metadata-selectors">
                     <div class="selector-group">
                         <label>👤 聆聽者</label>
-                        <select id="listenerSelect">
-                            <option value="child">小孩</option>
-                            <option value="mom">媽媽</option>
-                            <option value="dad">爸爸</option>
-                            <option value="friend">朋友</option>
-                            <option value="reporter">記者</option>
-                            <option value="elder">長輩</option>
-                            <option value="default" selected>預設</option>
-                        </select>
+                        <select id="listenerSelect"></select>
                     </div>
                     <div class="selector-group">
                         <label>🎭 人格</label>
-                        <select id="personaSelect">
-                            <option value="xiao_s" selected>小S</option>
-                            <option value="caregiver">照護者</option>
-                            <option value="elder_gentle">長輩-溫柔</option>
-                            <option value="elder_playful">長輩-活潑</option>
-                        </select>
+                        <select id="personaSelect"></select>
                     </div>
                 </div>
 
@@ -483,7 +767,6 @@ async def recordings_page():
                     </button>
                     <button class="stop-btn" id="stopBtn">■ 停止</button>
                     <span class="duration" id="duration">00:00</span>
-                    <span class="training-indicator" id="trainingIndicator">Training 中...</span>
                 </div>
             </div>
 
@@ -507,17 +790,654 @@ async def recordings_page():
             <div id="debugLogs"></div>
         </div>
 
-        <!-- Recordings List -->
+        <!-- Recordings List with Tree View -->
         <div class="recording-section">
             <div class="section-title">📚 錄音列表</div>
-            <div id="recordingsList">
-                <div class="empty-state">尚無錄音</div>
+
+            <!-- Filter bar -->
+            <div class="filter-bar">
+                <input type="text" id="searchInput" placeholder="搜尋錄音..." oninput="filterAndRender()">
+                <select id="listenerFilter" onchange="filterAndRender()">
+                    <option value="">全部聆聽者</option>
+                </select>
+            </div>
+
+            <!-- Tree view container -->
+            <div class="tree-view" id="treeView">
+                <div class="empty-state">載入中...</div>
             </div>
         </div>
     </div>
 
     <script>
-        // State
+        // ==================== STATE ====================
+        let allRecordings = [];
+        let personas = [];
+        let listeners = [];
+        let expandedRecordings = new Set();
+        let activeAudio = null;  // Currently playing audio element
+        let currentPlayingId = null;  // Current playing segment/recording ID
+
+        // ==================== ELEMENTS ====================
+        const treeView = document.getElementById('treeView');
+        const searchInput = document.getElementById('searchInput');
+        const listenerFilter = document.getElementById('listenerFilter');
+        const recBtn = document.getElementById('recBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const duration = document.getElementById('duration');
+        const dbMeterFill = document.getElementById('dbMeterFill');
+        const dbLevel = document.getElementById('dbLevel');
+        const qualityIndicator = document.getElementById('qualityIndicator');
+        const debugLogs = document.getElementById('debugLogs');
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+        const listenerSelect = document.getElementById('listenerSelect');
+        const personaSelect = document.getElementById('personaSelect');
+
+        // Modal state
+        let modalCallback = null;
+        let modalType = null;
+
+        // ==================== LOGGING ====================
+        function log(message, level = 'info', component = 'UI') {
+            const time = new Date().toLocaleTimeString('zh-TW', { hour12: false });
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${level}`;
+            entry.innerHTML = `<span class="log-time">${time}</span><span class="log-component">[${component}]</span> ${message}`;
+            debugLogs.appendChild(entry);
+            debugLogs.scrollTop = debugLogs.scrollHeight;
+            console.log(`[${level.toUpperCase()}] [${component}] ${message}`);
+        }
+
+        // ==================== TOAST ====================
+        function showToast(message, type = 'info', duration = 4000) {
+            const container = document.getElementById('toastContainer');
+            const toast = document.createElement('div');
+            toast.className = `toast ${type}`;
+            const icon = type === 'success' ? '✓' : type === 'error' ? '✕' : type === 'warning' ? '⚠' : 'ℹ';
+            toast.innerHTML = `<span>${icon}</span><span>${message}</span>`;
+            container.appendChild(toast);
+            setTimeout(() => {
+                toast.classList.add('fadeOut');
+                setTimeout(() => { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 300);
+            }, duration);
+        }
+
+        // ==================== MODAL ====================
+        function openModal(title, placeholder, callback) {
+            document.getElementById('modalTitle').textContent = title;
+            document.getElementById('modalInput').placeholder = placeholder;
+            document.getElementById('modalInput').value = '';
+            document.getElementById('addModal').classList.add('visible');
+            modalCallback = callback;
+            document.getElementById('modalInput').focus();
+        }
+
+        function closeModal() {
+            document.getElementById('addModal').classList.remove('visible');
+            modalCallback = null;
+        }
+
+        function confirmModal() {
+            const value = document.getElementById('modalInput').value.trim();
+            if (value && modalCallback) {
+                modalCallback(value);
+            }
+            closeModal();
+        }
+
+        // Close modal on Escape key
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') closeModal();
+            if (e.key === 'Enter') confirmModal();
+        });
+
+        // ==================== INITIALIZATION ====================
+        async function init() {
+            await Promise.all([loadPersonas(), loadListeners(), loadRecordings()]);
+            buildListenerFilter();
+            buildRecorderDropdowns();
+            log('Recordings page loaded', 'info', 'UI');
+        }
+
+        async function loadPersonas() {
+            try {
+                const res = await fetch('/api/personas/');
+                const data = await res.json();
+                personas = data.personas || data || [];
+                log(`Loaded ${personas.length} personas`, 'debug', 'UI');
+            } catch (e) {
+                log(`Failed to load personas: ${e.message}`, 'error', 'UI');
+                personas = [];
+            }
+        }
+
+        async function loadListeners() {
+            try {
+                const res = await fetch('/api/listeners/');
+                const data = await res.json();
+                listeners = data.listeners || data || [];
+                log(`Loaded ${listeners.length} listeners`, 'debug', 'UI');
+            } catch (e) {
+                log(`Failed to load listeners: ${e.message}`, 'error', 'UI');
+                listeners = [];
+            }
+        }
+
+        function buildListenerFilter() {
+            const current = listenerFilter.value;
+            listenerFilter.innerHTML = '<option value="">全部聆聽者</option>';
+            listeners.forEach(l => {
+                const opt = document.createElement('option');
+                opt.value = l.listener_id;
+                opt.textContent = l.name || l.listener_id;
+                listenerFilter.appendChild(opt);
+            });
+            listenerFilter.value = current;
+        }
+
+        function buildRecorderDropdowns() {
+            // Build listener dropdown
+            const currentListener = listenerSelect.value;
+            listenerSelect.innerHTML = listeners.map(l =>
+                `<option value="${l.listener_id}" ${l.listener_id === currentListener ? 'selected' : ''}>${l.name || l.listener_id}</option>`
+            ).join('');
+
+            // Build persona dropdown
+            const currentPersona = personaSelect.value;
+            personaSelect.innerHTML = personas.map(p =>
+                `<option value="${p.persona_id}" ${p.persona_id === currentPersona ? 'selected' : ''}>${p.name || p.persona_id}</option>`
+            ).join('');
+        }
+
+        // ==================== RECORDINGS LOADING ====================
+        async function loadRecordings() {
+            try {
+                const response = await fetch('/api/recordings/');
+                const data = await response.json();
+                const recordings = Array.isArray(data) ? data : (data.recordings || []);
+                allRecordings = recordings;
+                filterAndRender();
+                log(`Loaded ${recordings.length} recordings`, 'info', 'UI');
+
+                const failed = recordings.filter(r => r.status === 'failed');
+                if (failed.length > 0) {
+                    failed.forEach(r => {
+                        const errMsg = r.error_message || r.processing_steps?.transcribe?.error_message || 'Unknown error';
+                        log(`Recording ${r.recording_id} FAILED: ${errMsg}`, 'error', 'PIPELINE');
+                    });
+                }
+            } catch (e) {
+                log(`Failed to load recordings: ${e.message}`, 'error', 'UI');
+                treeView.innerHTML = '<div class="empty-state">載入失敗</div>';
+            }
+        }
+
+        function filterAndRender() {
+            const query = searchInput.value.toLowerCase().trim();
+            const listenerId = listenerFilter.value.toLowerCase();
+
+            let filtered = allRecordings;
+            if (listenerId) {
+                filtered = filtered.filter(r => (r.listener_id || '').toLowerCase() === listenerId);
+            }
+            if (query) {
+                filtered = filtered.filter(r => {
+                    const title = (r.title || r.folder_name || r.recording_id || '').toLowerCase();
+                    const transcription = (r.transcription?.text || '').toLowerCase();
+                    return title.includes(query) || transcription.includes(query);
+                });
+            }
+            renderTree(filtered);
+        }
+
+        // ==================== TREE VIEW RENDERING ====================
+        function renderTree(recordings) {
+            if (recordings.length === 0) {
+                treeView.innerHTML = '<div class="empty-state">尚無錄音</div>';
+                return;
+            }
+
+            treeView.innerHTML = recordings.map(r => renderRecordingFolder(r)).join('');
+
+            // Restore expanded state
+            expandedRecordings.forEach(id => {
+                const el = document.getElementById(`rec-${id}`);
+                if (el) {
+                    el.querySelector('.segments-container').classList.add('expanded');
+                    el.querySelector('.expand-icon').classList.add('expanded');
+                    el.querySelector('.recording-header').classList.add('expanded');
+                }
+            });
+        }
+
+        function renderRecordingFolder(r) {
+            const speakers = r.speaker_segments || [];
+            const uniqueSpeakers = [...new Set(speakers.map(s => s.speaker_id))].sort();
+            const statusClass = r.status === 'processed' ? 'ok' : r.status === 'failed' ? 'failed' : r.status === 'processing' ? 'processing' : '';
+            const statusText = r.status === 'raw' ? '待處理' : r.status === 'processed' ? '已完成' : r.status === 'processing' ? '處理中' : r.status === 'failed' ? '失敗' : r.status;
+
+            const listenerName = getListenerName(r.listener_id);
+            const personaName = getPersonaName(r.persona_id);
+            const durationText = r.duration_seconds ? r.duration_seconds.toFixed(1) + 's' : '-';
+
+            const canPlay = r.status === 'processed' || r.status === 'raw';
+
+            return `
+                <div class="tree-recording" id="rec-${r.recording_id}">
+                    <div class="recording-header" onclick="toggleRecording('${r.recording_id}')">
+                        <div class="expand-icon">▶</div>
+                        <div class="recording-title">
+                            <span class="recording-title-text">${r.title || r.folder_name || r.recording_id}</span>
+                            <span class="recording-badge ${statusClass}">${statusText}</span>
+                            <span class="recording-badge" style="background:#333;color:#888">[${listenerName}]</span>
+                            <span class="recording-badge" style="background:#333;color:#888">[${personaName}]</span>
+                        </div>
+                        <div class="recording-meta">
+                            <span>⏱ ${durationText}</span>
+                            ${uniqueSpeakers.length > 0 ? `<span>🔊 ${uniqueSpeakers.length} 段</span>` : ''}
+                        </div>
+                        <div class="recording-actions" onclick="event.stopPropagation()">
+                            ${canPlay ? `<button class="action-btn play" onclick="playFullRecording('${r.recording_id}')" title="播放全部">⏵</button>` : ''}
+                            ${r.status === 'processed' || r.status === 'raw' ? `<button class="action-btn parse" onclick="parseRecording('${r.recording_id}')">${r.status === 'processed' ? '重新解析' : '解析'}</button>` : ''}
+                            ${r.status === 'processing' ? `<span class="loading"></span>` : ''}
+                            <button class="action-btn delete" onclick="confirmDeleteRecording('${r.recording_id}')">✕</button>
+                        </div>
+                    </div>
+                    <div class="segments-container" id="segments-${r.recording_id}">
+                        ${r.status === 'processing' ? renderProcessingState(r) : ''}
+                        ${uniqueSpeakers.length === 0 && r.status !== 'processing' ? '<div style="padding:12px;color:#888;font-size:0.85rem;">尚無分段</div>' : ''}
+                        ${speakers.map(s => renderSegmentRow(r, s)).join('')}
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderProcessingState(r) {
+            const steps = r.processing_steps || {};
+            const stepNames = { denoise: '降噪', enhance: '增強', diarize: '標記說話者', transcribe: '轉錄' };
+            const stepOrder = ['denoise', 'enhance', 'diarize', 'transcribe'];
+            let currentStep = '';
+            for (const step of stepOrder) {
+                if (steps[step]?.status === 'in_progress') {
+                    currentStep = stepNames[step] || step;
+                    break;
+                }
+            }
+            return `
+                <div class="processing-state">
+                    <span class="loading"></span>
+                    <span>處理中: ${currentStep || '準備中'}...</span>
+                </div>
+            `;
+        }
+
+        function renderSegmentRow(r, segment) {
+            const speakerId = segment.speaker_id;
+            const duration = segment.duration_seconds || 0;
+            const transcript = segment.transcription?.text || '';
+            const quality = segment.quality_score || null;
+            const personaId = segment.persona_id || r.speaker_labels?.[speakerId] || '';
+            const listenerId = segment.listener_id || r.listener_id || '';
+
+            const qualityHtml = quality !== null
+                ? `<span class="quality-indicator ${quality >= 0.6 ? 'quality-good' : 'quality-bad'}">${quality >= 0.6 ? '✓' : '⚠'}</span>`
+                : '';
+
+            return `
+                <div class="segment-row" id="seg-${r.recording_id}-${speakerId}">
+                    <span class="speaker-icon">👤</span>
+                    <div class="speaker-info">
+                        <span class="speaker-name">${speakerId}</span>
+                        ${transcript ? `<span class="speaker-transcript">${transcript.substring(0, 50)}${transcript.length > 50 ? '...' : ''}</span>` : ''}
+                    </div>
+                    <div class="segment-dropdowns">
+                        <div class="dropdown-group">
+                            <label>人格</label>
+                            <select onchange="updateSegment('${r.recording_id}', '${speakerId}', 'persona_id', this.value)">
+                                <option value="">--</option>
+                                ${personas.map(p => `<option value="${p.persona_id}" ${p.persona_id === personaId ? 'selected' : ''}>${p.name}</option>`).join('')}
+                            </select>
+                            <button class="add-btn" onclick="openAddPersonaModal()" title="新增人格">+</button>
+                        </div>
+                        <div class="dropdown-group">
+                            <label>對</label>
+                            <select onchange="updateSegment('${r.recording_id}', '${speakerId}', 'listener_id', this.value)">
+                                <option value="">--</option>
+                                ${listeners.map(l => `<option value="${l.listener_id}" ${l.listener_id === listenerId ? 'selected' : ''}>${l.name}</option>`).join('')}
+                            </select>
+                            <button class="add-btn" onclick="openAddListenerModal()" title="新增聆聽者">+</button>
+                        </div>
+                    </div>
+                    <span class="segment-duration">${duration.toFixed(1)}s</span>
+                    <div class="playback-controls">
+                        <button class="play-btn" id="play-${r.recording_id}-${speakerId}" onclick="playSegment('${r.recording_id}', '${speakerId}')">▶</button>
+                        <button class="pause-btn" id="pause-${r.recording_id}-${speakerId}" onclick="pauseSegment()" style="display:none">⏸</button>
+                        <button class="stop-btn" onclick="stopSegment()" style="background:#666">⏹</button>
+                    </div>
+                    <div class="progress-container">
+                        <div class="progress-bar" id="progress-${r.recording_id}-${speakerId}" onclick="seekSegment(event, '${r.recording_id}', '${speakerId}')">
+                            <div class="progress-fill" id="progress-fill-${r.recording_id}-${speakerId}"></div>
+                        </div>
+                        <span class="progress-time" id="time-${r.recording_id}-${speakerId}">0:00 / ${formatTime(duration)}</span>
+                    </div>
+                    ${qualityHtml}
+                </div>
+            `;
+        }
+
+        function getPersonaName(personaId) {
+            if (!personaId) return '未設定';
+            const p = personas.find(x => x.persona_id === personaId);
+            return p ? p.name : personaId;
+        }
+
+        function getListenerName(listenerId) {
+            if (!listenerId) return '未設定';
+            const l = listeners.find(x => x.listener_id === listenerId);
+            return l ? l.name : listenerId;
+        }
+
+        function formatTime(seconds) {
+            const m = Math.floor(seconds / 60);
+            const s = Math.floor(seconds % 60);
+            return `${m}:${s.toString().padStart(2, '0')}`;
+        }
+
+        // ==================== TOGGLE EXPAND/COLLAPSE ====================
+        function toggleRecording(recordingId) {
+            const el = document.getElementById(`rec-${recordingId}`);
+            const segments = document.getElementById(`segments-${recordingId}`);
+            const icon = el.querySelector('.expand-icon');
+            const header = el.querySelector('.recording-header');
+
+            if (segments.classList.contains('expanded')) {
+                segments.classList.remove('expanded');
+                icon.classList.remove('expanded');
+                header.classList.remove('expanded');
+                icon.textContent = '▶';
+                expandedRecordings.delete(recordingId);
+            } else {
+                segments.classList.add('expanded');
+                icon.classList.add('expanded');
+                header.classList.add('expanded');
+                icon.textContent = '▼';
+                expandedRecordings.add(recordingId);
+            }
+        }
+
+        // ==================== SEGMENT PLAYBACK ====================
+        function playSegment(recordingId, speakerId) {
+            // Stop any currently playing audio
+            stopSegment();
+
+            const playBtn = document.getElementById(`play-${recordingId}-${speakerId}`);
+            const pauseBtn = document.getElementById(`pause-${recordingId}-${speakerId}`);
+
+            log(`Playing segment: ${speakerId}`, 'info', 'PLAYBACK');
+
+            fetch(`/api/recordings/${recordingId}/speaker/${speakerId}/audio`)
+                .then(res => {
+                    if (!res.ok) throw new Error('Audio not available');
+                    return res.blob();
+                })
+                .then(blob => {
+                    const url = URL.createObjectURL(blob);
+                    activeAudio = new Audio(url);
+                    currentPlayingId = `${recordingId}-${speakerId}`;
+
+                    activeAudio.addEventListener('timeupdate', () => {
+                        updateProgress(recordingId, speakerId);
+                    });
+
+                    activeAudio.addEventListener('ended', () => {
+                        resetPlaybackUI(recordingId, speakerId);
+                    });
+
+                    activeAudio.addEventListener('error', (e) => {
+                        log(`Audio error: ${e.message}`, 'error', 'PLAYBACK');
+                        resetPlaybackUI(recordingId, speakerId);
+                    });
+
+                    playBtn.style.display = 'none';
+                    pauseBtn.style.display = 'flex';
+                    activeAudio.play();
+                })
+                .catch(e => {
+                    log(`Failed to play segment: ${e.message}`, 'error', 'PLAYBACK');
+                    showToast('播放失敗: ' + e.message, 'error');
+                });
+        }
+
+        function pauseSegment() {
+            if (!activeAudio) return;
+            const [recordingId, speakerId] = currentPlayingId.split('-').slice(-2);
+            activeAudio.pause();
+            const playBtn = document.getElementById(`play-${recordingId}-${speakerId}`);
+            const pauseBtn = document.getElementById(`pause-${recordingId}-${speakerId}`);
+            if (playBtn) playBtn.style.display = 'flex';
+            if (pauseBtn) pauseBtn.style.display = 'none';
+        }
+
+        function stopSegment() {
+            if (activeAudio) {
+                activeAudio.pause();
+                activeAudio.currentTime = 0;
+                if (currentPlayingId) {
+                    const [recordingId, speakerId] = currentPlayingId.split('-').slice(-2);
+                    resetPlaybackUI(recordingId, speakerId);
+                }
+                activeAudio = null;
+                currentPlayingId = null;
+            }
+        }
+
+        function resetPlaybackUI(recordingId, speakerId) {
+            const playBtn = document.getElementById(`play-${recordingId}-${speakerId}`);
+            const pauseBtn = document.getElementById(`pause-${recordingId}-${speakerId}`);
+            const progressFill = document.getElementById(`progress-fill-${recordingId}-${speakerId}`);
+            if (playBtn) playBtn.style.display = 'flex';
+            if (pauseBtn) pauseBtn.style.display = 'none';
+            if (progressFill) progressFill.style.width = '0%';
+        }
+
+        function updateProgress(recordingId, speakerId) {
+            if (!activeAudio) return;
+            const progressFill = document.getElementById(`progress-fill-${recordingId}-${speakerId}`);
+            const timeDisplay = document.getElementById(`time-${recordingId}-${speakerId}`);
+            if (!progressFill || !timeDisplay) return;
+
+            const percent = (activeAudio.currentTime / activeAudio.duration) * 100;
+            progressFill.style.width = `${percent}%`;
+
+            const current = formatTime(activeAudio.currentTime);
+            const total = formatTime(activeAudio.duration || 0);
+            timeDisplay.textContent = `${current} / ${total}`;
+        }
+
+        function seekSegment(event, recordingId, speakerId) {
+            if (!activeAudio || currentPlayingId !== `${recordingId}-${speakerId}`) return;
+
+            const progressBar = document.getElementById(`progress-${recordingId}-${speakerId}`);
+            const rect = progressBar.getBoundingClientRect();
+            const percent = (event.clientX - rect.left) / rect.width;
+            activeAudio.currentTime = percent * activeAudio.duration;
+        }
+
+        // ==================== FULL RECORDING PLAYBACK ====================
+        function playFullRecording(recordingId) {
+            stopSegment();
+
+            log(`Playing full recording: ${recordingId}`, 'info', 'PLAYBACK');
+
+            fetch(`/api/recordings/${recordingId}/stream?stage=enhanced`)
+                .then(res => {
+                    if (!res.ok) throw new Error('Stream not available');
+                    return res.blob();
+                })
+                .then(blob => {
+                    const url = URL.createObjectURL(blob);
+                    activeAudio = new Audio(url);
+                    currentPlayingId = `full-${recordingId}`;
+
+                    activeAudio.addEventListener('ended', () => {
+                        activeAudio = null;
+                        currentPlayingId = null;
+                    });
+
+                    activeAudio.play();
+                    showToast('開始播放', 'info');
+                })
+                .catch(e => {
+                    log(`Playback failed: ${e.message}`, 'error', 'PLAYBACK');
+                    showToast('播放失敗: ' + e.message, 'error');
+                });
+        }
+
+        // ==================== SEGMENT UPDATE ====================
+        async function updateSegment(recordingId, speakerId, field, value) {
+            log(`Updating segment: ${speakerId} ${field} = ${value}`, 'info', 'UI');
+
+            const payload = { [field]: value || null };
+
+            try {
+                const response = await fetch(`/api/recordings/${recordingId}/segments/${speakerId}`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!response.ok) throw new Error('Update failed');
+
+                // Also update speaker_labels in metadata if persona changed
+                if (field === 'persona_id') {
+                    const rec = allRecordings.find(r => r.recording_id === recordingId);
+                    if (rec) {
+                        const labels = { ...(rec.speaker_labels || {}) };
+                        if (value) {
+                            labels[speakerId] = value;
+                        } else {
+                            delete labels[speakerId];
+                        }
+                        await fetch(`/api/recordings/${recordingId}/speakers`, {
+                            method: 'PATCH',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ speaker_labels: labels })
+                        });
+                    }
+                }
+
+                showToast('已更新', 'success');
+            } catch (e) {
+                log(`Update failed: ${e.message}`, 'error', 'UI');
+                showToast('更新失敗: ' + e.message, 'error');
+            }
+        }
+
+        // ==================== PARSE / RE-PARSE ====================
+        async function parseRecording(recordingId) {
+            log(`Parsing recording: ${recordingId}`, 'info', 'PIPELINE');
+
+            const el = document.getElementById(`rec-${recordingId}`);
+            const actionsDiv = el.querySelector('.recording-actions');
+            const originalHTML = actionsDiv.innerHTML;
+            actionsDiv.innerHTML = '<span class="loading"></span>';
+
+            try {
+                const response = await fetch(`/api/recordings/${recordingId}/process`, {
+                    method: 'POST'
+                });
+
+                if (!response.ok) throw new Error('Processing failed');
+
+                const result = await response.json();
+                log(`Processing started: ${result.status}`, 'info', 'PIPELINE');
+                showToast('開始解析錄音...', 'success');
+
+                // Refresh after short delay to show processing state
+                setTimeout(() => loadRecordings(), 1000);
+            } catch (e) {
+                log(`Parse failed: ${e.message}`, 'error', 'PIPELINE');
+                showToast('解析失敗: ' + e.message, 'error');
+                actionsDiv.innerHTML = originalHTML;
+            }
+        }
+
+        // ==================== DELETE RECORDING ====================
+        function confirmDeleteRecording(recordingId) {
+            const el = document.getElementById(`rec-${recordingId}`);
+            const actionsDiv = el.querySelector('.recording-actions');
+            actionsDiv.innerHTML = `
+                <div class="delete-confirm">
+                    <span>確認刪除？</span>
+                    <button class="action-btn delete" onclick="deleteRecording('${recordingId}')">刪除</button>
+                    <button class="action-btn cancel-btn" onclick="loadRecordings()">取消</button>
+                </div>
+            `;
+        }
+
+        async function deleteRecording(recordingId) {
+            log(`Deleting recording: ${recordingId}`, 'info', 'UI');
+            try {
+                const response = await fetch(`/api/recordings/${recordingId}`, { method: 'DELETE' });
+                if (!response.ok) throw new Error('Delete failed');
+                showToast('已刪除', 'success');
+                loadRecordings();
+            } catch (e) {
+                log(`Delete failed: ${e.message}`, 'error', 'UI');
+                showToast('刪除失敗: ' + e.message, 'error');
+            }
+        }
+
+        // ==================== ADD PERSONA/LISTENER ====================
+        function openAddPersonaModal() {
+            openModal('新增人格', '人格名稱', async (name) => {
+                const id = name.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '');
+                try {
+                    const res = await fetch('/api/personas/', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ persona_id: id, name: name, is_family: true })
+                    });
+                    if (!res.ok) {
+                        const err = await res.json();
+                        throw new Error(err.detail || 'Failed to create');
+                    }
+                    await loadPersonas();
+                    buildRecorderDropdowns();
+                    showToast(`已新增人格: ${name}`, 'success');
+                    filterAndRender();
+                } catch (e) {
+                    showToast('新增失敗: ' + e.message, 'error');
+                }
+            });
+        }
+
+        function openAddListenerModal() {
+            openModal('新增聆聽者', '聆聽者名稱', async (name) => {
+                const id = name.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '');
+                try {
+                    const res = await fetch('/api/listeners/', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ listener_id: id, name: name, is_family: false })
+                    });
+                    if (!res.ok) {
+                        const err = await res.json();
+                        throw new Error(err.detail || 'Failed to create');
+                    }
+                    await loadListeners();
+                    buildListenerFilter();
+                    buildRecorderDropdowns();
+                    showToast(`已新增聆聽者: ${name}`, 'success');
+                    filterAndRender();
+                } catch (e) {
+                    showToast('新增失敗: ' + e.message, 'error');
+                }
+            });
+        }
+
+        // ==================== WEBRTC RECORDING ====================
         let mediaRecorder = null;
         let audioChunks = [];
         let isRecording = false;
@@ -527,280 +1447,18 @@ async def recordings_page():
         let analyser = null;
         let currentStream = null;
 
-        // Elements
-        const recBtn = document.getElementById('recBtn');
-        const stopBtn = document.getElementById('stopBtn');
-        const duration = document.getElementById('duration');
-        const dbMeterFill = document.getElementById('dbMeterFill');
-        const dbLevel = document.getElementById('dbLevel');
-        const qualityIndicator = document.getElementById('qualityIndicator');
-        const debugLogs = document.getElementById('debugLogs');
-        const recordingsList = document.getElementById('recordingsList');
-        const uploadArea = document.getElementById('uploadArea');
-        const fileInput = document.getElementById('fileInput');
-        const listenerSelect = document.getElementById('listenerSelect');
-        const personaSelect = document.getElementById('personaSelect');
-
-        // Logging
-        function log(message, level = 'info', component = 'UI') {
-            const time = new Date().toLocaleTimeString('zh-TW', { hour12: false });
-            const entry = document.createElement('div');
-            entry.className = `log-entry ${level}`;
-            entry.innerHTML = `<span class="log-time">${time}</span><span class="log-component">[${component}]</span> ${message}`;
-            debugLogs.appendChild(entry);
-            debugLogs.scrollTop = debugLogs.debugLogsHeight;
-            console.log(`[${level.toUpperCase()}] [${component}] ${message}`);
-        }
-
-        // Toggle debug panel
-        document.getElementById('debugToggle').addEventListener('click', () => {
-            const panel = document.getElementById('debugPanel');
-            const logs = document.getElementById('debugLogs');
-            if (logs.style.display === 'none') {
-                logs.style.display = 'block';
-                panel.style.maxHeight = '200px';
-            } else {
-                logs.style.display = 'none';
-                panel.style.maxHeight = '40px';
-            }
-        });
-
-        // Load recordings list
-        async function loadRecordings() {
-            try {
-                const response = await fetch('/api/recordings/');
-                const data = await response.json();
-                // Handle both paginated {recordings: [...]} and legacy array responses
-                const recordings = Array.isArray(data) ? data : (data.recordings || []);
-                renderRecordings(recordings);
-                applySpeakerLabelDefaults();
-                log(`Loaded ${recordings.length} recordings`, 'info', 'UI');
-            } catch (e) {
-                log(`Failed to load recordings: ${e.message}`, 'error', 'UI');
-            }
-        }
-
-        // Render recordings list
-        function renderRecordings(recordings) {
-            if (recordings.length === 0) {
-                recordingsList.innerHTML = '<div class="empty-state">尚無錄音</div>';
-                return;
-            }
-
-            recordingsList.innerHTML = recordings.map(r => {
-                const statusClass = r.status === 'processed' ? 'ok' : r.status === 'failed' ? 'failed' : r.status === 'processing' ? 'processing' : '';
-                const quality = r.quality_metrics;
-                const qualityHtml = quality && quality.training_ready !== null
-                    ? `<span class="${quality.training_ready ? 'quality-good' : 'quality-bad'}">${quality.training_ready ? '✓ 可用於訓練' : '⚠ 品質不足'}</span>`
-                    : '';
-
-                const speakers = r.speaker_segments || [];
-                const uniqueSpeakers = [...new Set(speakers.map(s => s.speaker_id))].sort();
-                const speakerLabels = r.speaker_labels || {};
-                const speakerSectionHtml = uniqueSpeakers.length > 0 ? renderSpeakerSection(r.recording_id, uniqueSpeakers, speakerLabels) : '';
-
-                return `
-                    <div class="recording-card" data-id="${r.recording_id}">
-                        <div class="recording-info">
-                            <div class="recording-title">
-                                ${r.title || r.folder_name || r.recording_id}
-                                <span class="recording-badge ${statusClass}">${r.status}</span>
-                            </div>
-                            <div class="recording-meta" id="meta-${r.recording_id}">
-                                <span>👤 <span id="listener-display-${r.recording_id}">${r.listener_id || 'unknown'}</span>
-                                    <button class="edit-btn" onclick="showEditField('${r.recording_id}', 'listener')">✎</button>
-                                </span>
-                                <span>🎭 <span id="persona-display-${r.recording_id}">${r.persona_id || 'unknown'}</span>
-                                    <button class="edit-btn" onclick="showEditField('${r.recording_id}', 'persona')">✎</button>
-                                </span>
-                                <span>⏱ ${r.duration_seconds ? r.duration_seconds.toFixed(1) + 's' : '-'}</span>
-                                <span>📅 ${r.created_at ? new Date(r.created_at).toLocaleDateString('zh-TW') : '-'}</span>
-                                ${uniqueSpeakers.length > 0 ? `<span>🔊 ${uniqueSpeakers.length} speakers</span>` : ''}
-                            </div>
-                            ${qualityHtml ? `<div class="quality-info">${qualityHtml}</div>` : ''}
-                            ${r.transcription && r.transcription.text ? `<div class="transcription">${r.transcription.text.substring(0, 100)}...</div>` : ''}
-                            ${speakerSectionHtml}
-                        </div>
-                        <div class="recording-actions">
-                            ${r.status === 'processed' || r.status === 'raw' ? `<button class="action-btn play" onclick="playRecording('${r.recording_id}')">▶</button>` : ''}
-                            <button class="action-btn delete" onclick="deleteRecording('${r.recording_id}')">✕</button>
-                        </div>
-                    </div>
-                `;
-            }).join('');
-        }
-
-        // Render speaker labeling section
-        function renderSpeakerSection(recordingId, speakers, labels) {
-            const personaOptions = `
-                <option value="xiao_s">小S</option>
-                <option value="caregiver">照護者</option>
-                <option value="elder_gentle">長輩-溫柔</option>
-                <option value="elder_playful">長輩-活潑</option>
-            `;
-
-            const speakerRows = speakers.map(s => {
-                const currentLabel = labels[s] || '';
-                return `
-                    <div class="speaker-row">
-                        <span class="speaker-name">${s}</span>
-                        <select class="speaker-select" id="speaker-${s}-${recordingId}" data-initial-value="${currentLabel}" onchange="updateSpeakerLabel('${recordingId}', '${s}', this.value)">
-                            <option value="">-- 未標記 --</option>
-                            ${personaOptions}
-                        </select>
-                        <button class="speaker-audio-btn" onclick="playSpeakerAudio('${recordingId}', '${s}')">▶ 播放</button>
-                    </div>
-                `;
-            }).join('');
-
-            return `
-                <div class="speaker-section">
-                    <div class="speaker-section-title">🔊 說話者標記</div>
-                    ${speakerRows}
-                </div>
-            `;
-        }
-
-        // Apply initial speaker label values after rendering
-        function applySpeakerLabelDefaults() {
-            document.querySelectorAll('.speaker-select[data-initial-value]').forEach(select => {
-                const initialValue = select.getAttribute('data-initial-value');
-                if (initialValue) {
-                    select.value = initialValue;
-                }
-            });
-        }
-
-        // Show inline edit field
-        function showEditField(recordingId, field) {
-            const displayEl = document.getElementById(`${field}-display-${recordingId}`);
-            if (!displayEl) return;
-
-            const currentValue = displayEl.textContent.trim();
-            const options = field === 'listener'
-                ? `<option value="child">child</option><option value="mom">mom</option><option value="dad">dad</option><option value="friend">friend</option><option value="reporter">reporter</option><option value="elder">elder</option><option value="default">default</option>`
-                : `<option value="xiao_s">xiao_s</option><option value="caregiver">caregiver</option><option value="elder_gentle">elder_gentle</option><option value="elder_playful">elder_playful</option>`;
-
-            displayEl.innerHTML = `
-                <select class="inline-edit" id="edit-${field}-${recordingId}">
-                    ${options}
-                </select>
-                <button class="save-btn" onclick="saveEdit('${recordingId}', '${field}')">儲存</button>
-                <button class="cancel-btn" onclick="cancelEdit('${recordingId}', '${field}', '${currentValue}')">取消</button>
-            `;
-            document.getElementById(`edit-${field}-${recordingId}`).value = currentValue;
-        }
-
-        // Save edited field
-        async function saveEdit(recordingId, field) {
-            const newValue = document.getElementById(`edit-${field}-${recordingId}`).value;
-            try {
-                const response = await fetch(`/api/recordings/${recordingId}`, {
-                    method: 'PATCH',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({[field === 'listener' ? 'listener_id' : 'persona_id']: newValue})
-                });
-                if (!response.ok) throw new Error('Update failed');
-                loadRecordings();
-                log(`Updated ${field} to ${newValue}`, 'info', 'UI');
-            } catch (e) {
-                log(`Update failed: ${e.message}`, 'error', 'UI');
-            }
-        }
-
-        // Cancel edit
-        function cancelEdit(recordingId, field, originalValue) {
-            const displayEl = document.getElementById(`${field}-display-${recordingId}`);
-            if (displayEl) {
-                displayEl.textContent = originalValue;
-            }
-        }
-
-        // Update speaker label
-        async function updateSpeakerLabel(recordingId, speakerId, personaId) {
-            try {
-                // Get current labels
-                const response = await fetch(`/api/recordings/${recordingId}/speakers`);
-                const info = await response.json();
-                const labels = {...info.speaker_labels};
-                labels[speakerId] = personaId || undefined;
-
-                // Remove undefined keys
-                Object.keys(labels).forEach(k => labels[k] === undefined && delete labels[k]);
-
-                // Update
-                const updateResponse = await fetch(`/api/recordings/${recordingId}/speakers`, {
-                    method: 'PATCH',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({speaker_labels: labels})
-                });
-                if (!updateResponse.ok) throw new Error('Update failed');
-                log(`Labeled ${speakerId} as ${personaId || '(unlabeled)'}`, 'info', 'UI');
-            } catch (e) {
-                log(`Speaker label update failed: ${e.message}`, 'error', 'UI');
-            }
-        }
-
-        // Play speaker audio
-        async function playSpeakerAudio(recordingId, speakerId) {
-            log(`Playing speaker audio: ${speakerId}`, 'info', 'PLAYBACK');
-            try {
-                const response = await fetch(`/api/recordings/${recordingId}/speaker/${speakerId}/audio`);
-                if (!response.ok) throw new Error('Speaker audio not available');
-                const blob = await response.blob();
-                const url = URL.createObjectURL(blob);
-                const audio = new Audio(url);
-                audio.play();
-            } catch (e) {
-                log(`Speaker playback failed: ${e.message}`, 'error', 'PLAYBACK');
-            }
-        }
-
-        // Play recording
-        async function playRecording(recordingId) {
-            log(`Playing recording: ${recordingId}`, 'info', 'PLAYBACK');
-            try {
-                const response = await fetch(`/api/recordings/${recordingId}/stream?stage=enhanced`);
-                if (!response.ok) throw new Error('Stream not available');
-                const blob = await response.blob();
-                const url = URL.createObjectURL(blob);
-                const audio = new Audio(url);
-                audio.play();
-                log(`Playing: ${url}`, 'debug', 'PLAYBACK');
-            } catch (e) {
-                log(`Playback failed: ${e.message}`, 'error', 'PLAYBACK');
-            }
-        }
-
-        // Delete recording
-        async function deleteRecording(recordingId) {
-            if (!confirm('確定要刪除這個錄音嗎？')) return;
-            log(`Deleting recording: ${recordingId}`, 'info', 'UI');
-            try {
-                const response = await fetch(`/api/recordings/${recordingId}`, { method: 'DELETE' });
-                if (!response.ok) throw new Error('Delete failed');
-                loadRecordings();
-                log(`Deleted: ${recordingId}`, 'info', 'UI');
-            } catch (e) {
-                log(`Delete failed: ${e.message}`, 'error', 'UI');
-            }
-        }
-
-        // Start recording
         async function startRecording() {
             log('Starting WebRTC recording...', 'info', 'RECORDING');
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
                 currentStream = stream;
 
-                // Setup audio context for dB meter
                 audioContext = new AudioContext();
                 analyser = audioContext.createAnalyser();
                 const source = audioContext.createMediaStreamSource(stream);
                 source.connect(analyser);
                 analyser.fftSize = 256;
 
-                // Setup MediaRecorder
                 mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
                 audioChunks = [];
 
@@ -816,32 +1474,24 @@ async def recordings_page():
                     await uploadBlob(blob);
                 };
 
-                mediaRecorder.start(100); // Collect data every 100ms
+                mediaRecorder.start(100);
                 isRecording = true;
                 startTime = Date.now();
 
-                // Update UI
                 recBtn.classList.add('recording');
                 recBtn.querySelector('#recText').textContent = '錄音中...';
                 stopBtn.classList.add('visible');
                 qualityIndicator.textContent = '錄音中...';
 
-                // Start duration timer
                 durationInterval = setInterval(() => {
                     const elapsed = Math.floor((Date.now() - startTime) / 1000);
                     const mins = Math.floor(elapsed / 60).toString().padStart(2, '0');
                     const secs = (elapsed % 60).toString().padStart(2, '0');
                     duration.textContent = `${mins}:${secs}`;
-
-                    // Max 5 minutes
-                    if (elapsed >= 300) {
-                        stopRecording();
-                    }
+                    if (elapsed >= 300) stopRecording();
                 }, 1000);
 
-                // Start dB meter
                 updateDbMeter();
-
                 log('Recording started', 'info', 'RECORDING');
             } catch (e) {
                 log(`Failed to start recording: ${e.message}`, 'error', 'RECORDING');
@@ -849,14 +1499,12 @@ async def recordings_page():
             }
         }
 
-        // Update dB meter
         function updateDbMeter() {
             if (!isRecording || !analyser) return;
 
             const dataArray = new Uint8Array(analyser.frequencyBinCount);
             analyser.getByteFrequencyData(dataArray);
 
-            // Calculate RMS
             let sum = 0;
             for (let i = 0; i < dataArray.length; i++) {
                 sum += dataArray[i] * dataArray[i];
@@ -864,12 +1512,10 @@ async def recordings_page():
             const rms = Math.sqrt(sum / dataArray.length);
             const db = 20 * Math.log10(rms / 255);
 
-            // Update UI
             const percent = Math.min(100, Math.max(0, (db + 60) * 100 / 60));
             dbMeterFill.style.width = percent + '%';
             dbLevel.textContent = db > -60 ? `${db.toFixed(1)} dB` : '-∞ dB';
 
-            // Quality indicator
             if (db > -12 && db < 0) {
                 qualityIndicator.textContent = '✓ 音量良好';
                 qualityIndicator.style.color = '#00ff88';
@@ -887,7 +1533,6 @@ async def recordings_page():
             requestAnimationFrame(updateDbMeter);
         }
 
-        // Stop recording
         function stopRecording() {
             if (!isRecording) return;
 
@@ -898,12 +1543,10 @@ async def recordings_page():
                 mediaRecorder.stop();
             }
 
-            // Stop all tracks
             if (currentStream) {
                 currentStream.getTracks().forEach(track => track.stop());
             }
 
-            // Cleanup
             if (durationInterval) {
                 clearInterval(durationInterval);
                 durationInterval = null;
@@ -913,7 +1556,6 @@ async def recordings_page():
                 audioContext = null;
             }
 
-            // Reset UI
             recBtn.classList.remove('recording');
             recBtn.querySelector('#recText').textContent = '開始錄音';
             stopBtn.classList.remove('visible');
@@ -924,7 +1566,6 @@ async def recordings_page():
             qualityIndicator.style.color = '#888';
         }
 
-        // Upload blob as file
         async function uploadBlob(blob) {
             const listenerId = listenerSelect.value;
             const personaId = personaSelect.value;
@@ -950,18 +1591,16 @@ async def recordings_page():
 
                 const result = await response.json();
                 log(`Upload complete: recording_id=${result.recording_id}`, 'info', 'UPLOAD');
+                showToast('錄音上傳成功！正在處理...', 'success');
                 loadRecordings();
-
-                // Trigger processing
                 await triggerProcessing(result.recording_id);
 
             } catch (e) {
                 log(`Upload failed: ${e.message}`, 'error', 'UPLOAD');
-                alert('上傳失敗: ' + e.message);
+                showToast('上傳失敗: ' + e.message, 'error');
             }
         }
 
-        // Trigger processing
         async function triggerProcessing(recordingId) {
             log(`Triggering processing: ${recordingId}`, 'info', 'PIPELINE');
             try {
@@ -975,7 +1614,7 @@ async def recordings_page():
             }
         }
 
-        // File upload handlers
+        // ==================== FILE UPLOAD ====================
         uploadArea.addEventListener('click', () => fileInput.click());
 
         uploadArea.addEventListener('dragover', (e) => {
@@ -998,6 +1637,8 @@ async def recordings_page():
         });
 
         async function handleFiles(files) {
+            let successCount = 0;
+            let failCount = 0;
             for (const file of files) {
                 log(`Uploading file: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`, 'info', 'UPLOAD');
                 const formData = new FormData();
@@ -1014,42 +1655,53 @@ async def recordings_page():
                     const result = await response.json();
                     log(`File uploaded: ${result.recording_id}`, 'info', 'UPLOAD');
                     await triggerProcessing(result.recording_id);
+                    successCount++;
                 } catch (e) {
                     log(`File upload failed: ${e.message}`, 'error', 'UPLOAD');
+                    failCount++;
                 }
             }
             loadRecordings();
+            if (failCount === 0 && successCount > 0) {
+                showToast(`${successCount} 個檔案上傳成功，正在處理...`, 'success');
+            } else if (failCount > 0) {
+                showToast(`${failCount} 個檔案上傳失敗`, 'error');
+            }
         }
 
-        // Event listeners
+        // ==================== EVENT LISTENERS ====================
         recBtn.addEventListener('click', () => {
-            if (isRecording) {
-                stopRecording();
+            if (isRecording) stopRecording();
+            else startRecording();
+        });
+        stopBtn.addEventListener('click', stopRecording);
+
+        // Debug panel toggle
+        document.getElementById('debugToggle').addEventListener('click', () => {
+            const panel = document.getElementById('debugPanel');
+            const logs = document.getElementById('debugLogs');
+            if (logs.style.display === 'none') {
+                logs.style.display = 'block';
+                panel.style.maxHeight = '200px';
             } else {
-                startRecording();
+                logs.style.display = 'none';
+                panel.style.maxHeight = '40px';
             }
         });
 
-        stopBtn.addEventListener('click', stopRecording);
+        // ==================== AUTO REFRESH ====================
+        init();
 
-        // Load data on page load
-        loadRecordings();
-        log('Recordings page loaded', 'info', 'UI');
-
-        // Auto-refresh recordings list every 5 seconds when page is visible
-        // This ensures processing status updates automatically
         setInterval(() => {
             if (!document.hidden) {
                 loadRecordings();
             }
         }, 5000);
 
-        // Load personas/listeners for potential future use
-        fetch('/api/personas').then(r => r.json()).then(data => {
-            log(`Loaded ${data.length} personas`, 'debug', 'UI');
-        });
-        fetch('/api/listeners').then(r => r.json()).then(data => {
-            log(`Loaded ${data.length} listeners`, 'debug', 'UI');
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) {
+                loadRecordings();
+            }
         });
     </script>
 </body>

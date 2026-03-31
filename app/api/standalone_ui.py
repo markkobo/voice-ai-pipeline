@@ -45,13 +45,74 @@ UI_HTML = """
         .debug.show { display: block; }
         .debug-toggle { font-size: 12px; color: #888; cursor: pointer; margin-top: 8px; }
         .debug-entry { padding: 2px 0; border-bottom: 1px solid #333; }
+        .debug-entry.error { color: #ff4444; }
         .placeholder { color: #aaa; text-align: center; padding: 40px; }
+        .thinking {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 12px 16px;
+            background: #e9ecef;
+            border-radius: 12px;
+            margin-right: 20px;
+            border-bottom-left-radius: 4px;
+            color: #666;
+            font-size: 14px;
+        }
+        .thinking-dot {
+            width: 8px;
+            height: 8px;
+            background: #007bff;
+            border-radius: 50%;
+            animation: thinking-bounce 1.4s infinite ease-in-out both;
+        }
+        .thinking-dot:nth-child(1) { animation-delay: -0.32s; }
+        .thinking-dot:nth-child(2) { animation-delay: -0.16s; }
+        @keyframes thinking-bounce {
+            0%, 80%, 100% { transform: scale(0); }
+            40% { transform: scale(1); }
+        }
+        .keyboard-hint {
+            font-size: 11px;
+            color: #aaa;
+            margin-top: 8px;
+        }
+        .keyboard-hint kbd {
+            background: #ddd;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 10px;
+        }
+        .toast {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            padding: 12px 20px;
+            border-radius: 8px;
+            font-size: 14px;
+            z-index: 9999;
+            opacity: 0;
+            transition: opacity 0.3s;
+            pointer-events: none;
+            max-width: 300px;
+        }
+        .toast.show { opacity: 1; }
+        .toast.success { background: #1a4a2e; color: #00ff88; border: 1px solid #00ff88; }
+        .toast.error { background: #4a1a1a; color: #ff4444; border: 1px solid #ff4444; }
+        .toast.info { background: #1a2a4a; color: #00ccff; border: 1px solid #00ccff; }
     </style>
 </head>
 <body>
+    <div id="toast" class="toast"></div>
     <div class="container">
-        <h1>Voice AI — 小S <span id="uiVersion" style="font-size:12px;color:#888">[v3]</span></h1>
-        <p class="subtitle">選擇對象，開始對話</p>
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div>
+                <h1>Voice AI — 小S <span id="uiVersion" style="font-size:12px;color:#888">[v3]</span></h1>
+                <p class="subtitle">選擇對象，開始對話</p>
+            </div>
+            <button onclick="clearConversation()" style="background:#555;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:13px;">🗑 清除對話</button>
+        </div>
         <div id="status" class="status disconnected">Disconnected</div>
 
         <div class="config-row">
@@ -75,7 +136,7 @@ UI_HTML = """
             </div>
             <div class="config-item">
                 <label>VAD 靈敏度</label>
-                <select id="vad">
+                <select id="vad" onchange="onVadChange()">
                     <option value="low">低</option>
                     <option value="medium" selected>中</option>
                     <option value="high">高</option>
@@ -83,15 +144,28 @@ UI_HTML = """
             </div>
             <div class="config-item">
                 <label>TTS 模型</label>
-                <select id="tts_model">
+                <select id="tts_model" onchange="onTtsModelChange()">
                     <option value="0.6B">0.6B (快速)</option>
                     <option value="1.7B" selected>1.7B (高品質)</option>
                 </select>
             </div>
         </div>
+        <div id="ttsModelHint" style="font-size: 0.8rem; color: #666; margin-bottom: 12px; display: none;">
+            ✓ 已切換為 <span id="ttsModelHintValue"></span>，下次對話時生效
+        </div>
+
+        <!-- Active version indicator -->
+        <div id="versionIndicator" style="background: #1a1a2e; border-radius: 8px; padding: 8px 14px; margin-bottom: 12px; font-size: 0.85rem; display: flex; align-items: center; gap: 8px;">
+            <span style="color: #888;">🎙️ 聲音版本:</span>
+            <select id="versionSelect" onchange="onVersionChange()" style="background: #1a1a2e; color: #00ccff; border: 1px solid #333; border-radius: 4px; padding: 4px 8px; font-size: 0.85rem; max-width: 220px;">
+                <option value="">系統預設</option>
+            </select>
+            <span id="versionInfo" style="color: #666; font-size: 0.75rem;"></span>
+            <button onclick="loadVersions()" style="background: #333; color: #aaa; border: none; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 0.75rem; margin-left: auto;">🔄</button>
+        </div>
 
         <div class="controls">
-            <button id="recordBtn" class="primary" disabled>🎤 按住說話</button>
+            <button id="recordBtn" class="primary" disabled onclick="toggleConversation()">🎤 開始對話</button>
             <button id="commitBtn" disabled onclick="window.__commitBtnClicked()">✋ 強制送出</button>
             <button id="cancelBtn" disabled>⏹ 取消</button>
         </div>
@@ -100,9 +174,22 @@ UI_HTML = """
             <div class="placeholder">開始說話吧...</div>
         </div>
 
+        <!-- Thinking indicator (hidden by default) -->
+        <div id="thinkingIndicator" style="display: none; margin-bottom: 16px;">
+            <div class="thinking">
+                <span>AI 思考中</span>
+                <div class="thinking-dot"></div>
+                <div class="thinking-dot"></div>
+                <div class="thinking-dot"></div>
+            </div>
+        </div>
+
         <div class="debug-toggle" onclick="toggleDebug()">📋 Debug Panel (點擊展開)</div>
         <div id="debug" class="debug">
             <div id="debugContent"></div>
+        </div>
+        <div class="keyboard-hint">
+            快捷鍵: <kbd>Space</kbd> 說話/停止 &nbsp;|&nbsp; <kbd>Esc</kbd> 取消 &nbsp;|&nbsp; <kbd>Ctrl+K</kbd> 清除對話
         </div>
     </div>
 
@@ -113,9 +200,9 @@ UI_HTML = """
         return false;
     };
     // Version for debugging
-    window.UI_VERSION = '2026-03-28-v24-flowctrl';
+    window.UI_VERSION = '2026-03-31-v25-ux-improvements';
     console.log('UI Version: ' + window.UI_VERSION);
-    document.getElementById('uiVersion').textContent = '[v24-flowctrl]';
+    document.getElementById('uiVersion').textContent = '[v25]';
 
     const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/asr';
     const TTS_BASE = location.origin + '/api/tts/stream';
@@ -135,6 +222,9 @@ UI_HTML = """
     let ttsSignalController = null;
     let recordingStream = null;
     let accumulatedChunks = [];  // Accumulated PCM ArrayBuffers
+    let isThinking = false;  // Track if AI is processing
+    let isConversationActive = false;  // Toggle state for conversation
+    let selectedVersionId = null;  // Selected TTS version ID from dropdown
 
     // AudioWorklet for streaming PCM playback
     let audioWorkletNode = null;
@@ -477,15 +567,22 @@ UI_HTML = """
         convEl.scrollTop = convEl.scrollHeight;
     }
 
-    function log(msg) {
+    function log(msg, level = 'info') {
         const d = document.createElement('div');
-        d.className = 'debug-entry';
-        d.textContent = new Date().toISOString().substr(11,8) + ' ' + msg;
+        d.className = 'debug-entry' + (level === 'error' ? ' error' : '');
+        d.textContent = new Date().toISOString().substr(11,8) + ' [' + level.toUpperCase() + '] ' + msg;
         debugContent.prepend(d);
     }
 
     function toggleDebug() {
         debugEl.classList.toggle('show');
+    }
+
+    function clearConversation() {
+        convEl.innerHTML = '<div class="placeholder">開始說話吧...</div>';
+        isThinking = false;
+        document.getElementById('thinkingIndicator').style.display = 'none';
+        log('Conversation cleared');
     }
 
     function connect() {
@@ -496,9 +593,10 @@ UI_HTML = """
 
         ws.onopen = () => {
             setStatus('connected');
-            recordBtn.disabled = false;
-            commitBtn.disabled = false;
-            cancelBtn.disabled = false;
+            isConversationActive = true;
+            if (recordBtn) recordBtn.textContent = '⏹ 停止對話';
+            if (commitBtn) commitBtn.disabled = false;
+            if (cancelBtn) cancelBtn.disabled = false;
             log('WS connected');
             // Send config
             ws.send(JSON.stringify({
@@ -506,7 +604,8 @@ UI_HTML = """
                 audio: { sample_rate: 24000, channels: 1, format: 'pcm' },
                 persona_id: personaEl.value,
                 listener_id: listenerEl.value,
-                model: 'gpt-4o-mini'
+                model: 'gpt-4o-mini',
+                vad: document.getElementById('vad').value
             }));
             log('Config sent');
         };
@@ -541,9 +640,146 @@ UI_HTML = """
                 try { audioWorkletNode.port.postMessage({ type: 'flush' }); } catch(e) {}
             }
             log('WS disconnected');
+            isConversationActive = false;
+            const recordBtn = document.getElementById('recordBtn');
+            if (recordBtn) recordBtn.textContent = '🎤 開始對話';
         };
 
         ws.onerror = (e) => log('WS error: ' + JSON.stringify(e));
+    }
+
+    // Load all versions for selected persona into dropdown
+    async function loadVersions() {
+        const versionSelect = document.getElementById('versionSelect');
+        const versionInfo = document.getElementById('versionInfo');
+        try {
+            const personaId = document.getElementById('persona').value;
+            const response = await fetch(`/api/training/versions?persona_id=${personaId}`);
+            const data = await response.json();
+            const versions = data.versions || [];
+
+            // Get active version
+            const activeRes = await fetch(`/api/training/active?persona_id=${personaId}`);
+            const activeData = await activeRes.json();
+            const activeVersionId = activeData.version?.version_id;
+
+            versionSelect.innerHTML = '<option value="">系統預設</option>';
+            versions.forEach(v => {
+                if (v.status === 'ready') {
+                    const label = v.nickname ? `${v.version_id}: ${v.nickname}` : v.version_id;
+                    const selected = v.version_id === activeVersionId ? 'selected' : '';
+                    versionSelect.innerHTML += `<option value="${v.version_id}" ${selected}>${label}</option>`;
+                }
+            });
+
+            // Set selected from active
+            if (activeVersionId) {
+                versionSelect.value = activeVersionId;
+                selectedVersionId = activeVersionId;
+            } else {
+                versionSelect.value = '';
+                selectedVersionId = null;
+            }
+
+            // Show info for selected version
+            updateVersionInfo(activeData.version);
+
+        } catch (e) {
+            log('Failed to load versions: ' + e.message);
+        }
+    }
+
+    // Update version info tooltip
+    function updateVersionInfo(version) {
+        const versionInfo = document.getElementById('versionInfo');
+        if (!version) {
+            versionInfo.textContent = '';
+            return;
+        }
+        const loss = version.final_loss ? ` loss: ${version.final_loss.toFixed(4)}` : '';
+        const date = version.completed_at ? new Date(version.completed_at).toLocaleDateString('zh-TW') : '';
+        versionInfo.textContent = `${loss} ${date}`;
+    }
+
+    // On version dropdown change → activate version
+    async function onVersionChange() {
+        const versionSelect = document.getElementById('versionSelect');
+        const versionId = versionSelect.value;
+        selectedVersionId = versionId || null;
+
+        if (versionId) {
+            try {
+                await fetch(`/api/training/versions/${versionId}/activate`, { method: 'POST' });
+                log(`Version ${versionId} activated`);
+                showToast(`已切換至: ${versionSelect.options[versionSelect.selectedIndex].text}`, 'success');
+                loadVersions();  // Refresh to update "active" badge
+            } catch (e) {
+                log(`Failed to activate version: ${e.message}`, 'error');
+                showToast('切換版本失敗', 'error');
+            }
+        }
+    }
+
+    // Show toast notification
+    function showToast(message, type = 'info') {
+        const toast = document.getElementById('toast');
+        toast.textContent = message;
+        toast.className = `toast ${type} show`;
+        setTimeout(() => {
+            toast.classList.remove('show');
+        }, 3000);
+    }
+
+    // Toggle conversation start/stop
+    function toggleConversation() {
+        if (!isConversationActive) {
+            // Start conversation
+            connect();
+        } else {
+            // Stop conversation
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+            // Stop any ongoing recording
+            if (isRecording) {
+                stopRecording();
+            }
+            // Stop any playing audio
+            if (currentAudio) {
+                try { currentAudio.pause(); } catch(e) {}
+                currentAudio = null;
+            }
+            if (audioWorkletNode) {
+                try { audioWorkletNode.port.postMessage({ type: 'stop' }); } catch(e) {}
+            }
+        }
+    }
+
+    function onTtsModelChange() {
+        const hint = document.getElementById('ttsModelHint');
+        const modelValue = document.getElementById('tts_model').value;
+        const modelLabel = modelValue === '0.6B' ? '0.6B (快速)' : '1.7B (高品質)';
+        document.getElementById('ttsModelHintValue').textContent = modelLabel;
+        hint.style.display = 'block';
+        hint.style.color = '#00ccff';
+        // Hide after 3 seconds
+        setTimeout(() => { hint.style.display = 'none'; }, 3000);
+        log('TTS model preference set to: ' + modelValue);
+    }
+
+    function onVadChange() {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        const vadValue = document.getElementById('vad').value;
+        ws.send(JSON.stringify({
+            type: 'config',
+            audio: { sample_rate: 24000, channels: 1, format: 'pcm' },
+            persona_id: personaEl.value,
+            listener_id: listenerEl.value,
+            model: 'gpt-4o-mini',
+            vad: vadValue
+        }));
+        log('VAD sensitivity changed to: ' + vadValue);
     }
 
     function handleMessage(msg) {
@@ -582,13 +818,23 @@ UI_HTML = """
             }
             lastPlayedUrl = '';
             ttsText = '';
+            // Show thinking indicator
+            isThinking = true;
+            document.getElementById('thinkingIndicator').style.display = 'block';
+            log('Thinking indicator shown');
         }
 
         if (msg.type === 'llm_token') {
+            // Hide thinking indicator on first real token
+            if (isThinking) {
+                isThinking = false;
+                document.getElementById('thinkingIndicator').style.display = 'none';
+                log('Thinking indicator hidden (first token)');
+            }
             let content = msg.content || '';
             // Before accumulating, strip if this content looks like emotion tag fragment
             // These fragments arrive with emotion=null: "默", " 幽", ":", "感", "情", "["
-            if (content === '[' || content === '情' || content === '感' || content === ':' || 
+            if (content === '[' || content === '情' || content === '感' || content === ':' ||
                 content === '默' || content === ' 幽' || content.match(/^\[情感/)) {
                 // Skip this fragment, don't accumulate
             } else {
@@ -652,6 +898,8 @@ UI_HTML = """
             // Reset TTS text state but don't interrupt queue
             ttsText = '';
             ttsEmotion = '';
+            isThinking = false;
+            document.getElementById('thinkingIndicator').style.display = 'none';
             log('LLM done - queue has ' + audioQueue.length + ' items waiting');
         }
 
@@ -675,11 +923,27 @@ UI_HTML = """
             ttsText = '';
             ttsEmotion = '';
             lastPlayedUrl = '';
+            isThinking = false;
+            document.getElementById('thinkingIndicator').style.display = 'none';
             log('LLM cancelled: partial=' + (msg.partial_text || '').substring(0, 50));
         }
 
         if (msg.type === 'llm_error') {
             log('LLM ERROR: ' + (msg.error || 'unknown'));
+            isThinking = false;
+            document.getElementById('thinkingIndicator').style.display = 'none';
+        }
+
+        if (msg.type === 'asr_error') {
+            log('ASR ERROR: ' + (msg.error || 'unknown'), 'error');
+        }
+
+        if (msg.type === 'vad_error') {
+            log('VAD ERROR: ' + (msg.error || 'unknown'), 'error');
+        }
+
+        if (msg.type === 'tts_error') {
+            log('TTS ERROR: ' + (msg.error || 'unknown'), 'error');
         }
     }
 
@@ -896,10 +1160,57 @@ UI_HTML = """
                 model: 'gpt-4o-mini'
             }));
         }
+        // Reload versions when listener changes (persona might be same but different active version)
+        loadVersions();
+    });
+
+    personaEl.addEventListener('change', () => {
+        // Reload versions when persona changes
+        loadVersions();
+    });
+
+    // Keyboard shortcuts
+    // Space: Push-to-talk (when not recording, start; when recording, stop+send)
+    // Esc: Cancel current request
+    // Ctrl+K: Clear conversation
+    document.addEventListener('keydown', (e) => {
+        // Ignore if user is typing in an input
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
+
+        if (e.code === 'Space' && !e.repeat) {
+            e.preventDefault();
+            if (!recordBtn.disabled) {
+                if (isRecording) {
+                    stopRecordingAndSend();
+                } else {
+                    startRecording();
+                }
+            }
+        }
+
+        if (e.code === 'Escape') {
+            e.preventDefault();
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'control', action: 'cancel' }));
+                log('ESC: cancel SENT');
+            }
+            if (isRecording) {
+                stopRecordingAndSend();
+            }
+        }
+
+        if (e.code === 'KeyK' && (e.ctrlKey || e.metaKey)) {
+            e.preventDefault();
+            // Clear conversation
+            convEl.innerHTML = '<div class="placeholder">開始說話吧...</div>';
+            log('Ctrl+K: conversation cleared');
+        }
     });
 
     // Auto-connect
     connect();
+    // Load versions for selected persona
+    loadVersions();
     </script>
 </body>
 </html>
