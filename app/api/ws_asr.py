@@ -61,6 +61,7 @@ async def _stream_tts_sentence(
     model_size: str,
     persona_id: Optional[str],
     sentence_idx: int,
+    session_id: str = "",
 ) -> None:
     """
     Generate TTS for a complete sentence and stream raw PCM chunks over WebSocket.
@@ -375,6 +376,7 @@ async def run_llm_stream(
                                         model_size="0.6B",  # Faster model for lower latency
                                         persona_id=persona_id,
                                         sentence_idx=tts_sentence_idx,
+                                        session_id=session_id,
                                     ))
                                     tts_streaming_tasks.append(task)
                                     tts_sentence_idx += 1
@@ -418,6 +420,7 @@ async def run_llm_stream(
                                 model_size="0.6B",
                                 persona_id=persona_id,
                                 sentence_idx=tts_sentence_idx,
+                                session_id=session_id,
                             ))
                             tts_streaming_tasks.append(task)
                             tts_sentence_idx += 1

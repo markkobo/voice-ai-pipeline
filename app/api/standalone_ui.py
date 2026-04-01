@@ -207,8 +207,6 @@ UI_HTML = """
     document.getElementById('uiVersion').textContent = '[v25]';
 
     const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/asr';
-    const TTS_BASE = location.origin + '/api/tts/stream';
-    const TTS_RAW = location.origin + '/api/tts/raw';
 
     let ws = null;
     let audioContext = null;
@@ -218,25 +216,15 @@ UI_HTML = """
     let utteranceId = null;
     let ttsText = '';
     let ttsEmotion = null;
-    let ttsStreamUrl = '';
-    let lastPlayedUrl = '';  // 避免重複播放同一個 URL
-    let currentAudio = null;  // 目前播放中的 Audio
-    let ttsSignalController = null;
     let recordingStream = null;
     let accumulatedChunks = [];  // Accumulated PCM ArrayBuffers
     let isThinking = false;  // Track if AI is processing
     let selectedVersionId = null;  // Selected TTS version ID from dropdown
-    let wsBinaryActive = false;  // True when WS binary TTS chunks are streaming
 
     // AudioWorklet for streaming PCM playback
     let audioWorkletNode = null;
     let workletInitialized = false;  // Track if worklet module is registered
     let workletNodeCreated = false;  // Track if AudioWorkletNode is created
-
-    // Audio queue for sequential playback (prevents overwriting)
-    let audioQueue = [];  // Queue of {url, resolve}
-    let isAudioPlaying = false;  // Flag to track if audio is currently playing
-    let currentPlayPromise = null;  // Track current play promise for cleanup
 
     // Simple AudioWorklet implementation
     async function initAudioWorklet() {
@@ -386,158 +374,6 @@ UI_HTML = """
         return ok;
     }
 
-    // Play next audio in queue
-    async function playNextInQueue() {
-        if (audioQueue.length === 0) {
-            isAudioPlaying = false;
-            log('Queue empty, no more audio to play');
-            return;
-        }
-
-        const next = audioQueue.shift();
-        isAudioPlaying = true;
-        log('Playing next in queue: ' + next.text.substring(0, 30));
-
-        // Update lastPlayedUrl to track what's currently playing
-        lastPlayedUrl = '';
-
-        // Play this audio and when done, play next in queue
-        await playRawPCM(next.url);
-
-        // After this audio finishes, play next (if any)
-        if (audioQueue.length > 0) {
-            log('Current audio done, playing next from queue...');
-            playNextInQueue();
-        } else {
-            isAudioPlaying = false;
-            log('All queued audio finished');
-        }
-    }
-
-    // Internal PCM player that doesn't manage queue
-    async function playRawPCM(url) {
-        log('playRawPCM called');
-
-        // Ensure worklet is ready
-        const ok = await ensureWorklet();
-        log('ensureWorklet returned: ' + ok + ', state=' + (audioContext ? audioContext.state : 'null'));
-
-        if (!ok || !audioWorkletNode) {
-            log('Worklet not available, using fallback');
-            if (currentAudio) { currentAudio.pause(); currentAudio = null; }
-            currentAudio = new Audio();
-            currentAudio.src = url;
-            currentAudio.play().catch(e => log('fallback error: ' + e.name));
-            return;
-        }
-
-        // Double-check AudioContext is running
-        if (audioContext.state === 'suspended') {
-            log('Context suspended, resuming...');
-            await audioContext.resume();
-        }
-
-        // Flush any existing data
-        audioWorkletNode.port.postMessage({ type: 'flush' });
-
-        log('Fetching PCM with streaming...');
-
-        // Keep AudioContext alive during playback (declared in outer scope for catch block access)
-        let keepAlive = null;
-
-        try {
-            const resp = await fetch(url);
-            if (!resp.ok) {
-                log('fetch error: ' + resp.status);
-                return;
-            }
-
-            // Check if body exists (some responses may not have a body)
-            if (!resp.body) {
-                log('Response has no body, falling back to buffer approach');
-                const buf = await resp.arrayBuffer();
-                const pcm = new Int16Array(buf);
-                audioWorkletNode.port.postMessage({ type: 'pcm', buffer: pcm.buffer }, [pcm.buffer]);
-                log('Full PCM sent: ' + pcm.length + ' samples');
-                // Wait for playback to complete before returning
-                const durationMs = Math.ceil(pcm.length / 24000 * 1000) + 500;
-                log('Waiting ' + durationMs + 'ms for playback to complete');
-                await new Promise(resolve => setTimeout(resolve, durationMs));
-                log('Playback complete (fallback)');
-                return;
-            }
-
-            // Use ReadableStream for incremental reading with flow control
-            const reader = resp.body.getReader();
-            let totalSamples = 0;
-            let lastLogTime = Date.now();
-            const SAMPLE_RATE = 24000;
-            const MAX_BUFFER_SEC = 8; // Max 8 seconds ahead
-            const startTime = Date.now();
-
-            // Keep AudioContext alive during playback
-            keepAlive = setInterval(() => {
-                if (audioContext && audioContext.state === 'suspended') {
-                    audioContext.resume();
-                    log('Keepalive: resumed AudioContext');
-                }
-            }, 200);
-
-            // Stream chunks to AudioWorklet with simple flow control
-            while (true) {
-                // Calculate how much we've sent vs time elapsed (real-time rate)
-                const elapsedSec = (Date.now() - startTime) / 1000;
-                const sentSec = totalSamples / SAMPLE_RATE;
-                const aheadSec = sentSec - elapsedSec;
-
-                // If we're more than MAX_BUFFER_SEC ahead, wait to let buffer drain
-                if (aheadSec > MAX_BUFFER_SEC) {
-                    await new Promise(resolve => setTimeout(resolve, 50));
-                    continue;
-                }
-
-                const { done, value } = await reader.read();
-                if (done) break;
-
-                if (value && value.length > 0) {
-                    // Ensure even byte length for Int16
-                    const byteLen = value.length - (value.length % 2);
-                    if (byteLen > 0) {
-                        const int16Array = new Int16Array(byteLen / 2);
-                        new Uint8Array(int16Array.buffer).set(new Uint8Array(value.buffer, value.byteOffset, byteLen));
-                        totalSamples += int16Array.length;
-                        audioWorkletNode.port.postMessage({ type: 'pcm', buffer: int16Array.buffer }, [int16Array.buffer]);
-                    }
-                }
-
-                // Log progress every 500ms
-                const now = Date.now();
-                if (now - lastLogTime > 500) {
-                    const durationSec = totalSamples / 24000;
-                    log('Streaming PCM: ' + totalSamples + ' samples, ' + durationSec.toFixed(2) + 's');
-                    lastLogTime = now;
-                }
-            }
-
-            const totalDurationSec = totalSamples / 24000;
-            log('PCM stream complete: ' + totalSamples + ' samples, ' + totalDurationSec.toFixed(2) + 's total');
-
-            // CRITICAL: Wait for the AudioWorklet to finish playing ALL samples before returning
-            // The AudioWorklet drains at 24000 samples/sec, so we need to wait for the full duration
-            // Add 500ms buffer for safety margin
-            const playoutTimeMs = Math.ceil(totalDurationSec * 1000) + 500;
-            log('Waiting for AudioWorklet to finish playing: ' + playoutTimeMs + 'ms');
-            await new Promise(resolve => setTimeout(resolve, playoutTimeMs));
-
-            if (keepAlive) clearInterval(keepAlive);
-            log('playRawPCM finished - AudioWorklet should be done playing');
-
-        } catch (e) {
-            if (keepAlive) clearInterval(keepAlive);
-            log('PCM error: ' + e.name + ' ' + e.message);
-        }
-    }
-
     const statusEl = document.getElementById('status');
     const startStopBtn = document.getElementById('startStopBtn');
     const recordBtn = document.getElementById('recordBtn');
@@ -619,12 +455,17 @@ UI_HTML = """
                 // Binary PCM chunk streamed directly from TTS — play immediately
                 const buf = new Int16Array(e.data);
                 if (buf.length > 0 && audioWorkletNode) {
+                    log('WS binary: ' + buf.length + ' samples');
                     // Ensure AudioContext is running before posting
                     if (audioContext.state === 'suspended') {
                         await audioContext.resume();
                     }
                     // Send raw PCM to AudioWorklet for immediate playback
                     audioWorkletNode.port.postMessage({ type: 'pcm', buffer: buf.buffer }, [buf.buffer]);
+                } else if (buf.length === 0) {
+                    log('WS binary: empty chunk');
+                } else if (!audioWorkletNode) {
+                    log('WS binary: no audioWorkletNode');
                 }
             }
         };
@@ -646,12 +487,6 @@ UI_HTML = """
                 if (recordingStream) { recordingStream.getTracks().forEach(t => t.stop()); recordingStream = null; }
                 isRecording = false;
                 accumulatedChunks = [];
-            }
-            if (currentAudio) {
-                try { currentAudio.pause(); } catch(e) {}
-                try { currentAudio.cancel(); } catch(e) {}
-                currentAudio.src = '';
-                currentAudio = null;
             }
             if (audioWorkletNode) {
                 try { audioWorkletNode.port.postMessage({ type: 'flush' }); } catch(e) {}
@@ -808,35 +643,42 @@ UI_HTML = """
         }
 
         if (msg.type === 'vad_commit') {
-            log('VAD commit: silence detected, auto-sending utterance');
-            // Server VAD detected end of speech — send accumulated audio
+            log('VAD commit: silence detected, auto-committing utterance');
+            // Server VAD detected end of speech — audio was already sent in real-time
+            // Just stop recording and send commit_utterance (don't resend audio)
             if (isRecording) {
-                stopRecordingAndSend();  // Send PCM + commit_utterance to server
+                // Signal onaudioprocess to stop FIRST
+                if (scriptProcessor && scriptProcessor._localIsRecording) {
+                    scriptProcessor._localIsRecording.value = false;
+                }
+                // Stop audio processing
+                if (scriptProcessor) {
+                    scriptProcessor.disconnect();
+                    scriptProcessor = null;
+                }
+                if (recordingStream) {
+                    recordingStream.getTracks().forEach(t => t.stop());
+                    recordingStream = null;
+                }
+                isRecording = false;
+                if (recordBtn) recordBtn.textContent = '🎤 開始錄音';
+                commitBtn.disabled = true;
+                cancelBtn.disabled = true;
+                // Audio was already sent in real-time - just send commit_utterance
+                ws.send(JSON.stringify({ type: 'control', action: 'commit_utterance' }));
+                accumulatedChunks = [];
+                log('VAD commit: sent commit_utterance (audio already streamed)');
             }
         }
 
         if (msg.type === 'llm_start') {
-            log('LLM started: utterance_id=' + msg.utterance_id + ' (was playing=' + isAudioPlaying + ', queue=' + audioQueue.length + ')');
-            // Stop any playing TTS audio and clear queue (user is speaking again - barge-in)
-            const wasPlaying = isAudioPlaying;
-            audioQueue = [];
-            isAudioPlaying = false;
-            if (currentAudio) {
-                try { currentAudio.pause(); } catch(e) {}
-                try { currentAudio.cancel(); } catch(e) {}
-                currentAudio.src = '';
-                currentAudio = null;
-            }
-            // Flush AudioWorklet
+            log('LLM started: utterance_id=' + msg.utterance_id);
+            // Flush AudioWorklet for new utterance (barge-in)
             if (audioWorkletNode) {
                 try {
                     audioWorkletNode.port.postMessage({ type: 'flush' });
                 } catch(e) {}
             }
-            if (wasPlaying) {
-                log('LLM_START: Stopped TTS audio for barge-in');
-            }
-            lastPlayedUrl = '';
             ttsText = '';
             // Show thinking indicator
             isThinking = true;
@@ -882,46 +724,8 @@ UI_HTML = """
             convEl.scrollTop = convEl.scrollHeight;
         }
 
-        if (msg.type === 'tts_ready') {
-            var emotion = msg.emotion || ttsEmotion || '默認';
-            if (!msg.text) {
-                ttsEmotion = emotion;
-                log('TTS ready (empty): emotion=' + emotion);
-                return;
-            }
-            var thisUrl = msg.stream_url;
-            log('TTS ready: emotion=' + emotion + ' text=' + msg.text);
-
-            // Skip HTTP fetch if WS binary TTS is already streaming
-            // WS binary chunks (ArrayBuffer) provide sentence-level streaming
-            // HTTP fallback (tts_ready) would cause duplicate overlapping audio
-            if (wsBinaryActive) {
-                log('TTS skip HTTP fetch (WS binary active)');
-                return;
-            }
-
-            // 如果 URL 一樣，跳過（避免重複播放）
-            if (thisUrl === lastPlayedUrl) {
-                log('TTS skip same url');
-                return;
-            }
-
-            // Queue audio for sequential playback (no interruption)
-            // Early audio plays first, then full audio - slight repetition but clean playback
-            const rawUrl = thisUrl.replace('/api/tts/stream?', '/api/tts/raw?');
-            log('TTS queued: ' + msg.text.substring(0, 20) + ' (playing=' + isAudioPlaying + ', queue=' + audioQueue.length + ')');
-
-            audioQueue.push({ url: rawUrl, text: msg.text });
-
-            // If not playing, start immediately
-            if (!isAudioPlaying) {
-                playNextInQueue();
-            }
-        }
-
         if (msg.type === 'tts_start') {
             // New sentence TTS starting over WebSocket — prepare AudioWorklet for immediate playback
-            wsBinaryActive = true;  // Mark WS binary as active to suppress HTTP fetch
             // Flush any pending streaming audio so new chunks take priority
             if (audioWorkletNode) {
                 audioWorkletNode.port.postMessage({ type: 'flush' });
@@ -939,30 +743,14 @@ UI_HTML = """
 
         if (msg.type === 'llm_done') {
             log('LLM done: text=' + (msg.text || '').substring(0, 80) + ' total_tokens=' + (msg.total_tokens || '?'));
-            // Don't clear queue! The full audio is in there waiting to play
-            // Let current audio finish, then queue will continue with full audio
-            // Reset TTS text state but don't interrupt queue
             ttsText = '';
             ttsEmotion = '';
             isThinking = false;
-            wsBinaryActive = false;  // Reset so next tts_ready can use HTTP fallback if needed
             document.getElementById('thinkingIndicator').style.display = 'none';
-            log('LLM done - queue has ' + audioQueue.length + ' items waiting');
         }
 
         if (msg.type === 'llm_cancelled') {
-            if (ttsSignalController) ttsSignalController.abort();
-            // Clear audio queue and stop playing
-            audioQueue = [];
-            isAudioPlaying = false;
-            wsBinaryActive = false;  // Reset WS binary flag
-            if (currentAudio) {
-                try { currentAudio.pause(); } catch(e) {}
-                try { currentAudio.cancel(); } catch(e) {}
-                currentAudio.src = '';
-                currentAudio = null;
-            }
-            // Flush AudioWorklet
+            // Flush AudioWorklet (WS binary streaming - cancel ongoing TTS)
             if (audioWorkletNode) {
                 try {
                     audioWorkletNode.port.postMessage({ type: 'flush' });
@@ -970,7 +758,6 @@ UI_HTML = """
             }
             ttsText = '';
             ttsEmotion = '';
-            lastPlayedUrl = '';
             isThinking = false;
             document.getElementById('thinkingIndicator').style.display = 'none';
             log('LLM cancelled: partial=' + (msg.partial_text || '').substring(0, 50));
@@ -992,25 +779,6 @@ UI_HTML = """
 
         if (msg.type === 'tts_error') {
             log('TTS stream error: sentence_idx=' + (msg.sentence_idx || '?') + ' error=' + (msg.error || 'unknown'), 'error');
-        }
-    }
-
-    async function playTTS(url) {
-        try {
-            log('playTTS: step1');
-            var resp = await fetch(url);
-            log('playTTS: step2 status=' + resp.status);
-            var blob = await resp.blob();
-            log('playTTS: step3 blob=' + blob.size);
-            var objUrl = URL.createObjectURL(blob);
-            log('playTTS: step4');
-            var audio = new Audio(objUrl);
-            log('playTTS: step5');
-            audio.play();
-            log('playTTS: step6 playing');
-            audio.onended = function() { log('playTTS done'); };
-        } catch (e) {
-            log('playTTS error: ' + e.name + ' ' + e.message);
         }
     }
 
@@ -1077,7 +845,11 @@ UI_HTML = """
                     const s = Math.max(-1, Math.min(1, inputData[i]));
                     int16[i] = s < 0 ? s * 32768 : s * 32767;
                 }
-                // Accumulate for later sending
+                // Send chunk to server immediately for VAD processing
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(int16.buffer);
+                }
+                // Also accumulate for later sending on commit
                 accumulatedChunks.push(int16.buffer);
             };
 
@@ -1131,29 +903,10 @@ UI_HTML = """
         commitBtn.disabled = true;
         cancelBtn.disabled = true;
 
-        // Send accumulated audio as one combined ArrayBuffer
-        if (accumulatedChunks.length > 0) {
-            log('Sending accumulated audio: ' + accumulatedChunks.length + ' chunks');
-
-            // Combine all Int16Array chunks into one
-            let totalSamples = 0;
-            for (const chunk of accumulatedChunks) {
-                totalSamples += chunk.byteLength / 2;
-            }
-            const combined = new Int16Array(totalSamples);
-            let offset = 0;
-            for (const chunk of accumulatedChunks) {
-                const arr = new Int16Array(chunk);
-                combined.set(arr, offset);
-                offset += arr.length;
-            }
-            log('Combined PCM: ' + combined.length + ' samples, ' + combined.byteLength + ' bytes');
-            ws.send(combined.buffer);
-            ws.send(JSON.stringify({ type: 'control', action: 'commit_utterance' }));
-            accumulatedChunks = [];
-        } else {
-            log('No audio accumulated');
-        }
+        // Audio is now sent in real-time via onaudioprocess
+        // Just send commit_utterance (don't resend audio to avoid duplicates)
+        ws.send(JSON.stringify({ type: 'control', action: 'commit_utterance' }));
+        accumulatedChunks = [];
 
         setStatus(ws && ws.readyState === WebSocket.OPEN ? 'connected' : 'disconnected');
     }

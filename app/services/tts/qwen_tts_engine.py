@@ -8,7 +8,7 @@ import asyncio
 import os
 import time
 from pathlib import Path
-from typing import AsyncIterator, Optional, List
+from typing import Any, AsyncIterator, Optional, List
 from dataclasses import dataclass
 
 import numpy as np
@@ -110,6 +110,21 @@ class FasterQwenTTSEngine:
         # Ensure model is loaded first
         self._ensure_loaded()
 
+        # Actually trigger CUDA graph capture
+        # _warmup() captures both predictor and talker graphs
+        import torch
+        if hasattr(self._model, '_warmup'):
+            log.info("Capturing CUDA graphs...")
+            # Capture with a reasonable prefill length
+            self._model._warmup(prefill_len=128)
+            self._warmed_up = True
+            log.info("CUDA graphs captured and ready")
+        elif hasattr(self._model, '_ensure_warmed_up'):
+            self._model._ensure_warmed_up()
+            self._warmed_up = True
+        else:
+            log.warning("Model does not have _warmup method, skipping")
+
     def activate_version(self, version_id: str):
         """
         Activate a merged LoRA model for voice cloning.
@@ -167,6 +182,7 @@ class FasterQwenTTSEngine:
         # Reload model if already loaded to use merged weights
         if self._is_loaded:
             self._is_loaded = False
+            self._warmed_up = False  # Need to re-warmup with new model
             self._ensure_loaded()
 
     def deactivate_lora(self):
@@ -347,7 +363,9 @@ class MockTTSEngine:
         text: str,
         instruct: Optional[str] = None,
         language: str = "Chinese",
+        reference_audio: Optional[Any] = None,
     ) -> AsyncIterator[TTSStreamEvent]:
+        """Async generator - proper async iterable for ws_asr.py."""
         yield TTSStreamEvent(event="start")
         # Generate ~1 second of silence as mock audio
         mock_samples = int(24000 * 1.0)  # 1 second at 24kHz

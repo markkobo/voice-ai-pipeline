@@ -4,8 +4,11 @@ import uuid
 import time
 from typing import Optional, Dict, Any
 
+from app.logging_config import get_logger
 from app.services.asr import BaseVAD, SileroVAD, EnergyVAD, BaseASR, MockASR, Qwen3ASR
 from telemetry import metrics
+
+log = get_logger(__name__)
 
 
 class AudioConfig:
