@@ -1,14 +1,22 @@
 """
-Emotion mapper: converts [情感: xxx] tags to TTS natural language instructions.
+Emotion parser: parses emotion and content from streaming LLM output.
 
-Used by TTS engine (VoiceDesign mode) to control tone, pace, and style.
+Format: [E:情緒]內容
+- [E: marks start of emotion tag
+- ] is clear delimiter after emotion value
+- Content follows after ]
+- Emotion must be one of: 幽默, 寵溺, 撒嬌, 毒舌, 溫和, 調皮, 開心, 感動, 生氣, 認真
+- Falls back to pure content with default emotion if no tag found
+
+Supports legacy tag format: [情感:調皮]哈哈哈... (fallback)
 """
-from typing import Optional, Dict
+from typing import Optional
+import re
 
 
-# Default emotion → TTS instruct mapping
-# Format: "(natural language description of desired voice style)"
-DEFAULT_EMOTION_MAP: Dict[str, str] = {
+DEFAULT_EMOTION = "默認"
+
+DEFAULT_EMOTION_MAP: dict = {
     "寵溺": "(gentle, high-pitched, warm and loving tone, soft delivery)",
     "撒嬌": "(coquettish, soft, slightly slower pace, endearing inflection)",
     "毒舌": "(witty, fast-paced, sarcastic but playful tone, confident delivery)",
@@ -19,126 +27,286 @@ DEFAULT_EMOTION_MAP: Dict[str, str] = {
     "感動": "(emotional, sincere, heartfelt, slower and softer)",
     "生氣": "(annoyed, frustrated, slightly elevated pitch, impatient)",
     "開心": "(happy, bright, enthusiastic, faster pace with positive energy)",
-    # Fallback
-    "默認": "(natural, conversational tone, warm and engaging)",
+    DEFAULT_EMOTION: "(natural, conversational tone, warm and engaging)",
 }
 
+EMOTION_TAG_PATTERN = re.compile(r'[\[［](?:情感|感情)[:：]\s*(.*?)[\]］]\s*')
 
-# Compiled regex for extracting emotion tags from LLM output
-# Matches patterns like: [情感: 撒嬌] or [情感:撒嬌] or [情感: 撒嬌]  (with or without space)
-# Handles leading punctuation/quotes like 「 before the tag
-import re
-# Match the emotion tag anywhere in the text (not just at start)
-EMOTION_TAG_PATTERN = re.compile(r'\[情感[:：]\s*(.*?)\]\s*')
+# New format markers (TAG_START not used directly but kept for reference)
+TAG_START = "[E:"
 
 
-def parse_emotion_tag(text: str) -> tuple[Optional[str], str]:
-    """
-    Extract emotion tag from text (anywhere in the text).
-
-    Args:
-        text: LLM output text (may contain [情感: xxx] anywhere)
-
-    Returns:
-        Tuple of (emotion_string, cleaned_text_with_tag_removed)
-        If no tag found, returns (None, original_text)
-    """
-    match = EMOTION_TAG_PATTERN.search(text)
-    if match:
-        emotion = match.group(1).strip()
-        cleaned = EMOTION_TAG_PATTERN.sub('', text, count=1)
-        return emotion, cleaned
-    return None, text
-
-
-def get_tts_instruct(
-    emotion: str,
-    custom_map: Optional[Dict[str, str]] = None
-) -> str:
-    """
-    Get TTS instruction string for a given emotion.
-
-    Args:
-        emotion: Emotion tag string (e.g., "撒嬌", "寵溺")
-        custom_map: Optional custom emotion→instruct mapping to override defaults
-
-    Returns:
-        TTS instruct string, e.g. "(gentle, high-pitched, warm and loving tone)"
-    """
+def get_tts_instruct(emotion: str, custom_map: Optional[dict] = None) -> str:
+    """Get TTS instruction string for given emotion."""
     mapping = custom_map or DEFAULT_EMOTION_MAP
-    return mapping.get(emotion, mapping.get("默認"))
+    return mapping.get(emotion, mapping.get(DEFAULT_EMOTION))
+
+
+class EmotionParser:
+    """
+    Streaming emotion + content parser.
+
+    Format: [E:情緒]內容
+    - [E: marks start of emotion tag
+    - ] is clear delimiter after emotion value
+    - Content follows after ]
+
+    Output:
+        (emotion, content) - when both emotion AND content are ready
+        None - needs more data
+
+    State machine states:
+        S_EMPTY   = 0  # No [ found yet
+        S_TAG     = 1  # Found [, looking for E:
+        S_EMOTION = 2  # Found E:, reading emotion until ]
+        S_CONTENT = 3  # Found ], emitting content
+    """
+
+    # State constants
+    S_EMPTY = 0
+    S_TAG = 1      # Found [ looking for E:
+    S_EMOTION = 2  # Found E:, reading emotion until ]
+    S_CONTENT = 3  # Found ], emitting content
+
+    def __init__(self, custom_map: Optional[dict] = None):
+        self.custom_map = custom_map
+        self.current_emotion: Optional[str] = None
+        self.current_instruct: Optional[str] = None
+        self.is_emotion_locked: bool = False
+
+        # Internal parsing state
+        self._buffer: str = ""      # Accumulated input not yet processed
+        self._state: int = self.S_EMPTY
+        self._first_content_emitted: bool = False
+
+    @property
+    def is_ready(self) -> bool:
+        """True if emotion is locked and instruct is available."""
+        return self.is_emotion_locked and self.current_instruct is not None
+
+    def update(self, text: str) -> Optional[tuple]:
+        """
+        Process incoming text stream.
+
+        Args:
+            text: New text chunk from LLM (can be 1 char or many)
+
+        Returns:
+            None if needs more data
+            (emotion, content) when both ready (first char triggers emission)
+            (None, content) for subsequent content chars
+        """
+        if text:
+            self._buffer += text
+
+        if self._buffer:
+            return self._parse_buffer()
+
+        return None
+
+    def _parse_buffer(self) -> Optional[tuple]:
+        """
+        Parse accumulated buffer. Mutates self._buffer to remove consumed chars.
+        """
+        while len(self._buffer) > 0:
+            if self._state == self.S_EMPTY:
+                # Look for [ to start tag
+                bracket_pos = self._buffer.find('[')
+                if bracket_pos < 0:
+                    # No [ found - pure content, use default emotion
+                    if not self.is_emotion_locked:
+                        self._lock_emotion(DEFAULT_EMOTION)
+                    content = self._buffer
+                    self._buffer = ""
+                    return self._emit_content(content)
+                elif bracket_pos > 0:
+                    # Content before [ - emit it with default emotion
+                    self._lock_emotion(DEFAULT_EMOTION)
+                    content = self._buffer[:bracket_pos]
+                    self._buffer = self._buffer[bracket_pos:]
+                    self._state = self.S_TAG
+                    return self._emit_content(content)
+                else:
+                    # Starts with [
+                    self._state = self.S_TAG
+                    self._buffer = self._buffer[1:]
+                    continue
+
+            elif self._state == self.S_TAG:
+                # Looking for E: after [
+                # Buffer has [ removed, so check for E: not [E:
+                if len(self._buffer) < 1:
+                    return None  # Need more data
+
+                # Partial marker case - wait if buffer is just 'E' or 'E' followed by non-':'
+                if self._buffer == 'E':
+                    return None  # Could be 'E:' - wait for ':'
+                if len(self._buffer) >= 2 and self._buffer.startswith('E:') and self._buffer[2:].find(']') < 0:
+                    # Buffer starts with 'E:' but no ] yet
+                    return None  # Wait for closing bracket
+
+                if self._buffer.startswith('E:'):
+                    # Found 'E:' - now look for ]
+                    bracket_pos = self._buffer.find(']')
+                    if bracket_pos < 0:
+                        # No ] yet - shouldn't happen given above check, but safety check
+                        return None
+                    # Found ] - extract emotion, transition to S_CONTENT
+                    # [E: + emotion_val + ] + content
+                    # After removing [, buffer starts with E: (2 chars), emotion at buffer[2:bracket_pos]
+                    emotion_val = self._buffer[2:bracket_pos]
+                    self._lock_emotion(emotion_val if emotion_val else DEFAULT_EMOTION)
+                    self._buffer = self._buffer[bracket_pos + 1:]
+                    self._state = self.S_CONTENT
+                    if len(self._buffer) == 0:
+                        return None
+                    continue
+                elif self._buffer.startswith('['):
+                    # Double [ - skip first
+                    self._buffer = self._buffer[1:]
+                    continue
+                else:
+                    # Not E: - treat as content (e.g. plain text starting with [)
+                    self._state = self.S_CONTENT
+                    if not self.is_emotion_locked:
+                        self._lock_emotion(DEFAULT_EMOTION)
+                    continue
+
+            elif self._state == self.S_CONTENT:
+                # Emit one character at a time (for streaming TTS)
+                if len(self._buffer) == 0:
+                    return None
+                char = self._buffer[0]
+                self._buffer = self._buffer[1:]
+                return self._emit_content(char)
+
+        return None
+
+    def _emit_content(self, content: str) -> Optional[tuple]:
+        """Helper to emit content with proper (emotion, content) format."""
+        if not content:
+            return None
+        if not self._first_content_emitted:
+            self._first_content_emitted = True
+            return (self.current_emotion, content)
+        return (None, content)
+
+    def _lock_emotion(self, emotion: str):
+        """Lock in the emotion value."""
+        self.current_emotion = emotion
+        self.current_instruct = get_tts_instruct(emotion, self.custom_map)
+        self.is_emotion_locked = True
+        self._first_content_emitted = False
+
+    def reset(self):
+        """Reset parser to initial state."""
+        self.current_emotion = None
+        self.current_instruct = None
+        self.is_emotion_locked = False
+        self._buffer = ""
+        self._state = self.S_EMPTY
+        self._first_content_emitted = False
 
 
 class EmotionMapper:
     """
-    Stateful emotion mapper that tracks current emotion across streaming.
+    Wrapper for EmotionParser with backward compatibility.
 
-    Usage:
-        mapper = EmotionMapper()
-        mapper.update("「[情感: 撒嬌]好啦～")
-        # mapper.current_emotion = "撒嬌"
-        # mapper.current_instruct = "(coquettish, soft, slightly slower pace...)"
-        # mapper.cleaned_text = "「好啦～"
+    Supports both:
+    - New format: [E:情緒]內容
+    - Legacy format: [情感:調皮]哈哈哈...
     """
 
-    def __init__(self, custom_map: Optional[Dict[str, str]] = None):
+    def __init__(self, custom_map: Optional[dict] = None):
         self.custom_map = custom_map
         self.current_emotion: Optional[str] = None
         self.current_instruct: Optional[str] = None
         self._emotion_locked = False
-        self._buffer = ""  # Accumulate text until we can match the emotion tag
-        self._buffer_returned_len = 0  # Track how much of buffer has been returned
+        self._buffer = ""
+        self._parser = EmotionParser(custom_map)
 
-    def update(self, text: str) -> tuple[Optional[str], str]:
+    def update(self, text: str) -> tuple:
         """
-        Update emotion state from new text.
-
-        Accumulates text in a buffer and checks for emotion tags.
-        The emotion tag must be at the BEGINNING of the accumulated text.
-        Once emotion is detected, subsequent text is returned incrementally.
-
-        Args:
-            text: New text chunk from LLM
-
-        Returns:
-            Tuple of (newly_detected_emotion_or_None, new_text_since_last_call)
+        Update with new text. Returns (emotion, content).
         """
+        # If emotion already locked, drain accumulated content
         if self._emotion_locked:
-            # Already detected emotion, return text incrementally
-            return None, text
+            # Drain parser buffer first
+            result = self._parser.update('')
+            if result is not None:
+                _, buffered_content = result
+                if buffered_content:
+                    return (None, buffered_content)
+            # Then return accumulated text
+            if self._buffer:
+                content = self._buffer
+                self._buffer = ""
+                return (None, content)
+            # If new text provided, accumulate it
+            if text:
+                self._buffer += text
+                return (None, '')
+            return (None, '')  # Signal "nothing more"
 
-        # Accumulate
+        # Emotion not locked - always use EmotionParser first
+        # It handles partial markers (like 'E:' without ']') by buffering
+        result = self._parser.update(text)
+        if result is not None:
+            emotion, content = result
+            if emotion is not None:
+                self.current_emotion = emotion
+                self.current_instruct = get_tts_instruct(emotion, self.custom_map)
+                self._emotion_locked = True
+                self._buffer = ""  # Clear buffer - old content was partial tag
+            if content:
+                return (emotion, content)
+            # Content was empty, but there might be more in buffer
+            # Drain remaining content
+            while True:
+                drain_result = self._parser.update('')
+                if drain_result is None:
+                    break
+                _, drain_content = drain_result
+                if drain_content:
+                    return (emotion, drain_content) if emotion else (None, drain_content)
+                else:
+                    break
+            # Still nothing, might have leftover buffer in parser
+            if text:
+                self._buffer += text
+            return (None, '')  # Signal "nothing more"
+
+        # Parser returned None - accumulate and check legacy format
         self._buffer += text
+        return self._parse_legacy_tag()
 
-        # Try to find emotion tag anywhere in the buffer
+    def _parse_legacy_tag(self) -> tuple:
+        """Fallback parser for legacy [情感: xxx] tag format."""
         match = EMOTION_TAG_PATTERN.search(self._buffer)
         if match:
             emotion = match.group(1).strip()
-            # Remove the tag from buffer
             self._buffer = EMOTION_TAG_PATTERN.sub('', self._buffer, count=1)
-            # Return ALL buffered text (new content since last return + emotion tag removed)
-            new_text = self._buffer[self._buffer_returned_len:]
-            self._buffer_returned_len = len(self._buffer)
             self.current_emotion = emotion
             self.current_instruct = get_tts_instruct(emotion, self.custom_map)
             self._emotion_locked = True
-            return emotion, new_text
+            return emotion, self._buffer
 
-        # No complete tag yet
-        # Return only the NEW portion of the buffer
-        new_text = self._buffer[self._buffer_returned_len:]
-        self._buffer_returned_len = len(self._buffer)
-        return None, new_text
+        if self._buffer.startswith('{') or self._buffer.startswith('['):
+            return None, ""
+
+        result = self._buffer
+        self._buffer = ""
+        return None, result
 
     def reset(self):
-        """Reset emotion state for new conversation turn."""
+        """Reset mapper to initial state."""
         self.current_emotion = None
         self.current_instruct = None
         self._emotion_locked = False
         self._buffer = ""
-        self._buffer_returned_len = 0
+        self._parser.reset()
 
     @property
     def is_ready(self) -> bool:
-        """True if emotion has been detected and TTS can start."""
+        """True if emotion is locked and instruct is available."""
         return self._emotion_locked and self.current_instruct is not None

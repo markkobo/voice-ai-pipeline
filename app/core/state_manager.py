@@ -46,6 +46,9 @@ class SessionState:
     # LLM model selection
     llm_model: Optional[str]
 
+    # TTS model selection
+    tts_model: Optional[str]
+
     def __init__(
         self,
         session_id: str,
@@ -173,6 +176,10 @@ class StateManager:
         # LLM model
         if "model" in config:
             state.llm_model = config.get("model")
+
+        # TTS model
+        if "tts_model" in config:
+            state.tts_model = config.get("tts_model")
 
         state.is_configured = True
         return True

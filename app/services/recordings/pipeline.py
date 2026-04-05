@@ -25,9 +25,9 @@ from .quality import AudioQualityAnalyzer
 
 logger = logging.getLogger(__name__)
 
-# Semaphore to serialize CUDA transcription and prevent OOM
-# Only one transcription can run on CUDA at a time
-_cuda_transcribe_lock = threading.Semaphore(1)
+# Semaphore to serialize ALL CUDA operations to prevent OOM
+# Only one CUDA operation (enhance, diarize, or transcribe) can run at a time
+_cuda_lock = threading.Semaphore(1)
 
 # Retry configuration
 MAX_RETRIES = 3
@@ -292,27 +292,36 @@ class AudioProcessingPipeline:
                 import torch
                 from speechbrain.pretrained import SepformerSeparation
 
-                # Load Sepformer model
-                self._log("Loading speechbrain Sepformer model...")
-                model = SepformerSeparation.from_hparams(
-                    source="speechbrain/sepformer-wham16k",
-                    savedir="pretrained_models/sepformer-wham16k",
-                    run_opts={"device": "cuda" if torch.cuda.is_available() else "cpu"}
-                )
+                # Acquire CUDA lock to serialize GPU operations
+                with _cuda_lock:
+                    # Load Sepformer model
+                    self._log("Loading speechbrain Sepformer model...")
+                    model = SepformerSeparation.from_hparams(
+                        source="speechbrain/sepformer-wham16k",
+                        savedir="pretrained_models/sepformer-wham16k",
+                        run_opts={"device": "cuda" if torch.cuda.is_available() else "cpu"}
+                    )
 
-                # Load audio
-                audio, sample_rate = sf.read(str(audio_path))
-                audio_tensor = torch.from_numpy(audio).float()
+                    # Load audio
+                    audio, sample_rate = sf.read(str(audio_path))
+                    audio_tensor = torch.from_numpy(audio).float()
 
-                # Separate (enhance)
-                self._log("Running speech enhancement...")
-                with torch.no_grad():
-                    enhanced = model(audio_tensor.unsqueeze(0))
-                    enhanced = enhanced.squeeze(0).cpu().numpy()
+                    # Separate (enhance)
+                    self._log("Running speech enhancement...")
+                    with torch.no_grad():
+                        enhanced = model(audio_tensor.unsqueeze(0))
+                        enhanced = enhanced.squeeze(0).cpu().numpy()
 
-                # Create enhanced folder and save
-                self.paths.enhanced_folder.mkdir(parents=True, exist_ok=True)
-                sf.write(str(self.paths.enhanced_audio_path), enhanced, sample_rate)
+                    # Create enhanced folder and save
+                    self.paths.enhanced_folder.mkdir(parents=True, exist_ok=True)
+                    sf.write(str(self.paths.enhanced_audio_path), enhanced, sample_rate)
+
+                    # Free GPU memory after enhancement
+                    del model
+                    del audio_tensor
+                    del enhanced
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
 
                 elapsed_ms = int((time.time() - start_time) * 1000)
                 self.metadata.update_processing_step(
@@ -380,46 +389,55 @@ class AudioProcessingPipeline:
                 import torch
                 from pyannote.audio import Pipeline
 
-                # Load pyannote pipeline
-                self._log("Loading pyannote diarization model...")
-                hf_token = os.environ.get("HF_TOKEN")
-                if not hf_token:
-                    raise ValueError("HF_TOKEN not set in environment")
-                self._log(f"Using HF_TOKEN: {hf_token[:8]}...")
-                pipeline = Pipeline.from_pretrained(
-                    "pyannote/speaker-diarization-3.1",
-                    token=hf_token
-                )
+                # Acquire CUDA lock to serialize GPU operations
+                with _cuda_lock:
+                    # Load pyannote pipeline
+                    self._log("Loading pyannote diarization model...")
+                    hf_token = os.environ.get("HF_TOKEN")
+                    if not hf_token:
+                        raise ValueError("HF_TOKEN not set in environment")
+                    self._log(f"Using HF_TOKEN: {hf_token[:8]}...")
+                    pipeline = Pipeline.from_pretrained(
+                        "pyannote/speaker-diarization-3.1",
+                        token=hf_token
+                    )
 
-                # Move to GPU if available
-                if torch.cuda.is_available():
-                    pipeline = pipeline.to("cuda")
+                    # Move to GPU if available
+                    if torch.cuda.is_available():
+                        pipeline = pipeline.to("cuda")
 
-                # Run diarization
-                self._log(f"Running diarization on: {audio_path}")
-                diarization = pipeline(str(audio_path))
+                    # Run diarization
+                    self._log(f"Running diarization on: {audio_path}")
+                    diarization = pipeline(str(audio_path))
 
-                # Extract speaker segments
-                speaker_segments = []
-                for turn, _, speaker in diarization.itertracks(yield_label=True):
-                    speaker_segments.append({
-                        "speaker_id": speaker,
-                        "start_time": turn.start,
-                        "end_time": turn.end
-                    })
+                    # Extract speaker segments
+                    speaker_segments = []
+                    for turn, _, speaker in diarization.itertracks(yield_label=True):
+                        speaker_segments.append({
+                            "speaker_id": speaker,
+                            "start_time": turn.start,
+                            "end_time": turn.end
+                        })
 
-                elapsed_ms = int((time.time() - start_time) * 1000)
+                    elapsed_ms = int((time.time() - start_time) * 1000)
 
-                # Store speaker segments in metadata
-                self.metadata.update_speaker_segments(speaker_segments)
+                    # Store speaker segments in metadata
+                    self.metadata.update_speaker_segments(speaker_segments)
 
-                self.metadata.update_processing_step(
-                    "transcribe", "done",
-                    progress=100,
-                    duration_ms=elapsed_ms
-                )
+                    self.metadata.update_processing_step(
+                        "transcribe", "done",
+                        progress=100,
+                        duration_ms=elapsed_ms
+                    )
 
-                self._log(f"Diarize complete: {elapsed_ms}ms, found {len(speaker_segments)} speaker segments")
+                    self._log(f"Diarize complete: {elapsed_ms}ms, found {len(speaker_segments)} speaker segments")
+
+                    # Free GPU memory after diarization
+                    del pipeline
+                    del diarization
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
                 break
 
             except Exception as e:
@@ -537,9 +555,9 @@ class AudioProcessingPipeline:
             try:
                 from faster_whisper import WhisperModel
 
-                # Serialize CUDA transcription to prevent OOM from parallel runs
+                # Serialize CUDA operations to prevent OOM from parallel runs
                 # Only hold lock during model load + transcription, not during retry sleep
-                with _cuda_transcribe_lock:
+                with _cuda_lock:
                     # Use small model for speed, medium for quality
                     # auto-detect GPU and use it if available
                     model = WhisperModel(

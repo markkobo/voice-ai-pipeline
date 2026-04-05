@@ -150,6 +150,124 @@ class TestWebSocketIntegration:
                 assert response["utterance_id"] is not None
                 assert "telemetry" in response
 
+    def test_websocket_tts_streaming_flow(self):
+        """Test WebSocket flow with TTS streaming: config → audio → ASR → LLM → TTS binary chunks."""
+        from app.main import app
+
+        received_messages = []
+        binary_chunks = []
+
+        with TestClient(app) as client:
+            with client.websocket_connect("/ws/asr") as ws:
+                # Send config with persona
+                config_msg = {
+                    "type": "config",
+                    "audio": {
+                        "sample_rate": 24000,
+                        "channels": 1,
+                        "format": "pcm"
+                    },
+                    "persona_id": "xiao_s",
+                    "listener_id": "child",
+                    "model": "gpt-4o-mini"
+                }
+                ws.send_json(config_msg)
+
+                # Send enough audio chunks to simulate speech
+                # Each chunk: 480 samples = 20ms at 24kHz
+                # Send 100 chunks = ~2 seconds of audio
+                for i in range(100):
+                    chunk = b"\x00\x01" * 480  # Non-zero samples
+                    ws.send_bytes(chunk)
+
+                # Send commit
+                commit_msg = {"type": "control", "action": "commit_utterance"}
+                ws.send_json(commit_msg)
+
+                # Collect all responses until LLM done or timeout
+                import time
+                start_time = time.time()
+                timeout = 30  # seconds
+
+                while time.time() - start_time < timeout:
+                    try:
+                        # Try to receive with timeout
+                        ws._throttle = False  # Disable throttling for test
+                        msg = ws.receive_json(timeout=1)
+                        received_messages.append(msg)
+
+                        # Check if we've received all expected messages
+                        if msg.get("type") == "llm_done":
+                            break
+                    except Exception:
+                        break
+
+                # Verify we received ASR result
+                asr_results = [m for m in received_messages if m.get("type") == "asr_result"]
+                assert len(asr_results) >= 1, f"Expected at least 1 ASR result, got {len(asr_results)}"
+
+                # Verify we received LLM start
+                llm_starts = [m for m in received_messages if m.get("type") == "llm_start"]
+                assert len(llm_starts) >= 1, f"Expected at least 1 LLM start, got {len(llm_starts)}"
+
+                # Verify we received TTS start messages
+                tts_starts = [m for m in received_messages if m.get("type") == "tts_start"]
+                assert len(tts_starts) >= 1, f"Expected at least 1 TTS start, got {len(tts_starts)}"
+
+                print(f"WS flow test: {len(received_messages)} messages, {len(tts_starts)} TTS sentences")
+
+
+class TestWebSocketCancel:
+    """Tests for WebSocket cancel/barge-in."""
+
+    def test_websocket_cancel_stops_llm(self):
+        """Test that cancel message stops ongoing LLM processing."""
+        from app.main import app
+
+        received_messages = []
+
+        with TestClient(app) as client:
+            with client.websocket_connect("/ws/asr") as ws:
+                # Send config
+                config_msg = {
+                    "type": "config",
+                    "audio": {
+                        "sample_rate": 24000,
+                        "channels": 1,
+                        "format": "pcm"
+                    }
+                }
+                ws.send_json(config_msg)
+
+                # Send some audio
+                for i in range(50):
+                    chunk = b"\x00\x01" * 480
+                    ws.send_bytes(chunk)
+
+                # Send commit
+                commit_msg = {"type": "control", "action": "commit_utterance"}
+                ws.send_json(commit_msg)
+
+                # Immediately send cancel
+                cancel_msg = {"type": "control", "action": "cancel"}
+                ws.send_json(cancel_msg)
+
+                # Collect responses for a short time
+                import time
+                start_time = time.time()
+                while time.time() - start_time < 5:
+                    try:
+                        msg = ws.receive_json(timeout=1)
+                        received_messages.append(msg)
+                        if msg.get("type") == "llm_cancelled":
+                            break
+                    except Exception:
+                        break
+
+                # Verify we received cancel confirmation
+                cancelled = [m for m in received_messages if m.get("type") == "llm_cancelled"]
+                assert len(cancelled) >= 1, "Expected llm_cancelled message"
+
 
 @pytest.fixture
 def health_check(test_client):

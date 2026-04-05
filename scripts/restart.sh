@@ -73,7 +73,64 @@ code_changed() {
     if [ -f "$LAST_COMMIT_FILE" ]; then
         last_commit=$(cat "$LAST_COMMIT_FILE")
     fi
-    [ "$current_commit" != "$last_commit" ]
+    # True if commit changed OR if there are uncommitted changes
+    [ "$current_commit" != "$last_commit" ] || [ -n "$(git -C /workspace/voice-ai-pipeline-1 diff --name-only HEAD 2>/dev/null)" ]
+}
+
+# Get list of changed files (both committed AND uncommitted) since last restart
+get_changed_files() {
+    local last_commit=""
+    if [ -f "$LAST_COMMIT_FILE" ]; then
+        last_commit=$(cat "$LAST_COMMIT_FILE")
+    fi
+
+    local changed=""
+
+    # Committed changes since last recorded commit
+    if [ -n "$last_commit" ]; then
+        changed=$(git -C /workspace/voice-ai-pipeline-1 diff --name-only "$last_commit" HEAD 2>/dev/null)
+    fi
+
+    # Add uncommitted changes (diff HEAD vs working tree)
+    local uncommitted=$(git -C /workspace/voice-ai-pipeline-1 diff --name-only HEAD 2>/dev/null)
+    if [ -n "$uncommitted" ]; then
+        if [ -n "$changed" ]; then
+            changed="$changed"$'\n'"$uncommitted"
+        else
+            changed="$uncommitted"
+        fi
+    fi
+
+    echo "$changed"
+}
+
+# Categorize changed files by component
+# Returns: ui_only | server | full_restart
+categorize_change() {
+    local changed_files=$(get_changed_files | sort -u | grep -v '^$')
+    local has_ui=false
+    local has_python=false
+
+    for f in $changed_files; do
+        case "$f" in
+            *.html|*.js|*.css)
+                has_ui=true
+                ;;
+            *.py)
+                # All Python files require server restart (even standalone_ui.py embeds HTML in a string)
+                # The server must reload the Python module to pick up changes
+                has_python=true
+                ;;
+        esac
+    done
+
+    if [ "$has_python" = true ]; then
+        echo "full_restart"
+    elif [ "$has_ui" = true ]; then
+        echo "ui_only"
+    else
+        echo "none"
+    fi
 }
 
 # =============================================================================
@@ -257,22 +314,34 @@ do_watch() {
                 CURRENT_COMMIT=$(last_git_commit 2>/dev/null)
 
                 if [ "$CURRENT_COMMIT" != "$LAST_COMMIT" ]; then
+                    CHANGE_TYPE=$(categorize_change)
                     echo ""
-                    echo -e "${CYAN}[$(date '+%H:%M:%S')]${NC} Code changed (git commit updated), triggering restart..."
-                    LAST_COMMIT="$CURRENT_COMMIT"
-
-                    # Trigger restart via SIGUSR1 if server supports it,
-                    # otherwise do a full restart
-                    if is_running; then
-                        echo "  Stopping server..."
-                        stop_server
-                        sleep 1
-                        start_server
-                        if wait_ready; then
-                            verify_endpoints
-                            echo -e "${GREEN}[$(date '+%H:%M:%S')]${NC} Auto-restart complete"
-                        fi
+                    echo -e "${CYAN}[$(date '+%H:%M:%S')]${NC} Code changed: $CHANGE_TYPE"
+                    # Re-sync with LAST_COMMIT_FILE after restart
+                    if [ -f "$LAST_COMMIT_FILE" ]; then
+                        LAST_COMMIT=$(cat "$LAST_COMMIT_FILE")
+                    else
+                        LAST_COMMIT="$CURRENT_COMMIT"
                     fi
+
+                    case "$CHANGE_TYPE" in
+                        ui_only)
+                            echo -e "  ${CYAN}→${NC} UI/HTML/JS only — refresh browser (no restart)"
+                            ;;
+                        full_restart)
+                            echo "  Triggering full restart..."
+                            if is_running; then
+                                echo "  Stopping server..."
+                                stop_server
+                                sleep 1
+                                start_server
+                                if wait_ready; then
+                                    verify_endpoints
+                                    echo -e "${GREEN}[$(date '+%H:%M:%S')]${NC} Auto-restart complete"
+                                fi
+                            fi
+                            ;;
+                    esac
                 fi
             fi
         done
@@ -327,8 +396,23 @@ case "$MODE" in
             echo -e "${GREEN}✓ Server running (PID $PID)${NC}"
 
             if code_changed; then
-                echo -e "${YELLOW}[Code Changed]${NC}"
-                do_restart "Python code updated"
+                CHANGE_TYPE=$(categorize_change)
+                echo -e "${YELLOW}[Code Changed]${NC} ($CHANGE_TYPE)"
+
+                case "$CHANGE_TYPE" in
+                    ui_only)
+                        echo -e "${CYAN}[UI Only]${NC} HTML/JS changed — no restart needed"
+                        echo -e "  ${GREEN}✓${NC} Refresh browser: http://localhost:$PORT/ui"
+                        echo -e "  ${CYAN}→${NC} Server running (PID $PID) — no restart triggered"
+                        exit 0
+                        ;;
+                    full_restart)
+                        do_restart "Python code updated"
+                        ;;
+                    *)
+                        echo -e "${CYAN}[No Change]${NC} No relevant file changes"
+                        ;;
+                esac
             else
                 echo -e "${CYAN}[No Change]${NC} Server up-to-date"
                 if curl -s "http://localhost:$PORT/health" > /dev/null 2>&1; then

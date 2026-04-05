@@ -46,7 +46,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.core.state_manager import StateManager
 from app.services.llm import OpenAIClient, MockLLMClient, PersonaManager, PersonaType
-from app.services.tts import EmotionMapper, get_tts_instruct, parse_emotion_tag, get_tts_engine
+from app.services.tts import EmotionMapper, get_tts_instruct, get_tts_engine
 from app.logging_config import get_logger
 from telemetry import metrics, rag_retrieval_seconds
 
@@ -81,6 +81,7 @@ async def _stream_tts_sentence(
         return
 
     engine = get_tts_engine(model_size=model_size)
+    log.info(f"[{session_id}] TTS _stream_tts_sentence: model_size={model_size}, emotion={emotion}, text='{text[:30]}...' engine={type(engine).__name__ if engine else None}")
     instruct = get_tts_instruct(emotion)
 
     # Look up reference audio for voice clone (optional — pass None if unavailable)
@@ -133,6 +134,12 @@ async def _stream_tts_sentence(
             "sentence_idx": sentence_idx,
         }))
         log.info(f"TTS sentence done: idx={sentence_idx}, text='{text[:30]}...'")
+
+        # Add brief silence gap between sentences (500ms = 12000 samples at 24kHz)
+        # This gives natural pause between sentences so they don't run into each other
+        silence_samples = int(24000 * 0.5)  # 500ms silence
+        silence_bytes = b'\x00\x00' * silence_samples  # Int16 silence
+        await websocket.send_bytes(silence_bytes)
 
     except Exception as e:
         log.error(f"TTS streaming error for sentence {sentence_idx}: {e}")
@@ -276,6 +283,7 @@ async def run_llm_stream(
     persona_id: Optional[str],
     listener_id: Optional[str],
     llm_model: Optional[str],
+    tts_model: str = "1.7B",
 ) -> None:
     """
     Run LLM streaming and parse emotion tags.
@@ -312,7 +320,7 @@ async def run_llm_stream(
     current_emotion: Optional[str] = None
     current_instruct: Optional[str] = None
     tts_sentence_idx = 0  # Index for tracking sentences streamed to client
-    tts_streaming_tasks: list[asyncio.Task] = []  # Track background TTS tasks
+    current_tts_task: Optional[asyncio.Task] = None  # Single TTS task (sequential, not parallel)
 
     try:
         async for event in client.stream(
@@ -333,26 +341,81 @@ async def run_llm_stream(
                 new_emotion, cleaned_content = emotion_mapper.update(event.content)
 
                 if new_emotion and not tts_notified:
-                    # First emotion detected — mark state but DON'T send tts_ready yet
-                    # Wait until we have actual text content before notifying client
+                    # First emotion detected
                     tts_notified = True
                     current_emotion = new_emotion
                     current_instruct = get_tts_instruct(new_emotion)
-                    # At this point, cleaned_content is empty (tag consumed buffer)
-                    # Next tokens will have actual text
                     tts_text_parts = []  # Start fresh after tag
 
-                    # Send llm_token (emotion detected) but don't notify TTS yet
-                    await websocket.send_text(json.dumps({
-                        "type": "llm_token",
-                        "content": cleaned_content,
-                        "emotion": current_emotion,
-                    }))
+                    if cleaned_content:
+                        # Emotion and first content char arrived together — start TTS immediately
+                        tts_text_parts.append(cleaned_content)
+                        tts_text = "".join(tts_text_parts)
+                        # Start TTS for this first sentence
+                        if current_tts_task is not None:
+                            try:
+                                await current_tts_task
+                            except Exception:
+                                pass
+                        current_tts_task = asyncio.create_task(_stream_tts_sentence(
+                            websocket=websocket,
+                            text=tts_text,
+                            emotion=current_emotion or "默認",
+                            model_size=tts_model,
+                            persona_id=persona_id,
+                            sentence_idx=tts_sentence_idx,
+                            session_id=session_id,
+                        ))
+                        tts_sentence_idx += 1
 
+                    # Send llm_token only if there's content
+                    if cleaned_content:
+                        await websocket.send_text(json.dumps({
+                            "type": "llm_token",
+                            "content": cleaned_content,
+                            "emotion": current_emotion,
+                        }))
                     # Record TTFT
                     if not first_token_sent and event.ttft_seconds is not None:
                         ttft_seconds = event.ttft_seconds
                         first_token_sent = True
+
+                    # Drain remaining buffered characters from EmotionParser
+                    while True:
+                        result = emotion_mapper.update('')
+                        if result is None:
+                            break
+                        _, more_content = result
+                        if not more_content:
+                            break
+                        # Send remaining tokens
+                        tts_text_parts.append(more_content)
+                        tts_text = "".join(tts_text_parts)
+                        parts = SENTENCE_SPLIT_RE.split(tts_text)
+                        if len(parts) > 1:
+                            for i, part in enumerate(parts[:-1]):
+                                if part.strip():
+                                    if current_tts_task is not None:
+                                        try:
+                                            await current_tts_task
+                                        except Exception:
+                                            pass
+                                    current_tts_task = asyncio.create_task(_stream_tts_sentence(
+                                        websocket=websocket,
+                                        text=part,
+                                        emotion=current_emotion or "默認",
+                                        model_size=tts_model,
+                                        persona_id=persona_id,
+                                        sentence_idx=tts_sentence_idx,
+                                        session_id=session_id,
+                                    ))
+                                    tts_sentence_idx += 1
+                            tts_text_parts = [parts[-1]]
+                        await websocket.send_text(json.dumps({
+                            "type": "llm_token",
+                            "content": more_content,
+                            "emotion": current_emotion,
+                        }))
 
                 elif tts_notified:
                     # Emotion detected — accumulate text for TTS
@@ -368,34 +431,92 @@ async def run_llm_stream(
                             # All parts except the last are complete sentences
                             for i, part in enumerate(parts[:-1]):
                                 if part.strip():
-                                    # Trigger TTS streaming for this complete sentence
-                                    task = asyncio.create_task(_stream_tts_sentence(
+                                    # Wait for previous TTS to finish before starting new one (sequential streaming)
+                                    if current_tts_task is not None:
+                                        try:
+                                            await current_tts_task
+                                        except Exception:
+                                            pass
+                                    # Start TTS for this sentence (await, not create_task, for sequential playback)
+                                    current_tts_task = asyncio.create_task(_stream_tts_sentence(
                                         websocket=websocket,
                                         text=part,
                                         emotion=current_emotion or "默認",
-                                        model_size="0.6B",  # Faster model for lower latency
+                                        model_size=tts_model,  # Use user's selected TTS model
                                         persona_id=persona_id,
                                         sentence_idx=tts_sentence_idx,
                                         session_id=session_id,
                                     ))
-                                    tts_streaming_tasks.append(task)
                                     tts_sentence_idx += 1
                             # Keep only the last (incomplete) part for next round
                             tts_text_parts = [parts[-1]]
 
-                    await websocket.send_text(json.dumps({
-                        "type": "llm_token",
-                        "content": cleaned_content,
-                        "emotion": current_emotion,
-                    }))
+                    if cleaned_content:
+                        await websocket.send_text(json.dumps({
+                            "type": "llm_token",
+                            "content": cleaned_content,
+                            "emotion": current_emotion,
+                        }))
+
+                    # Drain remaining buffered characters from EmotionParser
+                    while True:
+                        result = emotion_mapper.update('')
+                        if result is None:
+                            break
+                        _, more_content = result
+                        if not more_content:
+                            break
+                        tts_text_parts.append(more_content)
+                        tts_text = "".join(tts_text_parts)
+                        parts = SENTENCE_SPLIT_RE.split(tts_text)
+                        if len(parts) > 1:
+                            for i, part in enumerate(parts[:-1]):
+                                if part.strip():
+                                    if current_tts_task is not None:
+                                        try:
+                                            await current_tts_task
+                                        except Exception:
+                                            pass
+                                    current_tts_task = asyncio.create_task(_stream_tts_sentence(
+                                        websocket=websocket,
+                                        text=part,
+                                        emotion=current_emotion or "默認",
+                                        model_size=tts_model,
+                                        persona_id=persona_id,
+                                        sentence_idx=tts_sentence_idx,
+                                        session_id=session_id,
+                                    ))
+                                    tts_sentence_idx += 1
+                            tts_text_parts = [parts[-1]]
+                        await websocket.send_text(json.dumps({
+                            "type": "llm_token",
+                            "content": more_content,
+                            "emotion": current_emotion,
+                        }))
 
                 else:
-                    # No emotion yet — just send LLM token
-                    await websocket.send_text(json.dumps({
-                        "type": "llm_token",
-                        "content": cleaned_content,
-                        "emotion": None,
-                    }))
+                    # No emotion yet — just send LLM token (only if content is non-empty)
+                    if cleaned_content:
+                        await websocket.send_text(json.dumps({
+                            "type": "llm_token",
+                            "content": cleaned_content,
+                            "emotion": None,
+                        }))
+
+                    # Drain remaining buffered characters
+                    while True:
+                        result = emotion_mapper.update('')
+                        if result is None:
+                            break
+                        _, more_content = result
+                        # Break on empty content (either None or '')
+                        if result == (None, '') or not more_content:
+                            break
+                        await websocket.send_text(json.dumps({
+                            "type": "llm_token",
+                            "content": more_content,
+                            "emotion": None,
+                        }))
 
                     if not first_token_sent and event.ttft_seconds is not None:
                         ttft_seconds = event.ttft_seconds
@@ -413,52 +534,61 @@ async def run_llm_stream(
                         import re
                         remaining = re.sub(r'[「」『』【】〖〗《》〈〉〘〙〚〛‹›«»]', '', remaining).strip()
                         if remaining:
-                            task = asyncio.create_task(_stream_tts_sentence(
+                            if current_tts_task is not None:
+                                try:
+                                    await current_tts_task
+                                except Exception:
+                                    pass
+                            current_tts_task = asyncio.create_task(_stream_tts_sentence(
                                 websocket=websocket,
                                 text=remaining,
                                 emotion=current_emotion or "默認",
-                                model_size="0.6B",
+                                model_size=tts_model,
                                 persona_id=persona_id,
                                 sentence_idx=tts_sentence_idx,
                                 session_id=session_id,
                             ))
-                            tts_streaming_tasks.append(task)
                             tts_sentence_idx += 1
 
-                # Wait for all sentence TTS streams to finish before sending tts_done
-                if tts_streaming_tasks:
-                    await asyncio.gather(*tts_streaming_tasks, return_exceptions=True)
-                    tts_streaming_tasks.clear()
+                # Wait for final TTS sentence to finish before sending tts_done
+                if current_tts_task is not None:
+                    await asyncio.gather(current_tts_task, return_exceptions=True)
+                    current_tts_task = None
 
                 # Send tts_ready with full text for backward compatibility
                 # (client that doesn't support ws binary chunks will use HTTP stream)
-                if tts_notified:
-                    full_text = event.content or ""
-                    _, clean_text = parse_emotion_tag(full_text)
-                    clean_text = clean_text.strip()
-                    if clean_text:
-                        import re
-                        clean_text = re.sub(r'[「」『』【】〖〗《》〈〉〘〙〚〛‹›«»]', '', clean_text).strip()
-                    if clean_text:
-                        import urllib.parse
-                        params = urllib.parse.urlencode({
-                            "text": clean_text,
-                            "emotion": current_emotion,
-                            "model": "0.6B",
-                            "persona_id": persona_id or "xiao_s",
-                        })
-                        stream_url = f"/api/tts/stream?{params}"
-                        await websocket.send_text(json.dumps({
-                            "type": "tts_ready",
-                            "text": clean_text,
-                            "emotion": current_emotion,
-                            "instruct": current_instruct,
-                            "stream_url": stream_url,
-                        }))
+                full_text = event.content or ""
+                # Try to parse as JSON first (new format)
+                clean_text = full_text.strip()
+                try:
+                    parsed = json.loads(full_text)
+                    clean_text = parsed.get("content", parsed.get("text", ""))
+                except (json.JSONDecodeError, TypeError):
+                    # Fallback: remove ALL [情感: xxx] tags from text
+                    import re
+                    clean_text = re.sub(r'[\[［](?:情感|感情)[:：][^\]］]*[\]］]\s*', '', clean_text).strip()
+                if clean_text:
+                    clean_text = re.sub(r'[「」『』【】〖〗《》〈〉〘〙〚〛‹›«»]', '', clean_text).strip()
+                if tts_notified and clean_text:
+                    import urllib.parse
+                    params = urllib.parse.urlencode({
+                        "text": clean_text,
+                        "emotion": current_emotion,
+                        "model": tts_model,
+                        "persona_id": persona_id or "xiao_s",
+                    })
+                    stream_url = f"/api/tts/stream?{params}"
+                    await websocket.send_text(json.dumps({
+                        "type": "tts_ready",
+                        "text": clean_text,
+                        "emotion": current_emotion,
+                        "instruct": current_instruct,
+                        "stream_url": stream_url,
+                    }))
 
                 await websocket.send_text(json.dumps({
                     "type": "llm_done",
-                    "text": event.content,
+                    "text": clean_text or full_text,
                     "total_tokens": event.total_tokens,
                     "telemetry": {
                         "e2e_latency_seconds": e2e_latency,
@@ -473,10 +603,10 @@ async def run_llm_stream(
                     session_id=session_id,
                 ).inc(len(accumulated_text))
 
-                # Cancel any in-flight TTS streaming tasks
-                for task in tts_streaming_tasks:
-                    task.cancel()
-                tts_streaming_tasks.clear()
+                # Cancel in-flight TTS task
+                if current_tts_task:
+                    current_tts_task.cancel()
+                    current_tts_task = None
 
                 await websocket.send_text(json.dumps({
                     "type": "llm_cancelled",
@@ -484,10 +614,10 @@ async def run_llm_stream(
                 }))
 
             elif event.event.value == "error":
-                # Cancel TTS tasks on error too
-                for task in tts_streaming_tasks:
-                    task.cancel()
-                tts_streaming_tasks.clear()
+                # Cancel TTS task on error too
+                if current_tts_task:
+                    current_tts_task.cancel()
+                    current_tts_task = None
 
                 await websocket.send_text(json.dumps({
                     "type": "llm_error",
@@ -495,10 +625,10 @@ async def run_llm_stream(
                 }))
 
     finally:
-        # Cancel any remaining TTS streaming tasks
-        for task in tts_streaming_tasks:
-            task.cancel()
-        tts_streaming_tasks.clear()
+        # Cancel any remaining TTS task
+        if current_tts_task:
+            current_tts_task.cancel()
+            current_tts_task = None
         state_manager.clear_llm_task(session_id)
 
 
@@ -572,6 +702,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         persona_id = state.persona_id
                         listener_id = state.listener_id
                         llm_model = state.llm_model
+                        tts_model = state.tts_model or "1.7B"  # Default to 1.7B
 
                         # M1 stub for RAG retrieval time
                         rag_start = time.perf_counter()
@@ -591,6 +722,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                 persona_id=persona_id,
                                 listener_id=listener_id,
                                 llm_model=llm_model,
+                                tts_model=tts_model,
                             )
                         )
 

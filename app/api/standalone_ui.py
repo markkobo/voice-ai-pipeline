@@ -109,7 +109,7 @@ UI_HTML = """
     <div class="container">
         <div style="display: flex; justify-content: space-between; align-items: center;">
             <div>
-                <h1>Voice AI — 小S <span id="uiVersion" style="font-size:12px;color:#888">[v3]</span></h1>
+                <h1>Voice AI — 小S <span id="uiVersion" style="font-size:12px;color:#888">[v26]</span></h1>
                 <p class="subtitle">選擇對象，開始對話</p>
             </div>
             <button onclick="clearConversation()" style="background:#555;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:13px;">🗑 清除對話</button>
@@ -202,9 +202,9 @@ UI_HTML = """
         return false;
     };
     // Version for debugging
-    window.UI_VERSION = '2026-03-31-v25-ux-improvements';
+    window.UI_VERSION = '2026-04-01-v26-emotion-fix';
     console.log('UI Version: ' + window.UI_VERSION);
-    document.getElementById('uiVersion').textContent = '[v25]';
+    document.getElementById('uiVersion').textContent = '[v26]';
 
     const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/asr';
 
@@ -258,18 +258,18 @@ UI_HTML = """
                 class PCMPlayer extends AudioWorkletProcessor {
                     constructor() {
                         super();
-                        // Ring buffer for incoming PCM data
-                        this.ringBuffer = new Float32Array(24000 * 10); // 10 seconds max
+                        // Ring buffer for incoming PCM data - 20 seconds
+                        this.ringBuffer = new Float32Array(24000 * 20);
                         this.writePos = 0;
                         this.readPos = 0;
                         this.samplesInBuffer = 0;
                         this.isPlaying = true;
+                        this.pendingFlush = false;  // Don't interrupt mid-sentence
 
                         this.port.onmessage = (e) => {
                             if (e.data.type === 'pcm') {
                                 // Convert incoming Int16 to Float32 and add to ring buffer
                                 const int16Data = new Int16Array(e.data.buffer);
-                                const chunkSize = int16Data.length;
                                 let dropped = 0;
                                 for (let i = 0; i < int16Data.length; i++) {
                                     this.ringBuffer[this.writePos] = int16Data[i] / 32768.0;
@@ -287,9 +287,13 @@ UI_HTML = """
                                     this.port.postMessage({ type: 'log', msg: 'BUF DROPPED ' + dropped + ' samples, buf=' + this.samplesInBuffer });
                                 }
                             } else if (e.data.type === 'flush') {
-                                this.writePos = 0;
-                                this.readPos = 0;
-                                this.samplesInBuffer = 0;
+                                // Only flush if buffer is nearly empty (end of sentence)
+                                // This prevents cutting off mid-sentence audio
+                                if (this.samplesInBuffer < 24000) {  // < 1 second
+                                    this.writePos = 0;
+                                    this.readPos = 0;
+                                    this.samplesInBuffer = 0;
+                                }
                             } else if (e.data.type === 'stop') {
                                 this.isPlaying = false;
                             } else if (e.data.type === 'log') {
@@ -304,8 +308,8 @@ UI_HTML = """
                         const out = output[0];
                         if (!out) return true;
 
-                        if (!this.isPlaying || this.samplesInBuffer === 0) {
-                            // Output silence if not playing or buffer empty
+                        if (!this.isPlaying) {
+                            // Output silence if not playing
                             for (let i = 0; i < out.length; i++) {
                                 out[i] = 0;
                             }
@@ -430,21 +434,25 @@ UI_HTML = """
         ws = new WebSocket(WS_URL);
         ws.binaryType = 'arraybuffer';
 
-        ws.onopen = () => {
+        ws.onopen = async () => {
             setStatus('connected');
             if (startStopBtn) startStopBtn.textContent = '🔴 停止對話';
             if (recordBtn) recordBtn.disabled = false;
             log('WS connected');
+            // Initialize AudioWorklet for TTS playback
+            await ensureWorklet();
             // Send config
+            const ttsModelEl = document.getElementById('tts_model');
             ws.send(JSON.stringify({
                 type: 'config',
                 audio: { sample_rate: 24000, channels: 1, format: 'pcm' },
                 persona_id: personaEl.value,
                 listener_id: listenerEl.value,
                 model: 'gpt-4o-mini',
-                vad: document.getElementById('vad').value
+                vad: document.getElementById('vad').value,
+                tts_model: ttsModelEl ? ttsModelEl.value : '1.7B'
             }));
-            log('Config sent');
+            log('Config sent with tts_model=' + (ttsModelEl ? ttsModelEl.value : '1.7B'));
         };
 
         ws.onmessage = async (e) => {
@@ -455,7 +463,10 @@ UI_HTML = """
                 // Binary PCM chunk streamed directly from TTS — play immediately
                 const buf = new Int16Array(e.data);
                 if (buf.length > 0 && audioWorkletNode) {
-                    log('WS binary: ' + buf.length + ' samples');
+                    const now = performance.now();
+                    const gap = ws._lastBinaryTime ? Math.round(now - ws._lastBinaryTime) : 0;
+                    ws._lastBinaryTime = now;
+                    log('WS binary: ' + buf.length + ' samples, gap=' + gap + 'ms');
                     // Ensure AudioContext is running before posting
                     if (audioContext.state === 'suspended') {
                         await audioContext.resume();
@@ -913,12 +924,14 @@ UI_HTML = """
 
     listenerEl.addEventListener('change', () => {
         if (ws && ws.readyState === WebSocket.OPEN) {
+            const ttsModelEl = document.getElementById('tts_model');
             ws.send(JSON.stringify({
                 type: 'config',
                 audio: { sample_rate: 24000, channels: 1, format: 'pcm' },
                 persona_id: personaEl.value,
                 listener_id: listenerEl.value,
-                model: 'gpt-4o-mini'
+                model: 'gpt-4o-mini',
+                tts_model: ttsModelEl ? ttsModelEl.value : '1.7B'
             }));
         }
         // Reload versions when listener changes (persona might be same but different active version)
