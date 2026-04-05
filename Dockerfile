@@ -11,15 +11,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Install PyTorch (CUDA 12.1)
+# Install PyTorch (CUDA 12.4) - 2.6+ needed for CUDA graphs
 RUN pip install --no-cache-dir \
-    torch==2.4.1 \
-    --index-url https://download.pytorch.org/whl/cu121
+    torch==2.6.0 \
+    --index-url https://download.pytorch.org/whl/cu124
 
-# Install torchaudio matching CUDA 12.1
+# Install torchaudio matching CUDA 12.4
 RUN pip install --no-cache-dir \
-    torchaudio==2.4.1+cu121 \
-    --index-url https://download.pytorch.org/whl/cu121
+    torchaudio==2.6.0+cu124 \
+    --index-url https://download.pytorch.org/whl/cu124
 
 # Install core dependencies
 COPY requirements.txt /tmp/requirements.txt
@@ -30,18 +30,15 @@ RUN pip install --no-cache-dir \
     faster-qwen3-tts \
     qwen-tts
 
-# Install flash-attn for faster inference (optional, reduces TTS latency)
-# RUN pip install --no-cache-dir flash-attn --no-build-isolation
-
-# Set HuggingFace cache to workspace (persistent volume)
-ENV HF_HOME=/workspace/.cache/huggingface
+# Set HuggingFace cache - mounted from host at /root/.cache/huggingface
+ENV HF_HOME=/root/.cache/huggingface
 ENV CUDA_VISIBLE_DEVICES=0
 
-WORKDIR /workspace
-
-# Copy project
-COPY . /workspace/voice-ai-pipeline-1/
+# Working directory
 WORKDIR /workspace/voice-ai-pipeline-1
+
+# Copy project (host mounts volume to this path)
+COPY . .
 
 # Expose ports
 EXPOSE 8080 9090
