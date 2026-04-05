@@ -7,7 +7,6 @@ from app.services.tts.qwen_tts_engine import (
 )
 from app.services.tts.emotion_mapper import (
     EmotionMapper,
-    parse_emotion_tag,
     get_tts_instruct,
     DEFAULT_EMOTION_MAP,
 )
@@ -18,7 +17,6 @@ __all__ = [
     "get_tts_engine",
     "TTSStreamEvent",
     "EmotionMapper",
-    "parse_emotion_tag",
     "get_tts_instruct",
     "DEFAULT_EMOTION_MAP",
 ]
