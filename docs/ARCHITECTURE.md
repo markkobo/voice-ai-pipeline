@@ -1,10 +1,8 @@
 # Voice AI Pipeline — Architecture Documentation
 
-## Overview
+> ⚠️ **DEPRECATED**: This document contains outdated information about emotion format `[情感: xxx]` and HTTP TTS streaming. For current architecture, see `CLAUDE.md`.
 
-A real-time voice AI pipeline that enables natural conversation with a persona-aware AI assistant. The system processes voice input through a series of streaming services, generates responses using an LLM with emotion tagging, and synthesizes speech using a TTS engine with LoRA fine-tuned voice cloning.
-
-**Last Updated**: 2026-03-31
+**Last Updated**: 2026-04-01 (marked deprecated)
 
 ---
 

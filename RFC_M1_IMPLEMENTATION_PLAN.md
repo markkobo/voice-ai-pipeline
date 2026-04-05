@@ -46,7 +46,7 @@
 │  │                                                      │               │    │
 │  │                                          ┌───────────▼───────────┐  │    │
 │  │                                          │   EmotionMapper       │  │    │
-│  │                                          │  [情感: 撒嬌] →     │  │    │
+│  │                                          │  [E:撒嬌] →        │  │    │
 │  │                                          │  instruct string     │  │    │
 │  │                                          └───────────┬───────────┘  │    │
 │  └──────────────────────────────────────────────────────┼───────────────┘    │
@@ -66,17 +66,17 @@
 
 ## 2. Key Architecture Decisions
 
-### TTS Audio vs WebSocket — Decided: HTTP Streaming
+### TTS Audio vs WebSocket — Decided: WebSocket Binary Only
 
-**Final Architecture**:
-- **WebSocket**: text/control channel only (asr_result, llm_token, tts_ready)
-- **HTTP Streaming**: TTS audio channel (GET /api/tts/stream?text=...&emotion=...&model=...)
+**Final Architecture** (2026-04-01 update):
+- **WebSocket**: text/control channel (asr_result, llm_token, tts_start, tts_done) + binary PCM chunks
+- **No HTTP streaming**: TTS PCM chunks sent directly via WS binary frames
 
 **Rationale**:
-- Cleaner separation for troubleshooting (audio vs text issues independently)
-- Audio doesn't pollute WS logs with large base64 strings
-- Latency acceptable (HTTP chunked transfer ≈ WebSocket latency)
-- Browser `<audio>` + `fetch()` + `ReadableStream` handles playback well
+- Lower latency (no HTTP round-trip for chunk delivery)
+- Simpler client (no AudioWorklet + fetch() duality)
+- AudioWorklet receives PCM chunks directly via `ws.send_bytes()`
+- `tts_start`/`tts_done` control AudioWorklet state
 
 ### Browser Audio Format — Decided: WebM → Server Decode
 
@@ -100,7 +100,7 @@
 |------|--------|---------|
 | `app/api/tts_stream.py` | ✅ | HTTP streaming endpoint for TTS audio |
 | `app/services/tts/qwen_tts_engine.py` | ✅ | Faster-Qwen3-TTS VoiceDesign wrapper |
-| `app/services/tts/emotion_mapper.py` | ✅ | `[情感: xxx]` → TTS instruct |
+| `app/services/tts/emotion_mapper.py` | ✅ | `[E:情緒]內容` → TTS instruct |
 | `app/api/gradio_ui.py` | ✅ | Gradio UI with WS + audio playback JS |
 | `app/logging_config.py` | ✅ | Structured JSON logging → `/logs/app.log` |
 | `app/resources/personas/xiao_s.json` | ✅ | Persona JSON definition |
@@ -111,7 +111,7 @@
 
 | File | Status | Changes |
 |------|--------|---------|
-| `app/api/ws_asr.py` | ✅ | Emotion parsing, tts_ready, WebM decode |
+| `app/api/ws_asr.py` | ✅ | Emotion parsing, WS binary TTS, WebM decode |
 | `app/core/state_manager.py` | ✅ | TTS session tracking, listener_id |
 | `app/services/llm/prompt_manager.py` | ✅ | JSON-based persona loading (PersonaManager) |
 | `app/services/asr/vad_engine.py` | ✅ | Sensitivity presets (low/medium/high) |
@@ -130,17 +130,14 @@
 | `vad_commit` | `utterance_id`, `energy`, `telemetry` | VAD detected end of speech |
 | `llm_start` | `utterance_id` | LLM stream started |
 | `llm_token` | `content`, `emotion` | LLM token (emotion on first detection) |
-| `tts_ready` | `text`, `emotion`, `instruct`, `stream_url` | TTS stream URL for client to fetch |
+| `tts_start` | `sentence_idx` | Client prepares AudioWorklet for PCM chunks |
 | `llm_done` | `text`, `total_tokens`, `telemetry` | LLM stream complete |
+| `tts_done` | `sentence_idx` | Sentence streaming complete |
 | `llm_cancelled` | `partial_text` | LLM interrupted |
 | `llm_error` | `error` | LLM error |
 
-### HTTP Endpoint
-
-```
-GET /api/tts/stream?text=...&emotion=撒嬌&model=0.6B
-→ Returns: audio/pcm streaming (24kHz mono 16-bit)
-```
+### Binary Frames
+- **Server → Client**: Raw Int16 PCM chunks (24kHz mono) sent via `ws.send_bytes()`
 
 ---
 
@@ -162,26 +159,13 @@ self._buffer_returned_len = len(self._buffer)
 return None, new_text  # Returns only new text
 ```
 
-### Bug 2: TTS Accumulation Before Emotion Detection
+### Bug 2: TTS Accumulation Before Emotion Detection (SUPERSEDED)
 
-**Problem**: `tts_accumulated` started accumulating before emotion tag was fully detected, including partial tag characters like `'[情感: 撒嬌'`.
+**Problem**: `tts_accumulated` started accumulating before emotion tag was fully detected, including partial tag characters like `'[E:撒嬌'`.
 
-**Fix**: Use `tts_text_parts: list[str]` and only start accumulating AFTER emotion tag is consumed:
+**Fix (OLD)**: Use `tts_text_parts: list[str]` and only start accumulating AFTER emotion tag is consumed.
 
-```python
-if new_emotion and not tts_notified:
-    tts_notified = True
-    current_emotion = new_emotion
-    tts_text_parts = []  # Start fresh after tag
-    # Send tts_ready with empty text, emotion only
-
-elif tts_notified:
-    if cleaned_content:
-        tts_text_parts.append(cleaned_content)
-        tts_text = "".join(tts_text_parts)
-```
-
-**Result**: Final TTS text is `'好啦～那我們來玩遊戲！'` (clean, without emotion tag).
+**Current (2026-04-01)**: EmotionParser state machine handles this correctly with `[E:情緒]內容` format. The `]` delimiter provides clear boundary.
 
 ---
 
@@ -203,7 +187,7 @@ python test_m1_comprehensive.py
 
 | Component | Test | Result |
 |-----------|------|--------|
-| EmotionMapper | `'[情感: 撒嬌]好啦～'` → emotion=`撒嬌`, instruct | ✅ |
+| EmotionMapper | `'[E:撒嬌]好啦～'` → emotion=`撒嬌`, instruct | ✅ |
 | EmotionMapper | Streaming tokens character-by-character | ✅ |
 | EmotionMapper | No emotion tag → `emotion=None` | ✅ |
 | VAD | `silence_frames_to_commit=25` (medium preset) | ✅ |
@@ -221,7 +205,7 @@ python test_m1_comprehensive.py
 | Prometheus Metrics | `GET /metrics` has all Vad/LLM/TTS metrics | ✅ |
 | VAD Detection | WebSocket → audio chunks → VAD commit → ASR result | ✅ |
 | LLM Streaming | WebSocket → ASR → LLM streaming → `llm_done` | ✅ |
-| TTS HTTP Streaming | `GET /api/tts/stream?text=...&emotion=...` → PCM audio | ✅ |
+| TTS WS Binary | WS binary chunks streamed to AudioWorklet | ✅ |
 | Barge-in | New speech → cancels active LLM | ✅ |
 
 **Total: 10/10 tests passing**
@@ -229,8 +213,8 @@ python test_m1_comprehensive.py
 ### Integration Flow Test (Mock)
 
 ```
-LLM: '[情感: 撒嬌]好啦～那我們來玩遊戲！'
-     ↓ EmotionMapper.update() (token by token)
+LLM: '[E:撒嬌]好啦～那我們來玩遊戲！'
+     ↓ EmotionParser.update() (char by char)
 Emotion detected: 撒嬌 @ token ']'
 Instruct: (coquettish, soft, slightly slower pace, endearing inflection)
 Final TTS text: '好啦～那我們來玩遊戲！' (emotion tag correctly removed)
@@ -247,11 +231,11 @@ Final TTS text: '好啦～那我們來玩遊戲！' (emotion tag correctly remov
 
 ## 8. Known Issues / Post-M1 Fixes Applied
 
-### TTS WAV Format Fix (P1)
+### TTS WAV Format Fix (P1) — SUPERSEDED
 **Issue**: Browser `decodeAudioData` fails with raw PCM — needs WAV header
 
-**Fix Applied**: TTS endpoint now returns WAV format with proper header.
-Status: Fixed in `app/api/tts_stream.py`
+**Fix Applied (OLD)**: TTS endpoint now returns WAV format with proper header.
+**Current (2026-04-01)**: TTS uses WS binary only. Raw Int16 PCM sent directly to AudioWorklet — no HTTP fetch, no WAV header needed.
 
 ### PyTorch Version for FasterQwen3TTS (DONE)
 **Issue**: PyTorch 2.4.1 `torch.multinomial` cannot be captured in CUDA graphs
@@ -276,10 +260,11 @@ Status: Fixed
 - Expected: Better accuracy, fewer false positives
 - Files: `app/services/asr/silero_vad.py` (new)
 
-### P1.2: TTS Chunks Immediate Playback
-- TTS already generates streaming chunks
-- Fix: Send chunks to client as they arrive (not buffered)
-- Client plays each chunk immediately via AudioContext
+### P1.2: TTS Chunks Immediate Playback — ✅ IMPLEMENTED
+- TTS generates streaming chunks via WS binary (`send_bytes()`)
+- Client AudioWorklet receives PCM chunks directly
+- `tts_start`/`tts_done` control AudioWorklet state
+- Status: Implemented (2026-04-01)
 
 ### P1.3: New Telemetry Metrics
 ```python
@@ -316,7 +301,7 @@ pydub>=0.25.0
 | VAD sensitivity slider changes behavior | ✅ Implemented |
 | Listener/persona selection changes LLM output tone | ✅ Implemented |
 | Emotion tags parsed from LLM output and applied to TTS | ✅ Tested (mock) |
-| TTS audio streams back via HTTP | ✅ Verified by integration test |
+| TTS audio streams back via WS binary | ✅ Verified by integration test |
 | Barge-in interrupts both LLM and TTS | ✅ Verified by integration test |
 | Debug mode shows all intermediate data | ✅ Implemented |
 | Structured JSON logs → `/logs/app.log` | ✅ Verified by unit test |

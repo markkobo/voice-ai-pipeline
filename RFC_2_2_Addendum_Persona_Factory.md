@@ -16,7 +16,7 @@
 {
   "persona_id": "string",
   "base_personality": "核心性格描述，包含語言風格與禁忌。",
-  "emotion_instruction": "關於如何在輸出中嵌入 [情感: 類型] 的指令。",
+  "emotion_instruction": "關於如何在輸出中嵌入 [E:情緒] 的指令，格式為 [E:情緒]內容（例：[E:寵溺]好啦～）。",
   "relationships": {
     "listener_id_1": "對該特定對象的語氣描述",
     "listener_id_2": "對該特定對象的語氣描述"

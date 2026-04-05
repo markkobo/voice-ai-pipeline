@@ -380,7 +380,7 @@ Input: "今天考試考怎麼樣？"
         Persona (who is speaking) → Voice LoRA
         Listener (who is listening) → Emotion tag routing
                     ↓
-        LLM receives: "[情感: 撒嬌] 今天考試考怎麼樣？"
+        LLM receives: "[E:撒嬌]今天考試考怎麼樣？"
         (emotion tag determined by listener_id + context)
                     ↓
         TTS: 小S voice LoRA + "(coquettish, soft, slightly slower pace)"

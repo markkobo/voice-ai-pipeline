@@ -32,9 +32,9 @@
 ### 3.2 情感標籤轉化 (Natural Language Control)
 - **邏輯**: 將解析出的 `emotion` 標籤對應至 Qwen3-TTS 的自然語言描述。
 - **映射範例**:
-    - `[情感: 毒舌]` -> `"(witty and fast-paced tone)"`
-    - `[情感: 寵溺]` -> `"(gentle, high-pitched, and warm tone)"`
-    - `[情感: 撒嬌]` -> `"(coquettish and soft tone)"`
+    - `[E:毒舌]` -> `"(witty, fast-paced, sarcastic but playful tone, confident delivery)"`
+    - `[E:寵溺]` -> `"(gentle, high-pitched, warm and loving tone, soft delivery)"`
+    - `[E:撒嬌]` -> `"(coquettish, soft, slightly slower pace, endearing inflection)"`
 
 ### 3.3 新增 API 與協議
 - **POST `/api/voice/clone`**: 接收 `file`, `persona_id`, `listener_id` 並存入對應目錄。

@@ -94,7 +94,7 @@ voice-ai-pipeline/
 │   │   │   └── prompt_manager.py # Persona + listener prompt logic
 │   │   ├── tts/
 │   │   │   ├── qwen_tts_engine.py   # Faster-Qwen3-TTS wrapper
-│   │   │   └── emotion_mapper.py    # [情感: xxx] → TTS instruct
+│   │   │   └── emotion_mapper.py    # [E:情緒] → TTS instruct
 │   │   └── training/
 │   │       ├── lora_trainer.py   # LoRA fine-tuning logic
 │   │       └── voice_profile.py  # Voice profile management
@@ -221,12 +221,12 @@ Binary: PCM 16-bit audio chunks
 ## 8. Emotion Tag Flow
 
 ```
-LLM output: "「好啦～[情感: 寵溺]，那我們來玩遊戲！"
+LLM output: "「[E:寵溺]好啦～那我們來玩遊戲！"
 
-        ↓ Regex: ^\[情感: (.*?)\]\s?
+        ↓ EmotionParser (state machine)
 
 Extracted emotion: "寵溺"
-Content (sent to TTS): "「好啦～，那我們來玩遊戲！""
+Content (sent to TTS): "「好啦～那我們來玩遊戲！""
 
         ↓ EmotionMapper
 
@@ -265,7 +265,7 @@ EMOTION_MAP = {
 - [x] Torchaudio CUDA mismatch fixed
 - [x] Wrong TTS method fixed: `generate_voice_clone_streaming` → `generate_voice_design_streaming`
 - [x] Emotion tag in display: EmotionMapper strips tag before display; `ttsText` used for TTS URL
-- [x] tts_ready re-fetch storm: Server sends `tts_ready` only once per utterance
+- [x] tts_ready re-fetch storm (OLD): Server sends `tts_ready` only once per utterance → **SUPERSEDED**: WS binary only TTS, no HTTP fetch
 - [x] TTS model size: Default changed from 0.6B → 1.7B VoiceDesign
 - [x] UI emotion tag display: Fragmented emotion tags handled correctly (skip `[, 情, 感, :, 默, 幽` fragments)
 - [x] UI message box: One box per response (not one per token)
