@@ -59,7 +59,7 @@ app/
     │   └── prompt_manager.py # Persona-aware prompt templates
     └── tts/
         ├── qwen_tts_engine.py # TTS engine (FasterQwen3TTS + Qwen3TTSModel fallback)
-        └── emotion_mapper.py  # [情感: 撒嬌] tag → TTS instruct string
+        └── emotion_mapper.py  # [E:情緒] tag → TTS instruct string
 telemetry/                      # Prometheus metrics + collector
 tests/
 ```
@@ -74,7 +74,7 @@ Browser microphone (onaudioprocess → Int16 PCM)
 VAD + ASR (Qwen3-ASR) → transcription
     ↓
 LLM streaming (OpenAI gpt-4o-mini)
-    ↓ LLM token with [情感: xxx] tag
+    ↓ LLM token with [E:情緒] tag
 EmotionMapper — parse tag, return instruct + cleaned text
     ↓ first emotion detected
 tts_start → server streams PCM chunks over WebSocket binary
@@ -111,15 +111,19 @@ TTS (Qwen3-TTS 1.7B VoiceDesign) → PCM audio → AudioWorklet plays
 
 ## Emotion System
 
-**LLM output format:** Text prefixed with `[情感: xxx]` emotion tag, e.g.:
+**LLM output format:** Text prefixed with `[E:情緒]內容` emotion tag, e.g.:
 ```
-[情感: 寵溺]好啦～不要生氣嘛
+[E:寵溺]好啦～不要生氣嘛
 ```
+- `[E:` marks start of emotion tag
+- `]` is the clear delimiter after emotion value
+- Content follows after `]`
 
-**EmotionMapper** (`app/services/tts/emotion_mapper.py`):
-- Parses `[情感: xxx]` tag from LLM streaming output
+**EmotionParser** (`app/services/tts/emotion_mapper.py`):
+- State machine parser for `[E:情緒]內容` streaming format
 - Returns `(emotion, cleaned_text)` — strips tag from text
 - Maps emotion → TTS natural language instruct string
+- Character-by-character streaming emit for low latency
 
 **Emotion → TTS instruct mapping:**
 | Emotion | TTS Instruct |
@@ -185,6 +189,53 @@ USE_QWEN_ASR=false pytest tests/ -v
 USE_QWEN_ASR=false pytest tests/test_ws_asr.py::TestWebSocketIntegration -v
 ```
 
+## Development Philosophy
+
+### Write Tests BEFORE Implementing Parsers/Streaming Code
+
+String format parsing (emotion tags, delimiters, state machines) is error-prone. **Write unit tests first** to define expected behavior:
+
+```python
+# BEFORE implementing EmotionParser, write tests:
+def test_full_format_streaming():
+    """Full format in one chunk - emits one char at a time."""
+    parser = EmotionParser()
+    result = parser.update('[E:調皮]哈哈哈')
+    assert result == ('調皮', '哈')  # First emit has emotion
+
+def test_partial_tag_waits():
+    """Partial [E: without closing ] waits for more."""
+    parser = EmotionParser()
+    result = parser.update('[E:')
+    assert result is None  # Need more data
+```
+
+This would have caught the drain loop bug and emotion locking issues **before** integration.
+
+### Do NOT Trade Streaming for Simplicity
+
+The requirement is **real-time conversation < 2s latency**. Trading streaming for simpler batch processing violates this:
+
+- ✅ Do: Stream TTS PCM chunks via WS binary as they generate
+- ❌ Don't: Buffer entire audio, then send via HTTP fetch (adds latency)
+
+If streaming is hard to implement correctly, **write more tests** rather than falling back to batch.
+
+### Do NOT Trade Fine-tuning Quality for Convenience
+
+LoRA fine-tuning is in the Milestone 4 roadmap for a reason — it significantly improves voice cloning quality. Don't skip it or use generic base models to save time:
+
+- ✅ Do: Train LoRA adapters per persona voice
+- ❌ Don't: Use base Qwen3-TTS without fine-tuning (sounds generic)
+
+### State Machine / Streaming Code = High Test Priority
+
+Code with complex state (parsers, streaming handlers, protocol buffers) is 10x more likely to have subtle bugs. Prioritize tests for:
+
+1. **Emotion parsers** — all edge cases of partial tags, streaming chunks
+2. **WebSocket drain loops** — ensure no infinite loops, all buffered data flushed
+3. **VAD state transitions** — speech → silence → commit timing
+
 ## Key Environment Variables
 
 | Variable | Default | Description |
@@ -211,14 +262,14 @@ USE_QWEN_ASR=false pytest tests/test_ws_asr.py::TestWebSocketIntegration -v
 
 5. **server --port flag**: `uvicorn.run` in `main.py` hardcodes port 8080. Change `app/main.py:112` if needed.
 
-## Recent Fixes (2026-03-31)
+## Recent Fixes (2026-04-05)
 
-- **VAD auto-send**: `process_audio()` now correctly returns `vad_commit` when silence is detected after speech (was inverted — returned on speech, not silence)
-- **VAD barge-in**: New speech during active utterance cancels LLM+TTS via `_vad_had_speech` + `_vad_committed` tracking in SessionState
-- **UI vad_commit handler**: Now calls `stopRecordingAndSend()` to actually send audio to server (was only resetting UI flags)
-- **WS binary only TTS**: Removed HTTP fetch path entirely. TTS uses only WS binary streaming (`send_bytes()` PCM chunks to AudioWorklet). Removed: `playNextInQueue()`, `playRawPCM()`, `playTTS()`, `tts_ready` handler, `audioQueue`, `isAudioPlaying`, `currentAudio`, `wsBinaryActive`, `ttsSignalController`
-- **TTS fallback**: Streaming path now falls back to non-streaming `generate_voice_design()` within the same call when CUDA graph errors occur (was ignoring errors and returning empty audio)
-- **Auto-merge after training**: Training pipeline now calls `merge_lora()` after success, auto-activates merged model, sets status="merging" in progress.json
-- **Startup merged model**: `preload_tts()` activates latest ready merged model BEFORE warmup (avoids loading base model twice)
-- **activate_version()**: Now skips reload if same merged model already active
-- **Smart restart script**: `scripts/restart.sh` categorizes changes — UI/HTML/JS only → no restart (refresh browser), Python code → full restart
+- **EmotionParser new format**: `[E:情緒]內容` format with state machine (was `[情感: xxx]` with regex)
+- **Drain loop fix**: ws_asr.py properly drains all buffered chars when emotion is locked
+- **CUDA OOM prevention**: Global `_cuda_lock` + `torch.cuda.empty_cache()` serializes GPU operations
+- **VAD auto-send**: `process_audio()` correctly returns `vad_commit` when silence detected after speech
+- **VAD barge-in**: New speech cancels LLM+TTS via `_vad_had_speech` + `_vad_committed` tracking
+- **WS binary only TTS**: Removed HTTP fetch path. TTS streams PCM via WS binary frames
+- **TTS fallback**: Falls back to non-streaming when CUDA graph errors occur
+- **Auto-merge after training**: Training pipeline calls `merge_lora()` after success
+- **Smart restart script**: Detects uncommitted changes for proper reload categorization
