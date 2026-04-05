@@ -571,13 +571,31 @@ Inference Phase:
                 ──→ merge_and_unload()
                 ──→ Merged model (base + LoRA baked in)
                 ──→ FasterQwen3TTS.from_pretrained(merged_path)
-                ──→ Streaming + CUDA Graph ✓
+                ──→ Streaming + CUDA Graph ✓ (with proper warmup)
 ```
 
-### 11.2 Loading LoRA at Runtime (IMPLEMENTED)
+**Merged Model + Streaming: Confirmed Working**
+
+There is no technical barrier to using merged models with streaming. The merged model is a standard FasterQwen3TTS model — the only requirement is that CUDA graphs must be properly captured during warmup by calling `model._warmup(prefill_len=128)`.
+
+### 11.2 Loading and Warmup (IMPLEMENTED)
 
 ```python
 # app/services/tts/qwen_tts_engine.py
+
+def warmup(self):
+    """Warm up the model to capture CUDA graphs."""
+    if self._warmed_up:
+        return
+
+    self._ensure_loaded()
+
+    # Actually trigger CUDA graph capture
+    if hasattr(self._model, '_warmup'):
+        log.info("Capturing CUDA graphs...")
+        self._model._warmup(prefill_len=128)  # Critical: captures predictor + talker graphs
+        self._warmed_up = True
+        log.info("CUDA graphs captured and ready")
 
 def activate_version(self, version_id: str):
     """Activate a merged LoRA model for voice cloning."""
@@ -597,9 +615,10 @@ def activate_version(self, version_id: str):
 
     self._merged_model_path = str(merged_path.resolve())
 
-    # Reload model if already loaded
+    # Reload model if already loaded (must re-warmup for new model)
     if self._is_loaded:
         self._is_loaded = False
+        self._warmed_up = False  # Must reset so warmup re-captures graphs
         self._ensure_loaded()
 ```
 
@@ -622,6 +641,8 @@ data/models/merged_qwen3_tts_xiao_s_v12/
 1. **Base Model**: Must use `Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign` (not Base model) for merging
 2. **LoRA Target Modules**: `["q_proj", "k_proj", "v_proj", "o_proj"]` on both `talker.model` and `code_predictor`
 3. **PEFT Config**: `task_type="CAUSAL_LM"`, `r=16`, `lora_alpha=32`, `lora_dropout=0.05`
+4. **Warmup Required**: After loading model (via `_ensure_loaded()`), must call `model._warmup(prefill_len=128)` to capture CUDA graphs. Without warmup, streaming will fail with "Offset increment outside graph capture" errors.
+5. **Re-warmup on Model Reload**: When `activate_version()` reloads the model, must reset `_warmed_up = False` so warmup re-captures graphs for the new model.
 
 ### 11.5 Training Method (IMPLEMENTED)
 

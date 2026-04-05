@@ -77,9 +77,9 @@ LLM streaming (OpenAI gpt-4o-mini)
     ↓ LLM token with [情感: xxx] tag
 EmotionMapper — parse tag, return instruct + cleaned text
     ↓ first emotion detected
-tts_ready → client fetches /api/tts/stream
+tts_start → server streams PCM chunks over WebSocket binary
     ↓
-TTS (Qwen3-TTS 1.7B VoiceDesign) → PCM audio → browser plays
+TTS (Qwen3-TTS 1.7B VoiceDesign) → PCM audio → AudioWorklet plays
 ```
 
 ## WebSocket Protocol
@@ -100,11 +100,14 @@ TTS (Qwen3-TTS 1.7B VoiceDesign) → PCM audio → browser plays
 {"type": "llm_start", "utterance_id": "..."}
 {"type": "llm_token", "content": "「", "emotion": null}
 {"type": "llm_token", "content": "好啦", "emotion": "寵溺"}  // emotion appears on FIRST token after tag
-{"type": "tts_ready", "text": "「好啦", "emotion": "寵溺", "instruct": "(gentle...)", "stream_url": "/api/tts/stream?..."}
+{"type": "tts_start", "sentence_idx": 0}  // → client prepares AudioWorklet
 {"type": "llm_done", "text": "「寵溺好啦～", "total_tokens": 12}
+{"type": "tts_done", "sentence_idx": 0}    // sentence streaming complete
 {"type": "llm_cancelled"}
 {"type": "llm_error", "error": "..."}
 ```
+
+**Server → Client (Binary frames):** Raw Int16 PCM chunks streamed directly via WebSocket binary
 
 ## Emotion System
 
@@ -202,7 +205,7 @@ USE_QWEN_ASR=false pytest tests/test_ws_asr.py::TestWebSocketIntegration -v
 
 2. **VAD runs only on commit_utterance**: Audio is accumulated without VAD processing. VAD only fires on explicit commit, not on every chunk.
 
-3. **tts_ready sent ONCE per utterance**: Server sends `tts_ready` only when text first becomes non-empty (not on every token). `tts_url_sent` flag prevents re-fetch storms.
+3. **TTS streaming via WS binary only**: Server streams PCM chunks as WebSocket binary frames. `tts_start`/`tts_done` control the AudioWorklet. HTTP fetch path (`tts_ready`) removed — client ignores `tts_ready` message.
 
 4. **Emotion tag stripped at display**: Client's `llm_token` handler filters emotion tags before displaying. `ttsText` variable holds filtered text.
 
@@ -213,9 +216,9 @@ USE_QWEN_ASR=false pytest tests/test_ws_asr.py::TestWebSocketIntegration -v
 - **VAD auto-send**: `process_audio()` now correctly returns `vad_commit` when silence is detected after speech (was inverted — returned on speech, not silence)
 - **VAD barge-in**: New speech during active utterance cancels LLM+TTS via `_vad_had_speech` + `_vad_committed` tracking in SessionState
 - **UI vad_commit handler**: Now calls `stopRecordingAndSend()` to actually send audio to server (was only resetting UI flags)
-- **WS binary + HTTP overlap**: Added `wsBinaryActive` flag — when WS binary TTS chunks stream, HTTP `tts_ready` fetch is skipped to prevent duplicate overlapping audio
+- **WS binary only TTS**: Removed HTTP fetch path entirely. TTS uses only WS binary streaming (`send_bytes()` PCM chunks to AudioWorklet). Removed: `playNextInQueue()`, `playRawPCM()`, `playTTS()`, `tts_ready` handler, `audioQueue`, `isAudioPlaying`, `currentAudio`, `wsBinaryActive`, `ttsSignalController`
 - **TTS fallback**: Streaming path now falls back to non-streaming `generate_voice_design()` within the same call when CUDA graph errors occur (was ignoring errors and returning empty audio)
 - **Auto-merge after training**: Training pipeline now calls `merge_lora()` after success, auto-activates merged model, sets status="merging" in progress.json
 - **Startup merged model**: `preload_tts()` activates latest ready merged model BEFORE warmup (avoids loading base model twice)
 - **activate_version()**: Now skips reload if same merged model already active
-- **Smart restart script**: `scripts/restart.sh` auto-detects code changes via git hash; `--watch` mode for auto-reload on file changes
+- **Smart restart script**: `scripts/restart.sh` categorizes changes — UI/HTML/JS only → no restart (refresh browser), Python code → full restart
