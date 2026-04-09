@@ -9,9 +9,10 @@ pydub>=0.25.0
 python-dotenv>=1.0.0
 
 # PyTorch CUDA 12.4 — MUST use exact version for CUDA graphs compatibility
-# Install FIRST: pip install torch==2.6.0+cu124 torchaudio==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124
-torch==2.6.0+cu124
-torchaudio==2.6.0+cu124
+# Install with: pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+# The +cu124 suffix only works with PyTorch's index URL
+torch==2.6.0
+torchaudio==2.6.0
 torchvision>=0.20.0
 
 # ASR - Real-time streaming for WebSocket voice chat
@@ -22,12 +23,13 @@ faster-qwen3-tts
 qwen-tts>=0.1.1
 
 # Audio Processing Pipeline
-# NOTE: pyannote.audio upgrades torch to latest, breaking CUDA graphs
-# Install order: pip install faster-whisper speechbrain pyannote.audio noisereduce
-# Then restore torch: pip install torch==2.6.0+cu124 torchaudio==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124
+# NOTE: pyannote.audio 4.x requires torch>=2.8.0 but works with torch 2.6.0+cu124
+# when using waveform dict approach (bypasses torchcodec). After installing pyannote.audio,
+# restore torch: pip install torch==2.6.0+cu124 torchaudio==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124
+# NOTE: faster-whisper uses large-v3 model for Chinese transcription (RTF ~0.006, excellent fluency)
 faster-whisper>=1.0.0
 speechbrain>=1.0.0
-pyannote.audio>=3.0.0
+pyannote.audio==4.0.4
 noisereduce>=3.0.0
 
 # LoRA Fine-tuning (M4)
