@@ -23,13 +23,12 @@ faster-qwen3-tts
 qwen-tts>=0.1.1
 
 # Audio Processing Pipeline
-# NOTE: pyannote.audio 4.x requires torch>=2.8.0 but works with torch 2.6.0+cu124
-# when using waveform dict approach (bypasses torchcodec). After installing pyannote.audio,
-# restore torch: pip install torch==2.6.0+cu124 torchaudio==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124
-# NOTE: faster-whisper uses large-v3 model for Chinese transcription (RTF ~0.006, excellent fluency)
+# NOTE: pyannote.audio 3.x is compatible with torch 2.6.0 (CUDA graphs)
+# pyannote.audio 4.x requires torch>=2.8.0 which breaks CUDA graphs
+# faster-whisper uses large-v3 model for Chinese transcription (RTF ~0.006)
 faster-whisper>=1.0.0
 speechbrain>=1.0.0
-pyannote.audio==4.0.4
+pyannote.audio>=3.0.0,<4.0.0
 noisereduce>=3.0.0
 
 # LoRA Fine-tuning (M4)
