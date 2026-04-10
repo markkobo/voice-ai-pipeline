@@ -41,7 +41,7 @@ class JSONFormatter(logging.Formatter):
         return json.dumps(log_entry, ensure_ascii=False)
 
 
-def setup_json_logging(log_dir: str = "/workspace/voice-ai-pipeline-1/logs"):
+def setup_json_logging(log_dir: str = "/workspace/voice-ai-pipeline/logs"):
     """
     Setup structured JSON logging for the application.
 

@@ -208,25 +208,24 @@ class RecordingMetadata:
         segments_data: list[dict],
     ) -> None:
         """
-        Enrich speaker segments with audio paths, duration, quality, and transcription.
+        Enrich speaker segments with audio paths and transcription.
 
-        Called after _extract_speaker_audio + transcription.
+        Note: duration_seconds and quality metrics are calculated per-segment
+        in the pipeline and should NOT be overwritten here.
 
         Args:
             segments_data: List of dicts with keys:
-                speaker_id, duration_seconds, audio_path, transcription,
-                transcription_confidence, quality_score, training_ready
+                speaker_id, duration_seconds (speaker total), audio_path, transcription,
+                transcription_confidence
         """
         for seg in self._data["speaker_segments"]:
             speaker_id = seg["speaker_id"]
+            # Duration and quality are already set per-segment in pipeline
             for sd in segments_data:
                 if sd.get("speaker_id") == speaker_id:
-                    seg["duration_seconds"] = sd.get("duration_seconds")
                     seg["audio_path"] = sd.get("audio_path")
                     seg["transcription"] = sd.get("transcription")
                     seg["transcription_confidence"] = sd.get("transcription_confidence")
-                    seg["quality_score"] = sd.get("quality_score")
-                    seg["training_ready"] = sd.get("training_ready", False)
                     # Inherit from recording-level metadata initially
                     if "persona_id" not in seg or seg.get("persona_id") is None:
                         seg["persona_id"] = self._data.get("persona_id")
@@ -238,7 +237,7 @@ class RecordingMetadata:
     def update_segment(self, speaker_id: str, persona_id: str = None,
                        listener_id: str = None) -> bool:
         """
-        Update a single speaker segment's persona_id or listener_id.
+        Update all speaker segments' persona_id or listener_id for a given speaker.
 
         Args:
             speaker_id: The speaker index (e.g., "SPEAKER_00")
@@ -248,15 +247,17 @@ class RecordingMetadata:
         Returns:
             True if found and updated, False if not found
         """
+        updated = False
         for seg in self._data["speaker_segments"]:
             if seg["speaker_id"] == speaker_id:
                 if persona_id is not None:
                     seg["persona_id"] = persona_id
                 if listener_id is not None:
                     seg["listener_id"] = listener_id
-                self.save()
-                return True
-        return False
+                updated = True
+        if updated:
+            self.save()
+        return updated
 
     def is_expired(self) -> bool:
         """Check if processed files should be auto-deleted."""

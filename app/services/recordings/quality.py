@@ -239,6 +239,139 @@ class AudioQualityAnalyzer:
         return results
 
 
+def analyze_segment(samples: np.ndarray, sample_rate: int) -> dict:
+    """
+    Analyze quality of an audio segment (not from file).
+
+    Args:
+        samples: Audio samples as numpy array
+        sample_rate: Sample rate in Hz
+
+    Returns:
+        dict with snr_db, rms_volume, silence_ratio, clarity_score, quality_score, quality_flags
+    """
+    # Create a minimal analyzer without file path
+    class SegmentAnalyzer:
+        def __init__(self, samples, sample_rate):
+            self._samples = samples
+            self._sample_rate = sample_rate
+            self.samples = samples
+            self.sample_rate = sample_rate
+
+    analyzer = SegmentAnalyzer(samples, sample_rate)
+
+    snr_db = _calculate_snr_static(samples)
+    rms_volume = _calculate_rms_static(samples)
+    silence_ratio = _calculate_silence_static(samples, rms_volume)
+    clarity_score = _calculate_clarity_static(samples, sample_rate)
+
+    # Determine quality flags
+    quality_flags = {
+        "has_overlap": False,  # Would need VAD to detect properly
+        "low_energy": rms_volume < RMS_THRESHOLD_DB,
+        "high_noise": snr_db < SNR_THRESHOLD_DB,
+        "too_short": len(samples) / sample_rate < 1.0,
+    }
+
+    # Calculate overall quality score (0-1)
+    snr_norm = max(0.0, min(1.0, snr_db / 30.0))  # 0-30 dB normalized
+    duration = len(samples) / sample_rate
+    duration_norm = 1.0 if 3.0 <= duration <= 30.0 else 0.5 if 1.0 <= duration < 3.0 else 0.0
+    clarity_norm = clarity_score
+    silence_penalty = max(0, 1.0 - silence_ratio * 2)  # High silence = penalty
+
+    quality_score = (
+        clarity_norm * 0.3 +
+        snr_norm * 0.3 +
+        duration_norm * 0.15 +
+        silence_penalty * 0.15 +
+        (1.0 if not any(quality_flags.values()) else 0.5) * 0.1  # Bonus if no flags
+    )
+    quality_score = round(max(0.0, min(1.0, quality_score)), 3)
+
+    # Overall training ready
+    training_ready = (
+        snr_db >= SNR_THRESHOLD_DB and
+        rms_volume >= RMS_THRESHOLD_DB and
+        silence_ratio <= SILENCE_RATIO_THRESHOLD and
+        clarity_score >= CLARITY_THRESHOLD and
+        duration >= 1.0
+    )
+
+    return {
+        "snr_db": round(snr_db, 2),
+        "rms_volume": round(rms_volume, 2),
+        "silence_ratio": round(silence_ratio, 4),
+        "clarity_score": round(clarity_score, 4),
+        "quality_score": quality_score,
+        "quality_flags": quality_flags,
+        "training_ready": training_ready,
+    }
+
+
+def _calculate_snr_static(samples: np.ndarray) -> float:
+    """Calculate SNR for raw samples."""
+    if len(samples) == 0:
+        return 0.0
+    signal_rms = np.sqrt(np.mean(samples ** 2))
+    abs_samples = np.abs(samples)
+    threshold = np.percentile(abs_samples, 20)
+    noise_samples = samples[abs_samples < threshold]
+    if len(noise_samples) > 0:
+        noise_rms = np.sqrt(np.mean(noise_samples ** 2))
+    else:
+        noise_rms = np.sqrt(np.mean(samples ** 2)) * 0.1
+    if noise_rms < 1e-10:
+        noise_rms = 1e-10
+    return float(20 * np.log10(signal_rms / noise_rms))
+
+
+def _calculate_rms_static(samples: np.ndarray) -> float:
+    """Calculate RMS volume for raw samples."""
+    if len(samples) == 0:
+        return -np.inf
+    max_val = np.max(np.abs(samples))
+    if max_val > 1.0:
+        samples = samples / max_val
+    rms = np.sqrt(np.mean(samples ** 2))
+    if rms < 1e-10:
+        return -96.0
+    return float(20 * np.log10(rms))
+
+
+def _calculate_silence_static(samples: np.ndarray, rms: float) -> float:
+    """Calculate silence ratio for raw samples."""
+    if len(samples) == 0:
+        return 1.0
+    if rms < 1e-6:
+        return 1.0
+    silence_threshold = rms * 0.1
+    silent_samples = np.abs(samples) < silence_threshold
+    return float(np.mean(silent_samples))
+
+
+def _calculate_clarity_static(samples: np.ndarray, sample_rate: int) -> float:
+    """Calculate clarity score for raw samples."""
+    try:
+        if len(samples) < 256:
+            return 0.5
+        fft = np.fft.rfft(samples)
+        magnitude = np.abs(fft)
+        freqs = np.fft.rfftfreq(len(samples), 1.0 / sample_rate)
+        if np.sum(magnitude) > 0:
+            centroid = np.sum(freqs * magnitude) / np.sum(magnitude)
+        else:
+            centroid = 0
+        geometric_mean = np.exp(np.mean(np.log(magnitude + 1e-10)))
+        arithmetic_mean = np.mean(magnitude) + 1e-10
+        flatness = geometric_mean / arithmetic_mean
+        centroid_norm = np.clip(centroid / 4000, 0, 1)
+        clarity = (centroid_norm * 0.5) + ((1 - flatness) * 0.5)
+        return float(np.clip(clarity, 0, 1))
+    except Exception:
+        return 0.5
+
+
 def analyze_audio(audio_path: Path) -> dict:
     """
     Convenience function to analyze audio file.

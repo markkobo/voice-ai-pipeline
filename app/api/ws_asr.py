@@ -46,7 +46,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.core.state_manager import StateManager
 from app.services.llm import OpenAIClient, MockLLMClient, PersonaManager, PersonaType
-from app.services.tts import EmotionMapper, get_tts_instruct, get_tts_engine
+from app.services.tts import EmotionMapper, enhance_text, get_tts_engine
 from app.logging_config import get_logger
 from telemetry import metrics, rag_retrieval_seconds
 
@@ -81,19 +81,31 @@ async def _stream_tts_sentence(
         return
 
     engine = get_tts_engine(model_size=model_size)
-    log.info(f"[{session_id}] TTS _stream_tts_sentence: model_size={model_size}, emotion={emotion}, text='{text[:30]}...' engine={type(engine).__name__ if engine else None}")
-    instruct = get_tts_instruct(emotion)
+
+    # Phase 1 Path B: Use text enhancement instead of instruct strings
+    enhanced_text_content = enhance_text(text.strip(), emotion)
+
+    log.info(f"[{session_id}] TTS _stream_tts_sentence: model_size={model_size}, emotion={emotion}, text='{text[:30]}...' enhanced='{enhanced_text_content[:30]}...' engine={type(engine).__name__ if engine else None}")
 
     # Look up reference audio for voice clone (optional — pass None if unavailable)
     reference_audio = None
     if persona_id:
         try:
-            # Try to get persona reference audio for voice clone
-            # This is optional — streaming works without it
-            from app.services.recordings import pipeline as rec_pipeline
-            # Persona reference audio path would go here if implemented
-        except Exception:
-            pass
+            # First try version-based reference audio
+            from app.api.tts_stream import _get_persona_reference_audio
+            reference_audio = _get_persona_reference_audio(persona_id)
+            if reference_audio:
+                log.info(f"[{session_id}] Using voice clone for persona {persona_id}: {reference_audio}")
+            else:
+                # Fall back to TTS engine's auto-find for voice_clone mode
+                from app.services.tts.qwen_tts_engine import FasterQwenTTSEngine
+                reference_audio = FasterQwenTTSEngine.find_reference_audio(persona_id)
+                if reference_audio:
+                    # Activate voice_clone mode on the engine
+                    engine.activate_voice_clone(persona_id, reference_audio)
+                    log.info(f"[{session_id}] Activated voice clone mode for persona {persona_id}: {reference_audio}")
+        except Exception as e:
+            log.warning(f"[{session_id}] Could not set up voice clone for persona {persona_id}: {e}")
 
     stream_start = time.perf_counter()
 
@@ -107,8 +119,8 @@ async def _stream_tts_sentence(
 
         first_chunk_sent = False
         async for event in engine.generate_streaming(
-            text=text.strip(),
-            instruct=instruct,
+            text=enhanced_text_content,
+            instruct=None,  # Path B: Use text enhancement, not instruct
             language="Chinese",
             reference_audio=reference_audio,
         ):
@@ -318,7 +330,6 @@ async def run_llm_stream(
     # TTS state: accumulates text AFTER emotion tag is removed
     tts_text_parts: list[str] = []
     current_emotion: Optional[str] = None
-    current_instruct: Optional[str] = None
     tts_sentence_idx = 0  # Index for tracking sentences streamed to client
     current_tts_task: Optional[asyncio.Task] = None  # Single TTS task (sequential, not parallel)
 
@@ -344,7 +355,7 @@ async def run_llm_stream(
                     # First emotion detected
                     tts_notified = True
                     current_emotion = new_emotion
-                    current_instruct = get_tts_instruct(new_emotion)
+                    # Path B: No instruct needed, using text enhancement
                     tts_text_parts = []  # Start fresh after tag
 
                     if cleaned_content:
@@ -564,9 +575,12 @@ async def run_llm_stream(
                     parsed = json.loads(full_text)
                     clean_text = parsed.get("content", parsed.get("text", ""))
                 except (json.JSONDecodeError, TypeError):
-                    # Fallback: remove ALL [情感: xxx] tags from text
+                    # Fallback: remove ALL emotion tag formats from text
                     import re
-                    clean_text = re.sub(r'[\[［](?:情感|感情)[:：][^\]］]*[\]］]\s*', '', clean_text).strip()
+                    # Remove legacy [情感:xxx] and [感情:xxx] tags
+                    clean_text = re.sub(r'[\[［](?:情感|感情)[:：][^\]＞]*[\]］]\s*', '', clean_text).strip()
+                    # Remove new [E:情緒] tags
+                    clean_text = re.sub(r'\[E:[^\]]+\]', '', clean_text).strip()
                 if clean_text:
                     clean_text = re.sub(r'[「」『』【】〖〗《》〈〉〘〙〚〛‹›«»]', '', clean_text).strip()
                 if tts_notified and clean_text:
@@ -582,7 +596,7 @@ async def run_llm_stream(
                         "type": "tts_ready",
                         "text": clean_text,
                         "emotion": current_emotion,
-                        "instruct": current_instruct,
+                        # instruct removed - Path B uses text enhancement
                         "stream_url": stream_url,
                     }))
 

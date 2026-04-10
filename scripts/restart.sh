@@ -64,7 +64,7 @@ get_pid() {
 }
 
 last_git_commit() {
-    git -C /workspace/voice-ai-pipeline-1 rev-parse HEAD 2>/dev/null
+    git -C /workspace/voice-ai-pipeline rev-parse HEAD 2>/dev/null
 }
 
 code_changed() {
@@ -74,7 +74,7 @@ code_changed() {
         last_commit=$(cat "$LAST_COMMIT_FILE")
     fi
     # True if commit changed OR if there are uncommitted changes
-    [ "$current_commit" != "$last_commit" ] || [ -n "$(git -C /workspace/voice-ai-pipeline-1 diff --name-only HEAD 2>/dev/null)" ]
+    [ "$current_commit" != "$last_commit" ] || [ -n "$(git -C /workspace/voice-ai-pipeline diff --name-only HEAD 2>/dev/null)" ]
 }
 
 # Get list of changed files (both committed AND uncommitted) since last restart
@@ -88,11 +88,11 @@ get_changed_files() {
 
     # Committed changes since last recorded commit
     if [ -n "$last_commit" ]; then
-        changed=$(git -C /workspace/voice-ai-pipeline-1 diff --name-only "$last_commit" HEAD 2>/dev/null)
+        changed=$(git -C /workspace/voice-ai-pipeline diff --name-only "$last_commit" HEAD 2>/dev/null)
     fi
 
     # Add uncommitted changes (diff HEAD vs working tree)
-    local uncommitted=$(git -C /workspace/voice-ai-pipeline-1 diff --name-only HEAD 2>/dev/null)
+    local uncommitted=$(git -C /workspace/voice-ai-pipeline diff --name-only HEAD 2>/dev/null)
     if [ -n "$uncommitted" ]; then
         if [ -n "$changed" ]; then
             changed="$changed"$'\n'"$uncommitted"
@@ -180,7 +180,7 @@ start_server() {
     export USE_QWEN_ASR="${USE_QWEN_ASR:-true}"
     export PYTHONUNBUFFERED=1
 
-    cd /workspace/voice-ai-pipeline-1
+    cd /workspace/voice-ai-pipeline
     nohup python3 -m app.main > "$LOG_FILE" 2>&1 &
     SERVER_PID=$!
     echo $SERVER_PID > "$PID_FILE"
@@ -304,9 +304,9 @@ do_watch() {
         inotifywait -m -r \
             --exclude '(__pycache__|\.pyc|\.pyo|\.git|data|\.claude)' \
             -e modify,create,delete \
-            /workspace/voice-ai-pipeline-1/app \
-            /workspace/voice-ai-pipeline-1/telemetry \
-            /workspace/voice-ai-pipeline-1/scripts \
+            /workspace/voice-ai-pipeline/app \
+            /workspace/voice-ai-pipeline/telemetry \
+            /workspace/voice-ai-pipeline/scripts \
             2>/dev/null | while read directory filename event; do
 
             # Check if it's a Python file or shell script

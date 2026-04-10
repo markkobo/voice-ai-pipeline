@@ -35,7 +35,7 @@ ENV HF_HOME=/root/.cache/huggingface
 ENV CUDA_VISIBLE_DEVICES=0
 
 # Working directory
-WORKDIR /workspace/voice-ai-pipeline-1
+WORKDIR /workspace/voice-ai-pipeline
 
 # Copy project (host mounts volume to this path)
 COPY . .

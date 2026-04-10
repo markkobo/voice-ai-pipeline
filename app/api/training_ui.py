@@ -243,8 +243,27 @@ async def training_page():
             min-width: 60px;
             text-align: center;
         }
-        .quality-good { background: #00ff8833; color: #00ff88; }
-        .quality-bad { background: #ff444433; color: #ff4444; }
+        .quality-excellent { background: #00ff8833; color: #00ff88; }
+        .quality-good { background: #ffdd0033; color: #ffdd00; }
+        .quality-fair { background: #ff880033; color: #ff8800; }
+        .quality-poor { background: #ff444433; color: #ff4444; }
+        .quality-flags {
+            display: flex;
+            gap: 4px;
+            flex-wrap: wrap;
+            margin-top: 2px;
+        }
+        .quality-flag {
+            font-size: 0.6rem;
+            padding: 1px 4px;
+            border-radius: 2px;
+            background: #333;
+            color: #888;
+        }
+        .quality-flag.active {
+            background: #ff444433;
+            color: #ff4444;
+        }
 
         /* Segment audio controls */
         .segment-audio {
@@ -906,22 +925,43 @@ async def training_page():
                     </div>
                     <div class="tree-segments" id="segments-${r.recording_id}">
                         ${speakers.length === 0 ? '<div style="padding:8px;color:#666;font-size:0.85rem;">無片段</div>' : ''}
-                        ${speakers.map(s => renderSegmentRow(r, s)).join('')}
+                        ${speakers.map((s, i) => renderSegmentRow(r, s, i)).join('')}
                     </div>
                 </div>
             `;
         }
 
-        function renderSegmentRow(r, segment) {
-            const segId = `${r.recording_id}_${segment.speaker_id}`;
-            const isSelected = selectedSegments.has(segId);
+        function renderSegmentRow(r, segment, index) {
+            // Selection key uses speaker_id (for grouping), but playback uses unique segId with index
+            const selectionKey = `${r.recording_id}_${segment.speaker_id}`;
+            const segId = `${r.recording_id}_${segment.speaker_id}_${index}`;
+            const isSelected = selectedSegments.has(selectionKey);
             const duration = segment.duration_seconds || 0;
             const transcript = segment.transcription?.text || '';
             const quality = segment.quality_score;
+            const qualityFlags = segment.quality_flags || {};
             const personaId = segment.persona_id || '';
             const listenerId = segment.listener_id || r.listener_id || '';
-            const qualityClass = quality !== null && quality !== undefined ? (quality >= 0.6 ? 'quality-good' : 'quality-bad') : '';
-            const qualityIcon = quality !== null && quality !== undefined ? (quality >= 0.6 ? '✓' : '⚠') : '';
+
+            // Quality badge with new classes
+            const qualityBadgeClass = quality !== null && quality !== undefined
+                ? (quality >= 0.8 ? 'quality-excellent' : quality >= 0.6 ? 'quality-good' : quality >= 0.4 ? 'quality-fair' : 'quality-poor')
+                : '';
+            const qualityLabel = quality !== null && quality !== undefined
+                ? (quality >= 0.8 ? '優秀' : quality >= 0.6 ? '良好' : quality >= 0.4 ? '一般' : '惡劣')
+                : '';
+            const qualityBadge = quality !== null && quality !== undefined
+                ? `<span class="quality-badge ${qualityBadgeClass}">${qualityLabel} ${(quality * 100).toFixed(0)}%</span>`
+                : '';
+
+            // Quality flags display
+            const flagsHtml = [];
+            if (qualityFlags.has_overlap) flagsHtml.push('<span class="quality-flag active">重疊</span>');
+            if (qualityFlags.low_energy) flagsHtml.push('<span class="quality-flag active">低能量</span>');
+            if (qualityFlags.high_noise) flagsHtml.push('<span class="quality-flag active">高噪音</span>');
+            if (qualityFlags.too_short) flagsHtml.push('<span class="quality-flag active">太短</span>');
+            const flagsDisplay = flagsHtml.length > 0 ? `<div class="quality-flags">${flagsHtml.join('')}</div>` : '';
+
             const truncated = transcript.length > 50 ? transcript.substring(0, 50) + '...' : transcript;
 
             return `
@@ -929,7 +969,7 @@ async def training_page():
                     <input type="checkbox" class="segment-checkbox"
                         id="chk-${segId.replace(/[^a-zA-Z0-9]/g, '_')}"
                         ${isSelected ? 'checked' : ''}
-                        onchange="toggleSegment('${segId}', this.checked)"
+                        onchange="toggleSegment('${selectionKey}', this.checked)"
                         onclick="event.stopPropagation()">
                     <div class="segment-info">
                         <span class="segment-speaker">${segment.speaker_id}</span>
@@ -937,12 +977,13 @@ async def training_page():
                             人格: ${getPersonaName(personaId)} | 對: ${getListenerName(listenerId)}
                         </div>
                         ${transcript ? `<div class="segment-transcript">${truncated}</div>` : ''}
+                        ${flagsDisplay}
                     </div>
                     <span class="segment-duration">${duration.toFixed(1)}s</span>
-                    ${quality !== null && quality !== undefined ? `<span class="quality-badge ${qualityClass}">${qualityIcon} 品質</span>` : ''}
+                    ${qualityBadge}
                     <div class="segment-audio" onclick="event.stopPropagation()">
                         <button class="audio-btn play" id="play-${segId.replace(/[^a-zA-Z0-9]/g, '_')}"
-                            onclick="playSegment('${r.recording_id}', '${segment.speaker_id}')">▶</button>
+                            onclick="playSegment('${r.recording_id}', '${segment.speaker_id}', ${segment.start_time}, ${segment.end_time}, '${segId.replace(/[^a-zA-Z0-9]/g, '_')}')">▶</button>
                         <button class="audio-btn pause" id="pause-${segId.replace(/[^a-zA-Z0-9]/g, '_')}"
                             onclick="pauseSegment()" style="display:none">⏸</button>
                         <button class="audio-btn" onclick="stopSegment()" style="background:#666">⏹</button>
@@ -980,8 +1021,10 @@ async def training_page():
             } else {
                 selectedSegments.delete(segId);
             }
-            // Update recording folder style
-            const recId = segId.split('_')[0];
+            // Update recording folder style - segId format: {recording_id}_{speaker_id}_{index}
+            const lastSep = segId.lastIndexOf('_');
+            const speakerId = segId.substring(0, lastSep);
+            const recId = speakerId.substring(0, speakerId.lastIndexOf('_'));
             const el = document.getElementById(`rec-${recId}`);
             if (el) {
                 const hasSelected = Array.from(selectedSegments).some(s => s.startsWith(recId + '_'));
@@ -991,31 +1034,35 @@ async def training_page():
         }
 
         // ==================== SEGMENT PLAYBACK ====================
-        function playSegment(recordingId, speakerId) {
+        function playSegment(recordingId, speakerId, startTime, endTime, safeId) {
             stopSegment();
 
-            const segId = `${recordingId}_${speakerId}`;
-            const safeId = segId.replace(/[^a-zA-Z0-9]/g, '_');
             const playBtn = document.getElementById(`play-${safeId}`);
             const pauseBtn = document.getElementById(`pause-${safeId}`);
 
-            log(`Playing segment: ${speakerId}`);
+            log(`Playing segment: ${speakerId} [${startTime?.toFixed(2)}s - ${endTime?.toFixed(2)}s]`);
 
-            fetch(`/api/recordings/${recordingId}/speaker/${speakerId}/audio`)
+            let url = `/api/recordings/${recordingId}/speaker/${speakerId}/audio`;
+            const params = [];
+            if (startTime !== null && startTime !== undefined) params.push(`start=${startTime}`);
+            if (endTime !== null && endTime !== undefined) params.push(`end=${endTime}`);
+            if (params.length > 0) url += '?' + params.join('&');
+
+            fetch(url)
                 .then(res => {
                     if (!res.ok) throw new Error('Audio not available');
                     return res.blob();
                 })
                 .then(blob => {
-                    const url = URL.createObjectURL(blob);
-                    activeAudio = new Audio(url);
-                    currentPlayingSegment = segId;
+                    const audioUrl = URL.createObjectURL(blob);
+                    activeAudio = new Audio(audioUrl);
+                    currentPlayingSegment = safeId;
 
-                    activeAudio.addEventListener('timeupdate', () => updateProgressUI(segId));
-                    activeAudio.addEventListener('ended', () => resetPlaybackUI(segId));
+                    activeAudio.addEventListener('timeupdate', () => updateProgressUI(safeId));
+                    activeAudio.addEventListener('ended', () => resetPlaybackUI(safeId));
                     activeAudio.addEventListener('error', (e) => {
                         log(`Audio error: ${e.message}`, 'error');
-                        resetPlaybackUI(segId);
+                        resetPlaybackUI(safeId);
                     });
 
                     playBtn.style.display = 'none';
@@ -1089,17 +1136,20 @@ async def training_page():
             const items = [];
 
             selectedSegments.forEach(segId => {
-                const [recId, speakerId] = segId.split('_', 1);
+                // segId format: {recording_id}_{speaker_id} (no index in selectionKey!)
+                // speaker_id is SPEAKER_00, recording_id is UUID with dashes
+                const recId = segId.substring(0, 36);  // UUID is first 36 chars (8-4-4-4-12 with dashes)
+                const actualSpeakerId = segId.substring(37);  // After underscore at position 36
                 const rec = allRecordings.find(r => r.recording_id === recId);
                 if (!rec) return;
-                const segment = rec.speaker_segments?.find(s => s.speaker_id === speakerId);
+                const segment = rec.speaker_segments?.find(s => s.speaker_id === actualSpeakerId);
                 if (!segment) return;
 
                 const duration = segment.duration_seconds || 0;
                 totalDuration += duration;
                 items.push({
                     recName: rec.folder_name || recId,
-                    speakerId,
+                    speakerId: actualSpeakerId,
                     duration,
                     segId
                 });
@@ -1150,9 +1200,11 @@ async def training_page():
             // Calculate total duration
             let totalDuration = 0;
             segmentIds.forEach(segId => {
-                const [recId, speakerId] = segId.split('_', 1);
+                // segId format: {recording_id}_{speaker_id} (UUID with dashes + underscore + SPEAKER_00)
+                const recId = segId.substring(0, 36);  // UUID is first 36 chars
+                const actualSpeakerId = segId.substring(37);  // After underscore at position 36
                 const rec = allRecordings.find(r => r.recording_id === recId);
-                const segment = rec?.speaker_segments?.find(s => s.speaker_id === speakerId);
+                const segment = rec?.speaker_segments?.find(s => s.speaker_id === actualSpeakerId);
                 if (segment) totalDuration += segment.duration_seconds || 0;
             });
 
@@ -1166,23 +1218,28 @@ async def training_page():
             progressSection.classList.add('visible');
 
             log(`Starting training: persona=${personaId}, segments=${segmentIds.length}`);
+            console.log('DEBUG segmentIds:', JSON.stringify(segmentIds));
 
             try {
+                const payload = {
+                    persona_id: personaId,
+                    segment_ids: segmentIds,
+                    rank,
+                    num_epochs: epochs,
+                    batch_size: batchSize,
+                };
+                console.log('DEBUG payload:', JSON.stringify(payload));
+
                 const response = await fetch('/api/training/versions', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        persona_id: personaId,
-                        segment_ids: segmentIds,
-                        rank,
-                        num_epochs: epochs,
-                        batch_size: batchSize,
-                    })
+                    body: JSON.stringify(payload)
                 });
 
                 if (!response.ok) {
                     const err = await response.json();
-                    throw new Error(err.detail || 'Training failed');
+                    console.log('DEBUG error response:', JSON.stringify(err));
+                    throw new Error(err.detail || `Training failed (${response.status})`);
                 }
 
                 const result = await response.json();
@@ -1265,14 +1322,19 @@ async def training_page():
         requestNotificationPermission();
 
         // ==================== VERSIONS TAB ====================
-        async function loadVersions(newVersionId = null) {
+        async function loadVersions(newVersionId = null, personaOverride = null) {
+            const queryPersona = personaOverride || personaSelect.value;
             try {
                 const [versionsRes, activeRes, recordingsRes] = await Promise.all([
                     fetch('/api/training/versions'),
-                    fetch('/api/training/active?persona_id=' + personaSelect.value),
+                    fetch('/api/training/active?persona_id=' + queryPersona),
                     fetch('/api/recordings/')
                 ]);
 
+                if (!versionsRes.ok) {
+                    const text = await versionsRes.text();
+                    throw new Error(`Failed to load versions (${versionsRes.status}): ${text.substring(0, 100)}`);
+                }
                 const versionsData = await versionsRes.json();
                 const activeData = await activeRes.json();
                 const recordingsData = await recordingsRes.json();
@@ -1308,6 +1370,17 @@ async def training_page():
                     const recordingCount = v.recording_ids_used?.length || manifest.recordings?.length || 0;
 
                     const displayName = v.nickname ? `${v.version_id}: ${v.nickname}` : v.version_id;
+                    const modelType = v.model_type || (v.rank ? 'lora' : 'sft');
+                    const modelTypeBadge = modelType === 'sft' || modelType === 'custom_voice'
+                        ? '<span class="version-badge" style="background: #9c27b0;">SFT</span>'
+                        : modelType === 'voicedesign'
+                        ? '<span class="version-badge" style="background: #2196f3;">VoiceDesign</span>'
+                        : '';
+                    const lrStr = v.learning_rate ? (v.learning_rate < 0.001 ? `${v.learning_rate * 1000}μ` : v.learning_rate) : '-';
+                    const batchInfo = v.batch_size ? `BS:${v.batch_size}` : '';
+                    const trainingSummary = v.training_summary
+                        ? `<div class="version-summary">${v.training_summary}</div>`
+                        : '';
 
                     return `
                         <div class="version-card ${isActive ? 'active' : ''} ${isNew ? 'new-version' : ''}" id="version-${v.version_id}">
@@ -1318,6 +1391,7 @@ async def training_page():
                                         ${isActive ? '<span class="version-badge active-tag">當前啟用</span>' : ''}
                                         ${isNew ? '<span class="version-badge new-tag">剛完成</span>' : ''}
                                         <span class="version-badge">(${v.persona_id})</span>
+                                        ${modelTypeBadge}
                                     </div>
                                 </div>
                                 <div class="version-meta">
@@ -1325,11 +1399,12 @@ async def training_page():
                                     完成: ${completedDate}
                                 </div>
                                 <div class="version-stats">
-                                    Loss: ${lossStr} | Epochs: ${v.num_epochs} | Rank: ${v.rank}
+                                    Loss: ${lossStr} | Epochs: ${v.num_epochs} | LR: ${lrStr} ${batchInfo}
                                 </div>
                                 <div style="font-size: 0.8rem; margin-top: 5px; color: #666;">
                                     片段: ${recordingCount} 個錄音, ${segmentCount} 個片段
                                 </div>
+                                ${trainingSummary}
                             </div>
                             <div class="version-actions">
                                 ${v.status === 'ready' && !isActive ? `<button class="btn-activate" onclick="activateVersion('${v.version_id}')">啟用</button>` : ''}
@@ -1412,7 +1487,14 @@ async def training_page():
                 if (!response.ok) throw new Error('Activation failed');
                 log(`Activated: ${versionId}`);
                 showToast(`版本 ${versionId} 已啟用`, 'success');
-                loadVersions();
+                // Find the activated version's persona to query correct active version
+                const versRes = await fetch('/api/training/versions');
+                const versData = await versRes.json();
+                const vers = versData.versions || [];
+                const activatedVers = vers.find(v => v.version_id === versionId);
+                const personaId = activatedVers?.persona_id || personaSelect.value;
+                // Re-fetch with correct persona
+                loadVersions(null, personaId);
             } catch (e) {
                 log(`Activation failed: ${e.message}`, 'error');
                 showToast('啟用失敗: ' + e.message, 'error');
@@ -1471,7 +1553,7 @@ async def training_page():
             event.target.classList.add('active');
             document.getElementById('training-tab').style.display = tab === 'training' ? 'block' : 'none';
             document.getElementById('versions-tab').style.display = tab === 'versions' ? 'block' : 'none';
-            if (tab === 'versions') loadVersions();
+            if (tab === 'versions') loadVersions(null, personaSelect.value);
         }
 
         // ==================== EVENT LISTENERS ====================

@@ -14,8 +14,9 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Body, HTTPException
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 from app.services.training_service import (
     ProgressTracker,
@@ -34,6 +35,19 @@ router = APIRouter(prefix="/api/training", tags=["training"])
 
 # Training job registry
 _training_jobs: dict[str, TrainingJob] = {}
+
+
+# ============================================================================
+# Request Models
+# ============================================================================
+
+class TrainingRequest(BaseModel):
+    """Request body for creating a training version."""
+    persona_id: str
+    segment_ids: list[str]
+    rank: int = 16
+    num_epochs: int = 10
+    batch_size: int = 4
 
 
 # ============================================================================
@@ -59,6 +73,13 @@ async def sse_progress_generator(version_id: str):
                     data = json.load(f)
 
                 if data.get("status") in ("ready", "failed"):
+                    # Update version manager status
+                    manager.update_version_status(
+                        version_id,
+                        data["status"],
+                        final_loss=data.get("final_loss"),
+                        training_time_seconds=data.get("training_time_seconds")
+                    )
                     if data["status"] == "ready":
                         yield f"data: {json.dumps({'event': 'complete', **data})}\n\n"
                     else:
@@ -106,13 +127,22 @@ async def list_versions(persona_id: Optional[str] = None):
     for v in versions:
         v_dict = v.to_dict()
 
-        # Include progress if training
+        # Include progress if training, and sync status if progress.json is complete
         if v.status == "training":
             version_dir = manager.get_version_dir(v.version_id)
             if version_dir:
                 progress = ProgressTracker.load(v.version_id, version_dir)
                 if progress:
                     v_dict["progress"] = progress.to_dict()
+                    # Sync status from progress.json if training is done
+                    if progress.status in ("ready", "failed"):
+                        manager.update_version_status(
+                            v.version_id,
+                            progress.status,
+                            final_loss=progress.current_loss if progress.status == "ready" else None,
+                            training_time_seconds=progress.elapsed_seconds if progress.status == "ready" else None
+                        )
+                        v_dict["status"] = progress.status
 
         result.append(v_dict)
 
@@ -160,26 +190,19 @@ async def get_training_status():
 # ============================================================================
 
 @router.post("/versions")
-async def create_training(
-    persona_id: str,
-    segment_ids: list[str],
-    rank: int = 16,
-    num_epochs: int = 10,
-    batch_size: int = 4,
-    recording_ids: Optional[list[str]] = None,
-):
+async def create_training(request: TrainingRequest):
     """
     Create and start a new training version.
 
     Args:
-        persona_id: Target persona to train
-        segment_ids: List of segment identifiers in format "{recording_id}_{speaker_id}"
-                     e.g., ["uuid123_SPEAKER_00", "uuid456_SPEAKER_01"]
-        rank: LoRA rank (4, 8, 16, 32)
-        num_epochs: Number of training epochs
-        batch_size: Batch size
-        recording_ids: (deprecated, ignored) List of recording IDs — use segment_ids instead
+        request: Training request with persona_id, segment_ids, rank, num_epochs, batch_size
     """
+    persona_id = request.persona_id
+    segment_ids = request.segment_ids
+    rank = request.rank
+    num_epochs = request.num_epochs
+    batch_size = request.batch_size
+
     from app.services.training import get_training_audio_for_persona
 
     # Validate persona
@@ -188,12 +211,16 @@ async def create_training(
         raise HTTPException(400, f"Invalid persona_id: {persona_id}")
 
     # Parse segment_ids to extract recording_ids
+    # segment_id format: {recording_id}_{speaker_id}
+    # recording_id is UUID (36 chars: 8-4-4-4-12 with dashes)
+    # speaker_id is like SPEAKER_00
     rec_ids_set = set()
     for seg_id in segment_ids:
-        parts = seg_id.rsplit("_", 1)
-        if len(parts) != 2:
-            raise HTTPException(400, f"Invalid segment_id format: {seg_id} (expected {{recording_id}}_{{speaker_id}})")
-        rec_ids_set.add(parts[0])
+        if len(seg_id) < 37:
+            raise HTTPException(400, f"Invalid segment_id format: {seg_id} (too short)")
+        rec_id = seg_id[:36]  # UUID is first 36 chars
+        speaker_id = seg_id[37:]  # After underscore at position 36
+        rec_ids_set.add(rec_id)
 
     recording_ids = list(rec_ids_set)
 
@@ -348,6 +375,40 @@ async def activate_version(version_id: str):
     return {"status": "activated", "version_id": version_id}
 
 
+@router.post("/voice-clone/activate")
+async def activate_voice_clone(
+    persona_id: str = "xiao_s",
+    ref_audio_path: Optional[str] = None,
+):
+    """
+    Activate voice clone mode using x-vector extraction from reference audio.
+
+    This approach extracts the speaker embedding at inference time from the reference audio,
+    providing better voice matching than SFT with limited training data.
+
+    Uses the Base model with generate_voice_clone_streaming and xvec_only=True.
+    """
+    try:
+        from app.services.tts.qwen_tts_engine import get_tts_engine
+        engine = get_tts_engine()
+        engine.activate_voice_clone(persona_id, ref_audio_path)
+
+        ref_used = getattr(engine, '_ref_audio_path', None)
+        model_type = getattr(engine, '_model_type', None)
+
+        logger.info(f"[TRAINING] Activated voice clone for {persona_id}, ref: {ref_used}")
+        return {
+            "status": "activated",
+            "mode": "voice_clone",
+            "persona_id": persona_id,
+            "ref_audio_path": ref_used,
+            "model_type": model_type,
+        }
+    except Exception as e:
+        logger.error(f"[TRAINING] Failed to activate voice clone: {e}")
+        raise HTTPException(500, str(e))
+
+
 @router.delete("/versions/{version_id}")
 async def delete_version(version_id: str):
     """Delete a training version."""
@@ -440,7 +501,7 @@ async def preview_version(version_id: str, text: Optional[str] = None):
 
         async for event in engine.generate_streaming(
             text=preview_text,
-            instruct="(natural, warm and friendly tone)",
+            instruct=None,  # Path B: Use merged model's voice, no instruct
             language="Chinese",
         ):
             if event.event == "audio_chunk" and event.audio_data:

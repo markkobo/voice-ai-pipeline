@@ -22,7 +22,7 @@ from app.logging_config import get_logger
 from app.services.tts import (
     get_tts_engine,
     TTSStreamEvent,
-    get_tts_instruct,
+    enhance_text,
 )
 from telemetry import metrics
 
@@ -113,18 +113,28 @@ async def tts_audio_stream(
         Bytes chunks of WAV audio (header first, then PCM chunks)
     """
     engine = get_tts_engine(model_size=model_size)
-    instruct = get_tts_instruct(emotion)
+    # Path B: Use text enhancement instead of instruct strings
+    enhanced_text = enhance_text(text, emotion)
 
     # Look up reference audio for voice clone if persona_id is provided
     reference_audio = None
     if persona_id:
+        # First try version-based reference audio (SFT/merged model path)
         reference_audio = _get_persona_reference_audio(persona_id)
         if reference_audio:
             log.info(f"Using voice clone for persona {persona_id}: {reference_audio}")
+        else:
+            # Fall back to TTS engine's auto-find for voice_clone mode
+            from app.services.tts.qwen_tts_engine import FasterQwenTTSEngine
+            reference_audio = FasterQwenTTSEngine.find_reference_audio(persona_id)
+            if reference_audio:
+                # Activate voice_clone mode on the engine
+                engine.activate_voice_clone(persona_id, reference_audio)
+                log.info(f"Activated voice clone mode for persona {persona_id}: {reference_audio}")
 
     log.info(
         f"TTS stream started: session={session_id}, emotion={emotion}, "
-        f"instruct={instruct}, voice_clone={reference_audio is not None}, text_len={len(text)}"
+        f"voice_clone={reference_audio is not None}, text_len={len(text)}"
     )
 
     sample_rate = 24000
@@ -135,8 +145,8 @@ async def tts_audio_stream(
 
     try:
         async for event in engine.generate_streaming(
-            text=text,
-            instruct=instruct,
+            text=enhanced_text,
+            instruct=None,  # Path B: Use text enhancement
             language="Chinese",
             reference_audio=reference_audio,
         ):
@@ -198,25 +208,35 @@ async def tts_raw_stream(
         Each yield sends a chunk immediately to enable true streaming playback.
     """
     engine = get_tts_engine(model_size=model_size)
-    instruct = get_tts_instruct(emotion)
+    # Path B: Use text enhancement instead of instruct strings
+    enhanced_text = enhance_text(text, emotion)
 
     # Look up reference audio for voice clone if persona_id is provided
     reference_audio = None
     if persona_id:
+        # First try version-based reference audio (SFT/merged model path)
         reference_audio = _get_persona_reference_audio(persona_id)
         if reference_audio:
             log.info(f"Using voice clone for persona {persona_id}: {reference_audio}")
+        else:
+            # Fall back to TTS engine's auto-find for voice_clone mode
+            from app.services.tts.qwen_tts_engine import FasterQwenTTSEngine
+            reference_audio = FasterQwenTTSEngine.find_reference_audio(persona_id)
+            if reference_audio:
+                # Activate voice_clone mode on the engine
+                engine.activate_voice_clone(persona_id, reference_audio)
+                log.info(f"Activated voice clone mode for persona {persona_id}: {reference_audio}")
 
     log.info(
         f"TTS raw stream started: session={session_id}, emotion={emotion}, "
-        f"instruct={instruct}, voice_clone={reference_audio is not None}, text_len={len(text)}"
+        f"voice_clone={reference_audio is not None}, text_len={len(text)}"
     )
 
     try:
         # Stream chunks as they arrive (not buffered) - yields immediately per chunk
         async for event in engine.generate_streaming(
-            text=text,
-            instruct=instruct,
+            text=enhanced_text,
+            instruct=None,  # Path B: Use text enhancement
             language="Chinese",
             reference_audio=reference_audio,
         ):

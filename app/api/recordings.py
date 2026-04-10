@@ -8,6 +8,7 @@ Handles:
 - Audio streaming
 """
 
+import json
 import os
 import shutil
 import logging
@@ -299,25 +300,97 @@ async def stream_recording_audio(recording_id: str, stage: str = "enhanced"):
 
 @router.get("/{recording_id}/download")
 async def download_recording(recording_id: str):
-    """Download recording as ZIP with all processed files."""
-    # TODO: Implement ZIP download
-    raise HTTPException(501, "Not implemented yet")
+    """Download recording audio file."""
+    # First check recordings index
+    recordings_index = Path("data/recordings/index.json")
+    audio_path = None
+
+    if recordings_index.exists():
+        with open(recordings_index) as f:
+            data = json.load(f)
+        for rec in data.get("recordings", []):
+            if rec.get("recording_id") == recording_id:
+                folder = rec.get("folder_name", "")
+                # Try to find audio file
+                for pattern in ["audio.wav", "audio_processed.wav"]:
+                    p = Path(f"data/recordings/raw/{folder}/{pattern}")
+                    if p.exists():
+                        audio_path = p
+                        break
+                    p = Path(f"data/recordings/enhanced/{folder}/{pattern}")
+                    if p.exists():
+                        audio_path = p
+                        break
+                break
+
+    # If not found, try /tmp for test files
+    if audio_path is None:
+        test_path = Path(f"/tmp/{recording_id}.wav")
+        if test_path.exists():
+            audio_path = test_path
+
+    if audio_path and audio_path.exists():
+        return FileResponse(
+            str(audio_path),
+            media_type="audio/wav",
+            filename=audio_path.name,
+        )
+
+    raise HTTPException(404, "Recording not found")
 
 
 @router.get("/{recording_id}/speaker/{speaker_id}/audio")
-async def get_speaker_audio(recording_id: str, speaker_id: str):
+async def get_speaker_audio(
+    recording_id: str,
+    speaker_id: str,
+    start: Optional[float] = None,
+    end: Optional[float] = None,
+):
     """
-    Stream audio file for a specific speaker.
+    Stream audio file for a specific speaker, optionally sliced by time range.
 
     Args:
         recording_id: Recording ID
         speaker_id: Speaker ID (e.g., "SPEAKER_00")
+        start: Start time in seconds (optional)
+        end: End time in seconds (optional)
     """
+    import subprocess
+    from pathlib import Path
+
     for paths in list_all_recordings():
         if paths.recording_id == recording_id:
             speaker_path = paths.speakers_folder / f"{speaker_id}.wav"
             if not speaker_path.exists():
                 raise HTTPException(404, f"Speaker audio not found: {speaker_id}")
+
+            # If time range is specified, slice the audio
+            if start is not None or end is not None:
+                import tempfile
+                start_val = start or 0.0
+                end_val = end
+                output_path = Path(tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name)
+                try:
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-i", str(speaker_path),
+                        "-ss", str(start_val),
+                    ]
+                    if end_val is not None:
+                        cmd.extend(["-to", str(end_val)])
+                    cmd.extend(["-acodec", "pcm_s16le", "-ar", "24000", "-ac", "1", str(output_path)])
+                    subprocess.run(cmd, capture_output=True, check=True)
+                    return FileResponse(
+                        str(output_path),
+                        media_type="audio/wav",
+                        filename=f"{speaker_id}_{start_val:.2f}_{end_val or 'end'}.wav",
+                    )
+                except subprocess.CalledProcessError as e:
+                    raise HTTPException(500, f"Audio slice failed: {e.stderr}")
+                finally:
+                    # Clean up temp file after response is sent
+                    import asyncio
+                    asyncio.get_event_loop().call_later(60, lambda: output_path.unlink(missing_ok=True))
 
             return FileResponse(
                 str(speaker_path),

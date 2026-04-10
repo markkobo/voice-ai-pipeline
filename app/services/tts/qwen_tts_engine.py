@@ -47,7 +47,7 @@ class FasterQwenTTSEngine:
         "1.7B": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
     }
     # Merged LoRA models (weight merging replaces need for PEFT at inference)
-    MERGED_MODELS_DIR = Path(os.environ.get("MODELS_DIR", "/workspace/voice-ai-pipeline-1/data/models"))
+    MERGED_MODELS_DIR = Path(os.environ.get("MODELS_DIR", "/workspace/voice-ai-pipeline/data/models"))
 
     def __init__(
         self,
@@ -67,6 +67,9 @@ class FasterQwenTTSEngine:
         self._warmed_up = False
         self._current_lora_path: Optional[str] = None
         self._merged_model_path: Optional[str] = None
+        self._model_type: Optional[str] = None  # "voicedesign", "custom_voice", or "voice_clone"
+        self._speaker_name: Optional[str] = None  # speaker name for custom_voice models
+        self._ref_audio_path: Optional[str] = None  # reference audio for voice_clone mode
 
     def _ensure_loaded(self):
         """Lazy load the model(s)."""
@@ -88,17 +91,21 @@ class FasterQwenTTSEngine:
             except Exception as e:
                 log.warning(f"Failed to load merged model: {e}, falling back to base")
 
-        log.info(f"Loading TTS model: {self.voicedesign_name} on {self.device}")
+        # Determine which model to load based on mode
+        is_voice_clone = getattr(self, '_model_type', None) == "voice_clone"
+        model_name = self.base_model_name if is_voice_clone else self.voicedesign_name
+
+        log.info(f"Loading TTS model: {model_name} on {self.device} (mode: {self._model_type or 'voicedesign'})")
 
         try:
-            self._model = FasterQwen3TTS.from_pretrained(self.voicedesign_name, device=self.device)
-            log.info(f"TTS model loaded (FasterQwen3TTS): {self.voicedesign_name}")
+            self._model = FasterQwen3TTS.from_pretrained(model_name, device=self.device)
+            log.info(f"TTS model loaded (FasterQwen3TTS): {model_name}")
         except Exception as e:
             log.warning(f"FasterQwen3TTS failed to load: {e}, trying raw Qwen3TTSModel")
             from qwen_tts import Qwen3TTSModel
-            self._raw_model = Qwen3TTSModel.from_pretrained(self.voicedesign_name, device_map="auto")
+            self._raw_model = Qwen3TTSModel.from_pretrained(model_name, device_map="auto")
             self._use_fallback = True
-            log.info(f"TTS model loaded (raw Qwen3TTSModel): {self.voicedesign_name}")
+            log.info(f"TTS model loaded (raw Qwen3TTSModel): {model_name}")
 
         self._is_loaded = True
 
@@ -175,8 +182,26 @@ class FasterQwenTTSEngine:
             log.info(f"[TTS] Merged model already active: {merged_path}")
             return
 
+        # Detect model type from config
+        config_path = merged_path / "config.json"
+        model_type = "voicedesign"
+        speaker_name = version.persona_id  # default to persona_id
+        if config_path.exists():
+            import json
+            with open(config_path) as f:
+                config = json.load(f)
+            model_type = config.get("tts_model_type", "voicedesign")
+            # Extract speaker name from talker_config.spk_id
+            talker_config = config.get("talker_config", {})
+            spk_id = talker_config.get("spk_id", {})
+            if spk_id:
+                speaker_name = list(spk_id.keys())[0]  # Get first speaker name
+        log.info(f"[TTS] Model type: {model_type}, speaker: {speaker_name}")
+
         self._merged_model_path = merged_path_str
         self._current_lora_path = str(lora_dir)
+        self._model_type = model_type
+        self._speaker_name = speaker_name
         log.info(f"[TTS] Activated merged model: {merged_path}")
 
         # Reload model if already loaded to use merged weights
@@ -189,7 +214,104 @@ class FasterQwenTTSEngine:
         """Deactivate merged model and use base VoiceDesign model."""
         self._current_lora_path = None
         self._merged_model_path = None
+        self._model_type = None
+        self._speaker_name = None
+        self._ref_audio_path = None
         log.info("[TTS] Merged model deactivated")
+
+    @staticmethod
+    def find_reference_audio(persona_id: str) -> Optional[str]:
+        """
+        Find the best reference audio file for a persona.
+
+        Looks for extracted speaker audio in recordings, sorted by file size
+        (largest = best quality).
+
+        Args:
+            persona_id: The persona ID (e.g., "xiao_s")
+
+        Returns:
+            Path to the best reference audio file, or None if not found
+        """
+        from pathlib import Path
+        import os
+
+        # Map persona_id to folder prefix pattern
+        # e.g., "xiao_s" -> "default_xiao_s_*"
+        persona_prefix_map = {
+            "xiao_s": "default_xiao_s_",
+            "caregiver": "default_caregiver_",
+        }
+
+        prefix = persona_prefix_map.get(persona_id, f"default_{persona_id}_")
+        recordings_raw = Path("/workspace/voice-ai-pipeline/data/recordings/raw")
+
+        if not recordings_raw.exists():
+            return None
+
+        # Find all matching folders
+        matching_dirs = [d for d in recordings_raw.iterdir() if d.is_dir() and d.name.startswith(prefix)]
+
+        # Find the speaker audio in each folder, track by size
+        best_audio = None
+        best_size = 0
+
+        for folder in matching_dirs:
+            speaker_audio = folder / "speakers" / "SPEAKER_00.wav"
+            if speaker_audio.exists():
+                size = speaker_audio.stat().st_size
+                if size > best_size:
+                    best_size = size
+                    best_audio = str(speaker_audio)
+
+        if best_audio:
+            log = get_logger(__name__, component="tts")
+            log.info(f"[TTS] Found reference audio for {persona_id}: {best_audio} ({best_size} bytes)")
+        else:
+            log = get_logger(__name__, component="tts")
+            log.warning(f"[TTS] No reference audio found for {persona_id}")
+
+        return best_audio
+
+    def activate_voice_clone(self, persona_id: str, ref_audio_path: Optional[str] = None):
+        """
+        Activate voice clone mode using x-vector extraction from reference audio.
+
+        Uses the Base model with generate_voice_clone_streaming and xvec_only=True.
+        This approach extracts the speaker embedding at inference time, providing
+        better voice matching than SFT with limited training data.
+
+        Args:
+            persona_id: The persona ID (e.g., "xiao_s")
+            ref_audio_path: Path to reference audio file (extracted speaker audio).
+                           If None, will auto-find from recordings.
+        """
+        import os
+        log = get_logger(__name__, component="tts")
+
+        # Auto-find reference audio if not provided
+        if ref_audio_path is None:
+            ref_audio_path = self.find_reference_audio(persona_id)
+            if ref_audio_path is None:
+                log.warning(f"[TTS] Could not find reference audio for {persona_id}")
+                return
+        elif not os.path.exists(ref_audio_path):
+            log.warning(f"[TTS] Reference audio not found: {ref_audio_path}")
+            return
+
+        self._ref_audio_path = ref_audio_path
+        self._model_type = "voice_clone"
+        self._speaker_name = persona_id
+        self._current_lora_path = None
+        self._merged_model_path = None
+
+        log.info(f"[TTS] Activated voice clone mode for {persona_id} with ref: {ref_audio_path}")
+
+        # Reload model if already loaded to use Base model for voice clone
+        if self._is_loaded:
+            self._is_loaded = False
+            self._warmed_up = False
+            self._ensure_loaded()
 
     async def generate_streaming(
         self,
@@ -214,10 +336,12 @@ class FasterQwenTTSEngine:
         if not text:
             return
 
-        if instruct:
-            final_instruct = f"{instruct}"
+        # Path B: If instruct is None, pass empty string to minimize instruct influence
+        # This allows the merged model's baked voice characteristics to come through
+        if instruct is None:
+            final_instruct = ""
         else:
-            final_instruct = "(natural, conversational tone)"
+            final_instruct = instruct
 
         # With merged model, the voice is baked in - no reference needed
         using_merged = hasattr(self, '_merged_model_path') and self._merged_model_path is not None
@@ -234,16 +358,59 @@ class FasterQwenTTSEngine:
             import queue
             chunk_queue = queue.Queue()
 
+            # Determine generation method based on model type
+            is_custom_voice = getattr(self, '_model_type', None) == "custom_voice"
+            is_voice_clone = getattr(self, '_model_type', None) == "voice_clone"
+            speaker_name = getattr(self, '_speaker_name', None) or "default"
+            ref_audio = getattr(self, '_ref_audio_path', None)
+
             def chunk_producer():
                 try:
-                    for audio_chunk, sr, timing in self._model.generate_voice_design_streaming(
-                        text=text,
-                        instruct=final_instruct,
-                        language=language,
-                        chunk_size=12,
-                    ):
-                        audio_bytes = (audio_chunk * 32767).astype(np.int16).tobytes()
-                        chunk_queue.put((audio_bytes, sr or 24000))
+                    if is_voice_clone:
+                        # Voice clone uses Base model with x-vector extraction from reference audio
+                        # xvec_only=True: use only speaker embedding, no phoneme bleed-through
+                        import torch
+                        torch.manual_seed(42)
+                        torch.cuda.manual_seed_all(42)
+                        for audio_chunk, sr, timing in self._model.generate_voice_clone_streaming(
+                            text=text,
+                            language=language,
+                            ref_audio=ref_audio,
+                            ref_text="",  # Required but ignored when xvec_only=True
+                            xvec_only=True,
+                            do_sample=False,
+                            temperature=0.0,
+                            chunk_size=12,
+                        ):
+                            audio_bytes = (audio_chunk * 32767).astype(np.int16).tobytes()
+                            chunk_queue.put((audio_bytes, sr or 24000))
+                    elif is_custom_voice:
+                        # Custom voice model uses speaker name instead of instruct
+                        # Use deterministic generation to ensure consistent voice
+                        import torch
+                        torch.manual_seed(42)
+                        torch.cuda.manual_seed_all(42)
+                        for audio_chunk, sr, timing in self._model.generate_custom_voice_streaming(
+                            text=text,
+                            speaker=speaker_name,
+                            language=language,
+                            instruct=final_instruct if final_instruct else None,
+                            do_sample=False,
+                            temperature=0.0,
+                            chunk_size=12,
+                        ):
+                            audio_bytes = (audio_chunk * 32767).astype(np.int16).tobytes()
+                            chunk_queue.put((audio_bytes, sr or 24000))
+                    else:
+                        # VoiceDesign model uses instruct
+                        for audio_chunk, sr, timing in self._model.generate_voice_design_streaming(
+                            text=text,
+                            instruct=final_instruct,
+                            language=language,
+                            chunk_size=12,
+                        ):
+                            audio_bytes = (audio_chunk * 32767).astype(np.int16).tobytes()
+                            chunk_queue.put((audio_bytes, sr or 24000))
                     chunk_queue.put(None)
                 except Exception as e:
                     log.error(f"Chunk producer error: {e}")
@@ -274,11 +441,27 @@ class FasterQwenTTSEngine:
                 raw_model = self._raw_model if self._raw_model is not None else self._model
                 def generate():
                     try:
-                        audio_arrays, sr = raw_model.generate_voice_design(
-                            text=text,
-                            instruct=final_instruct,
-                            language=language,
-                        )
+                        if is_voice_clone:
+                            audio_arrays, sr = raw_model.generate_voice_clone(
+                                text=text,
+                                language=language,
+                                ref_audio=ref_audio,
+                                ref_text="",
+                                xvec_only=True,
+                            )
+                        elif is_custom_voice:
+                            audio_arrays, sr = raw_model.generate_custom_voice(
+                                text=text,
+                                speaker=speaker_name,
+                                language=language,
+                                instruct=final_instruct if final_instruct else None,
+                            )
+                        else:
+                            audio_arrays, sr = raw_model.generate_voice_design(
+                                text=text,
+                                instruct=final_instruct,
+                                language=language,
+                            )
                         if isinstance(audio_arrays, (list, tuple)):
                             full_audio = np.concatenate(audio_arrays) if len(audio_arrays) > 1 else audio_arrays[0]
                         else:
@@ -301,23 +484,40 @@ class FasterQwenTTSEngine:
             yield TTSStreamEvent(event="done")
             return
 
-            pool.shutdown(wait=False)
-            yield TTSStreamEvent(event="done")
-            return
-
         # Fallback path (non-streaming)
         # Triggered when: (a) _raw_model was loaded as primary model, OR
         # (b) streaming path failed with CUDA graph error (_use_fallback=True, _raw_model=None)
         if self._use_fallback or self._raw_model is not None:
             # Use _raw_model if available, otherwise fall back to self._model.generate_voice_design
             raw_model = self._raw_model if self._raw_model is not None else self._model
+            is_custom_voice = getattr(self, '_model_type', None) == "custom_voice"
+            is_voice_clone = getattr(self, '_model_type', None) == "voice_clone"
+            speaker_name = getattr(self, '_speaker_name', None) or "default"
+            ref_audio = getattr(self, '_ref_audio_path', None)
             def generate():
                 try:
-                    audio_arrays, sr = raw_model.generate_voice_design(
-                        text=text,
-                        instruct=final_instruct,
-                        language=language,
-                    )
+                    if is_voice_clone:
+                        # Voice clone fallback - use non-streaming generate_voice_clone
+                        audio_arrays, sr = raw_model.generate_voice_clone(
+                            text=text,
+                            language=language,
+                            ref_audio=ref_audio,
+                            ref_text="",  # Required but ignored when xvec_only=True
+                            xvec_only=True,
+                        )
+                    elif is_custom_voice:
+                        audio_arrays, sr = raw_model.generate_custom_voice(
+                            text=text,
+                            speaker=speaker_name,
+                            language=language,
+                            instruct=final_instruct if final_instruct else None,
+                        )
+                    else:
+                        audio_arrays, sr = raw_model.generate_voice_design(
+                            text=text,
+                            instruct=final_instruct,
+                            language=language,
+                        )
                     if isinstance(audio_arrays, (list, tuple)):
                         full_audio = np.concatenate(audio_arrays) if len(audio_arrays) > 1 else audio_arrays[0]
                     else:

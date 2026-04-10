@@ -17,7 +17,7 @@ from dataclasses import dataclass, asdict, field
 logger = logging.getLogger(__name__)
 
 # Base directory for models (configurable via env var)
-MODELS_DIR = Path(os.environ.get("MODELS_DIR", "/workspace/voice-ai-pipeline-1/data/models"))
+MODELS_DIR = Path(os.environ.get("MODELS_DIR", "/workspace/voice-ai-pipeline/data/models"))
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Version index file
@@ -33,6 +33,7 @@ class TrainingVersion:
     nickname: Optional[str] = None
     base_model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
     lora_path: Optional[str] = None
+    model_type: Optional[str] = None  # "custom_voice" for SFT, None for LoRA
     rank: int = 16
     learning_rate: float = 1e-4
     num_epochs: int = 10
@@ -50,6 +51,20 @@ class TrainingVersion:
         d["num_recordings_used"] = len(self.recording_ids_used)
         d["display_name"] = self.nickname or self.version_id
         return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "TrainingVersion":
+        """Create TrainingVersion from dict, filtering extra fields from to_dict()."""
+        # Fields that TrainingVersion actually has
+        fields = {
+            "version_id", "persona_id", "status", "nickname", "base_model",
+            "lora_path", "model_type", "rank", "learning_rate", "num_epochs", "batch_size",
+            "final_loss", "training_time_seconds", "recording_ids_used",
+            "segment_ids_used", "num_recordings_used", "created_at", "completed_at"
+        }
+        # Filter to only known fields
+        filtered = {k: v for k, v in d.items() if k in fields}
+        return cls(**filtered)
 
 
 @dataclass
@@ -73,7 +88,7 @@ class VersionManager:
             with open(VERSION_INDEX_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
-            self._versions = [TrainingVersion(**v) for v in data.get("versions", [])]
+            self._versions = [TrainingVersion.from_dict(v) for v in data.get("versions", [])]
 
             active = data.get("active_version")
             if active:
@@ -303,12 +318,14 @@ def get_training_audio_for_persona(
 
     for seg_id in (segment_ids or []):
         # Parse segment_id = "{recording_id}_{speaker_id}"
-        parts = seg_id.rsplit("_", 1)
-        if len(parts) != 2:
-            logger.warning(f"[TRAINING] Invalid segment_id format: {seg_id}")
+        # recording_id is UUID (36 chars: 8-4-4-4-12 with dashes)
+        # speaker_id is like SPEAKER_00
+        if len(seg_id) < 37:
+            logger.warning(f"[TRAINING] Invalid segment_id format (too short): {seg_id}")
             continue
 
-        rec_id, speaker_id = parts
+        rec_id = seg_id[:36]  # UUID is first 36 chars
+        speaker_id = seg_id[37:]  # After underscore at position 36
 
         # Find recording
         rec = rec_by_id.get(rec_id)

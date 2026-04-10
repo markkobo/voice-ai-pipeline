@@ -400,6 +400,118 @@ async def recordings_page():
         }
 
         /* Recording actions */
+
+        /* Transcription section */
+        .transcription-container {
+            border-top: 1px solid #1a2a4a;
+            background: #0a1525;
+            margin-left: 30px;
+            margin-right: 15px;
+            border-radius: 0 0 6px 6px;
+        }
+        .transcription-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 15px;
+            cursor: pointer;
+            transition: background 0.15s;
+            font-size: 0.85rem;
+        }
+        .transcription-header:hover {
+            background: #122035;
+        }
+        .transcription-label {
+            color: #4a9eff;
+            font-weight: 500;
+            white-space: nowrap;
+        }
+        .transcription-preview {
+            flex: 1;
+            color: #888;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .transcription-confidence {
+            color: #4ade80;
+            font-size: 0.75rem;
+            background: #4ade8022;
+            padding: 2px 6px;
+            border-radius: 3px;
+        }
+        .transcription-content {
+            padding: 0 15px 12px 15px;
+            border-top: 1px solid #1a2a4a;
+        }
+        .transcription-text {
+            color: #c8d8e8;
+            font-size: 0.88rem;
+            line-height: 1.7;
+            white-space: pre-wrap;
+            word-break: break-word;
+            padding-top: 10px;
+        }
+
+        /* Quality indicator badges */
+        .quality-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.72rem;
+            font-weight: 500;
+        }
+        .quality-badge.quality-excellent {
+            background: #00ff8833;
+            color: #00ff88;
+        }
+        .quality-badge.quality-good {
+            background: #ffdd0033;
+            color: #ffdd00;
+        }
+        .quality-badge.quality-fair {
+            background: #ff880033;
+            color: #ff8800;
+        }
+        .quality-badge.quality-poor {
+            background: #ff444433;
+            color: #ff4444;
+        }
+        .quality-flags {
+            display: flex;
+            gap: 4px;
+            flex-wrap: wrap;
+        }
+        .quality-flag {
+            font-size: 0.65rem;
+            padding: 1px 4px;
+            border-radius: 2px;
+            background: #333;
+            color: #888;
+        }
+        .quality-flag.active {
+            background: #ff444433;
+            color: #ff4444;
+        }
+        .speaker-segments-count {
+            font-size: 0.7rem;
+            color: #666;
+            margin-left: 8px;
+        }
+        .speaker-transcript {
+            display: block;
+            font-size: 0.75rem;
+            color: #888;
+            margin-top: 2px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            max-width: 300px;
+        }
+
+        /* Recording actions */
         .recording-actions {
             display: flex;
             gap: 6px;
@@ -1054,7 +1166,6 @@ async def recordings_page():
 
         function renderRecordingFolder(r) {
             const speakers = r.speaker_segments || [];
-            const uniqueSpeakers = [...new Set(speakers.map(s => s.speaker_id))].sort();
             const statusClass = r.status === 'processed' ? 'ok' : r.status === 'failed' ? 'failed' : r.status === 'processing' ? 'processing' : '';
             const statusText = r.status === 'raw' ? '待處理' : r.status === 'processed' ? '已完成' : r.status === 'processing' ? '處理中' : r.status === 'failed' ? '失敗' : r.status;
 
@@ -1063,6 +1174,44 @@ async def recordings_page():
             const durationText = r.duration_seconds ? r.duration_seconds.toFixed(1) + 's' : '-';
 
             const canPlay = r.status === 'processed' || r.status === 'raw';
+
+            // Group segments by speaker_id and aggregate data
+            const speakerGroups = {};
+            for (const seg of speakers) {
+                const sid = seg.speaker_id;
+                if (!speakerGroups[sid]) {
+                    speakerGroups[sid] = {
+                        speaker_id: sid,
+                        total_duration: 0,
+                        transcripts: [],
+                        quality_scores: [],
+                        segments: [],
+                        persona_id: seg.persona_id || null,
+                        listener_id: seg.listener_id || null,
+                        audio_path: seg.audio_path || null,
+                    };
+                }
+                speakerGroups[sid].total_duration += seg.duration_seconds || 0;
+                speakerGroups[sid].segments.push(seg);
+                if (seg.transcription?.text) {
+                    speakerGroups[sid].transcripts.push(seg.transcription.text);
+                }
+                if (seg.quality_score !== null && seg.quality_score !== undefined) {
+                    speakerGroups[sid].quality_scores.push(seg.quality_score);
+                }
+                // Use first non-null persona/listener
+                if (!speakerGroups[sid].persona_id && seg.persona_id) {
+                    speakerGroups[sid].persona_id = seg.persona_id;
+                }
+                if (!speakerGroups[sid].listener_id && seg.listener_id) {
+                    speakerGroups[sid].listener_id = seg.listener_id;
+                }
+                // Use first available audio path
+                if (!speakerGroups[sid].audio_path && seg.audio_path) {
+                    speakerGroups[sid].audio_path = seg.audio_path;
+                }
+            }
+            const uniqueSpeakers = Object.values(speakerGroups).sort((a, b) => a.speaker_id.localeCompare(b.speaker_id));
 
             return `
                 <div class="tree-recording" id="rec-${r.recording_id}">
@@ -1076,19 +1225,95 @@ async def recordings_page():
                         </div>
                         <div class="recording-meta">
                             <span>⏱ ${durationText}</span>
-                            ${uniqueSpeakers.length > 0 ? `<span>🔊 ${uniqueSpeakers.length} 段</span>` : ''}
+                            ${uniqueSpeakers.length > 0 ? `<span>🔊 ${uniqueSpeakers.length} 說話者</span>` : ''}
                         </div>
                         <div class="recording-actions" onclick="event.stopPropagation()">
                             ${canPlay ? `<button class="action-btn play" onclick="playFullRecording('${r.recording_id}')" title="播放全部">⏵</button>` : ''}
-                            ${r.status === 'processed' || r.status === 'raw' ? `<button class="action-btn parse" onclick="parseRecording('${r.recording_id}')">${r.status === 'processed' ? '重新解析' : '解析'}</button>` : ''}
+                            ${r.status === 'processed' || r.status === 'raw' || r.status === 'failed' ? `<button class="action-btn parse" onclick="parseRecording('${r.recording_id}')">${r.status === 'failed' ? '重新解析' : r.status === 'processed' ? '重新解析' : '解析'}</button>` : ''}
                             ${r.status === 'processing' ? `<span class="loading"></span>` : ''}
                             <button class="action-btn delete" onclick="confirmDeleteRecording('${r.recording_id}')">✕</button>
+                        </div>
+                    </div>
+                    <div class="transcription-container" id="transcription-${r.recording_id}">
+                        <div class="transcription-header" onclick="toggleTranscription('${r.recording_id}')">
+                            <span class="expand-icon">▶</span>
+                            <span class="transcription-label">📝 轉譯稿</span>
+                            ${r.transcription?.text ? `<span class="transcription-preview">${r.transcription.text.substring(0, 60)}${r.transcription.text.length > 60 ? '...' : ''}</span>` : '<span style="color:#888">無轉譯稿</span>'}
+                            ${r.transcription?.confidence ? `<span class="transcription-confidence">${(r.transcription.confidence * 100).toFixed(0)}%</span>` : ''}
+                        </div>
+                        <div class="transcription-content" id="transcription-content-${r.recording_id}" style="display:none;">
+                            <div class="transcription-text">${r.transcription?.text || '無轉譯稿'}</div>
                         </div>
                     </div>
                     <div class="segments-container" id="segments-${r.recording_id}">
                         ${r.status === 'processing' ? renderProcessingState(r) : ''}
                         ${uniqueSpeakers.length === 0 && r.status !== 'processing' ? '<div style="padding:12px;color:#888;font-size:0.85rem;">尚無分段</div>' : ''}
-                        ${speakers.map(s => renderSegmentRow(r, s)).join('')}
+                        ${uniqueSpeakers.map(sg => renderSpeakerRow(r, sg)).join('')}
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderSpeakerRow(r, speakerGroup) {
+            const speakerId = speakerGroup.speaker_id;
+            const duration = speakerGroup.total_duration;
+            const transcript = speakerGroup.transcripts.join(' ').substring(0, 100);
+            const quality = speakerGroup.quality_scores.length > 0
+                ? Math.max(...speakerGroup.quality_scores)
+                : null;
+            const personaId = speakerGroup.persona_id || r.speaker_labels?.[speakerId] || '';
+            const listenerId = speakerGroup.listener_id || r.listener_id || '';
+            const segmentCount = speakerGroup.segments?.length || 0;
+
+            // Quality badge class
+            const qualityClass = quality !== null
+                ? (quality >= 0.8 ? 'quality-excellent' : quality >= 0.6 ? 'quality-good' : quality >= 0.4 ? 'quality-fair' : 'quality-poor')
+                : '';
+            const qualityLabel = quality !== null
+                ? (quality >= 0.8 ? '優秀' : quality >= 0.6 ? '良好' : quality >= 0.4 ? '一般' : '惡劣')
+                : '';
+            const qualityBadge = quality !== null
+                ? `<span class="quality-badge ${qualityClass}">${qualityLabel} ${(quality * 100).toFixed(0)}%</span>`
+                : '';
+
+            return `
+                <div class="segment-row" id="seg-${r.recording_id}-${speakerId}">
+                    <span class="speaker-icon">👤</span>
+                    <div class="speaker-info">
+                        <span class="speaker-name">${speakerId}</span>
+                        <span class="speaker-segments-count">${segmentCount} 段</span>
+                        ${qualityBadge}
+                        ${transcript ? `<span class="speaker-transcript">${transcript}${transcript.length >= 100 ? '...' : ''}</span>` : ''}
+                    </div>
+                    <div class="segment-dropdowns">
+                        <div class="dropdown-group">
+                            <label>人格</label>
+                            <select onchange="updateSegment('${r.recording_id}', '${speakerId}', 'persona_id', this.value)">
+                                <option value="">--</option>
+                                ${personas.map(p => `<option value="${p.persona_id}" ${p.persona_id === personaId ? 'selected' : ''}>${escapeHtml(p.name)}</option>`).join('')}
+                            </select>
+                            <button class="add-btn" onclick="openAddPersonaModal()" title="新增人格">+</button>
+                        </div>
+                        <div class="dropdown-group">
+                            <label>對</label>
+                            <select onchange="updateSegment('${r.recording_id}', '${speakerId}', 'listener_id', this.value)">
+                                <option value="">--</option>
+                                ${listeners.map(l => `<option value="${l.listener_id}" ${l.listener_id === listenerId ? 'selected' : ''}>${escapeHtml(l.name)}</option>`).join('')}
+                            </select>
+                            <button class="add-btn" onclick="openAddListenerModal()" title="新增聆聽者">+</button>
+                        </div>
+                    </div>
+                    <span class="segment-duration">${duration.toFixed(1)}s</span>
+                    <div class="playback-controls">
+                        <button class="play-btn" id="play-${r.recording_id}-${speakerId}" onclick="playSegment('${r.recording_id}', '${speakerId}')">▶</button>
+                        <button class="pause-btn" id="pause-${r.recording_id}-${speakerId}" onclick="pauseSegment()" style="display:none">⏸</button>
+                        <button class="stop-btn" onclick="stopSegment()" style="background:#666">⏹</button>
+                    </div>
+                    <div class="progress-container">
+                        <div class="progress-bar" id="progress-${r.recording_id}-${speakerId}" onclick="seekSegment(event, '${r.recording_id}', '${speakerId}')">
+                            <div class="progress-fill" id="progress-fill-${r.recording_id}-${speakerId}"></div>
+                        </div>
+                        <span class="progress-time" id="time-${r.recording_id}-${speakerId}">0:00 / ${formatTime(duration)}</span>
                     </div>
                 </div>
             `;
@@ -1204,6 +1429,28 @@ async def recordings_page():
                 header.classList.add('expanded');
                 icon.textContent = '▼';
                 expandedRecordings.add(recordingId);
+            }
+        }
+
+        function toggleTranscription(recordingId) {
+            const content = document.getElementById(`transcription-content-${recordingId}`);
+            const header = content?.previousElementSibling;
+            const icon = header?.querySelector('.expand-icon');
+
+            if (!content) return;
+
+            if (content.style.display === 'none') {
+                content.style.display = 'block';
+                if (icon) {
+                    icon.classList.add('expanded');
+                    icon.textContent = '▼';
+                }
+            } else {
+                content.style.display = 'none';
+                if (icon) {
+                    icon.classList.remove('expanded');
+                    icon.textContent = '▶';
+                }
             }
         }
 
@@ -1389,19 +1636,72 @@ async def recordings_page():
                     method: 'POST'
                 });
 
-                if (!response.ok) throw new Error('Processing failed');
+                if (!response.ok) {
+                    const err = await response.json();
+                    throw new Error(err.detail || `HTTP ${response.status}`);
+                }
 
                 const result = await response.json();
-                log(`Processing started: ${result.status}`, 'info', 'PIPELINE');
+                log(`Processing started: ${result.status} (polling for completion...)`, 'info', 'PIPELINE');
                 showToast('開始解析錄音...', 'success');
 
-                // Refresh after short delay to show processing state
-                setTimeout(() => loadRecordings(), 1000);
+                // Poll for completion
+                await pollProcessingStatus(recordingId, actionsDiv, originalHTML);
+
             } catch (e) {
                 log(`Parse failed: ${e.message}`, 'error', 'PIPELINE');
                 showToast('解析失敗: ' + e.message, 'error');
                 actionsDiv.innerHTML = originalHTML;
             }
+        }
+
+        async function pollProcessingStatus(recordingId, actionsDiv, originalHTML) {
+            const maxWait = 300; // 5 minutes max
+            const interval = 3000; // Poll every 3 seconds
+            let waited = 0;
+
+            while (waited < maxWait) {
+                await new Promise(r => setTimeout(r, interval));
+                waited += interval / 1000;
+
+                try {
+                    // Get updated recording data
+                    const recResponse = await fetch('/api/recordings');
+                    const recData = await recResponse.json();
+                    const rec = recData.find(r => r.recording_id === recordingId);
+
+                    if (!rec) {
+                        log(`Recording ${recordingId} not found during poll`, 'error', 'PIPELINE');
+                        break;
+                    }
+
+                    log(`Poll ${waited}s: status=${rec.status}, segments=${rec.speaker_segments?.length || 0}`, 'info', 'PIPELINE');
+
+                    if (rec.status === 'processed') {
+                        log(`Parse complete! Found ${rec.speaker_segments?.length || 0} segments`, 'info', 'PIPELINE');
+                        loadRecordings();
+                        if (rec.speaker_segments?.length > 0) {
+                            showToast(`解析完成！找到 ${rec.speaker_segments.length} 個片段`, 'success');
+                        } else {
+                            showToast('解析完成但沒有分段', 'warning');
+                        }
+                        return;
+                    } else if (rec.status === 'failed') {
+                        log(`Parse failed: recording status is failed`, 'error', 'PIPELINE');
+                        showToast('解析失敗', 'error');
+                        actionsDiv.innerHTML = originalHTML;
+                        return;
+                    }
+                    // Still processing...
+
+                } catch (e) {
+                    log(`Poll error: ${e.message}`, 'warning', 'PIPELINE');
+                }
+            }
+
+            log(`Parse timeout after ${maxWait}s`, 'error', 'PIPELINE');
+            showToast('解析超時', 'error');
+            actionsDiv.innerHTML = originalHTML;
         }
 
         // ==================== DELETE RECORDING ====================

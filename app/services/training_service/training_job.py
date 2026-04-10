@@ -541,7 +541,7 @@ if __name__ == "__main__":
 # LoRA Merge
 # =============================================================================
 
-def merge_lora(lora_dir: Path, base_model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign") -> Optional[Path]:
+def merge_lora(lora_dir: Path, base_model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-Base") -> Optional[Path]:
     """
     Merge LoRA adapter weights into base Qwen3-TTS model and save.
 
@@ -623,9 +623,14 @@ def merge_lora(lora_dir: Path, base_model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-Voice
     # Adapter key pattern: talker.code_predictor.base_model.model.model.layers.{i}.self_attn.{proj}.lora_A.codec_lora.weight
     # Base key pattern:     talker.code_predictor.model.layers.{i}.self_attn.{proj}.weight
     #
-    # Strip "base_model.model.model." prefix and ".lora_A.codec_lora" suffix
+    # PEFT wrapping: base_model.model.model.layers.X in LoRA → model.layers.X in base
+    # The "base_model.model.model" PEFT path maps to just "model" in the original model
+    # We use string replacement to do the correct mapping
     lora_pattern = re.compile(
-        r'^(talker\.code_predictor\.)base_model\.model\.model\.(.+)\.lora_A\.codec_lora\.weight$'
+        r'^(talker\.code_predictor\.base_model\.model\.model\.)(.+)\.lora_A\.codec_lora\.weight$'
+    )
+    lora_pattern_B = re.compile(
+        r'^(talker\.code_predictor\.base_model\.model\.model\.)(.+)\.lora_B\.codec_lora\.weight$'
     )
     # Also build W_A and W_B storage
     lora_params: dict[str, dict] = {}  # base_key -> {'A': tensor, 'B': tensor}
@@ -634,23 +639,22 @@ def merge_lora(lora_dir: Path, base_model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-Voice
         # Try LoRA A pattern
         match_A = lora_pattern.match(key)
         if match_A:
-            prefix = match_A.group(1)  # "talker.code_predictor."
-            base_suffix = match_A.group(2)  # e.g. "model.layers.0.self_attn.q_proj"
-            base_key = f"{prefix}{base_suffix}.weight"
+            prefix = match_A.group(1)  # "talker.code_predictor.base_model.model.model."
+            peft_suffix = match_A.group(2)  # e.g. "layers.0.self_attn.q_proj"
+            # Map PEFT path to base model path: "base_model.model.model." → "model."
+            # So "talker.code_predictor.base_model.model.model.layers.X" → "talker.code_predictor.model.layers.X"
+            base_key = f"talker.code_predictor.model.{peft_suffix}.weight"
             if base_key not in lora_params:
                 lora_params[base_key] = {}
             lora_params[base_key]['A'] = tensor
             continue
 
         # Try LoRA B pattern
-        lora_pattern_B = re.compile(
-            r'^(talker\.code_predictor\.)base_model\.model\.model\.(.+)\.lora_B\.codec_lora\.weight$'
-        )
         match_B = lora_pattern_B.match(key)
         if match_B:
             prefix = match_B.group(1)
-            base_suffix = match_B.group(2)
-            base_key = f"{prefix}{base_suffix}.weight"
+            peft_suffix = match_B.group(2)
+            base_key = f"talker.code_predictor.model.{peft_suffix}.weight"
             if base_key not in lora_params:
                 lora_params[base_key] = {}
             lora_params[base_key]['B'] = tensor

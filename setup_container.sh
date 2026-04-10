@@ -125,9 +125,9 @@ do_start() {
         --privileged
         -p 8080:8080
         -p 9090:9090
-        -v "$PROJECT_DIR:/workspace/voice-ai-pipeline-1"
+        -v "$PROJECT_DIR:/workspace/voice-ai-pipeline"
         -v "$HF_CACHE_DIR:/root/.cache/huggingface"
-        -w /workspace/voice-ai-pipeline-1
+        -w /workspace/voice-ai-pipeline
         --restart unless-stopped
         -d
     )

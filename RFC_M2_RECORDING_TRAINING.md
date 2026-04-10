@@ -284,7 +284,29 @@ data/models/
     {
       "speaker_id": "SPEAKER_00",
       "start_time": 0.0,
-      "end_time": 12.5
+      "end_time": 12.5,
+      "duration_seconds": 12.5,
+
+      // Per-segment quality metrics (computed during extraction)
+      "quality_score": 0.85,           // 综合品质 0-1 (越高越好)
+      "quality_flags": {              // 问题标记
+        "has_overlap": false,         // 是否有重叠
+        "low_energy": false,         // 能量是否过低
+        "high_noise": false,         // 噪音是否过高
+        "too_short": false           // 是否太短 (<1s)
+      },
+      "snr_db": 25.3,                // Signal-to-Noise Ratio (dB)
+      "clarity_score": 0.82,         // 清晰度 0-1
+      "training_ready": true,         // 是否可用于训练
+
+      // Audio and transcription
+      "audio_path": "/path/to/speakers/SPEAKER_00.wav",
+      "transcription": "text content",
+      "transcription_confidence": 0.95,
+
+      // Labels (can be edited)
+      "persona_id": "xiao_s",
+      "listener_id": "child"
     }
   ],
 
@@ -840,6 +862,7 @@ GET /api/metrics/summary (JSON format)
 | Full fine-tune on RTX 5080 | Deferred | Future hardware upgrade |
 | Multi-speaker support | Deferred | MVP: single persona |
 | Knowledge base embedding | Deferred | Use OpenAI embeddings or local |
+| CUDA 13 + torchcodec | Deferred | Use NVIDIA Docker container or native install |
 | pyannote.audio torch conflict | Known Issue | pyannote upgrades torch, breaks CUDA graphs |
 
 ---
@@ -862,12 +885,66 @@ pip install faster-whisper speechbrain pyannote.audio
 pip install torch==2.6.0+cu124 torchaudio==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124
 ```
 
+### torchcodec / CUDA 13 Compatibility (2026-04-05)
+
+**Problem**: `pyannote.audio` uses `torchcodec` for audio decoding. torchcodec requires:
+- CUDA 13 runtime (`libnvrtc.so.13`, `libnppicc.so.13`, etc.)
+- FFmpeg 8 libraries (`libavutil.so.60`, `libavcodec.so.62`, etc.)
+
+These are NOT available via pip and NVIDIA's official CUDA installers fail in container environments due to overlay filesystem restrictions.
+
+**Current workaround**: Use pyannote's waveform dict approach:
+```python
+# Load audio with soundfile instead of passing file path to pyannote
+import soundfile as sf
+audio, sr = sf.read(audio_path)
+waveform = torch.from_numpy(audio).float()  # (channels, samples)
+diarization = pipeline({'waveform': waveform, 'sample_rate': sr})
+```
+
+This bypasses torchcodec entirely. The pipeline processes the full audio in memory instead of streaming chunks.
+
+**CUDA 13 upgrade path** (for future):
+1. Use NVIDIA Docker container with CUDA 13 runtime: `docker run --gpus all nvidia/cuda:13.0-runtime-ubuntu22.04`
+2. Or native CUDA 13 installation on bare metal
+3. Then install PyTorch with CUDA 13: `pip install torch==2.11.0+cu130`
+
+**Tested and failed in current environment**:
+- PyTorch 2.8.0+cu126, 2.9.0+cu126, 2.11.0+cu130 all installed
+- CUDA 13 nvrtc library installed via pip
+- FFmpeg 8 libraries installed manually
+- Missing `libnppicc.so.13` (CUDA NPP) - not available via pip, NVIDIA installer fails in container
+
 ### qwen-asr vs faster-whisper
 
 - **qwen-asr**: Real-time streaming ASR for WebSocket voice chat (low latency)
 - **faster-whisper**: Batch transcription for pipeline processing (high accuracy)
 
 They serve different purposes — not redundant.
+
+### Whisper Model Selection for Chinese Transcription (2026-04-05)
+
+**Tested models for Chinese transcription:**
+
+| Model | RTF | Chinese Quality | VRAM | Notes |
+|-------|-----|---------------|------|-------|
+| small | 0.05 | Good (0.6-0.7 conf) | ~1GB | Fast, acceptable |
+| medium | 0.08 | Better (0.7-0.8 conf) | ~3GB | Good balance |
+| **large-v3** | **0.006** | **Excellent fluency** | ~6GB | Best quality, fastest |
+
+**Recommendation**: Use `large-v3` for best Chinese transcription:
+```python
+model = WhisperModel("large-v3", device="cuda", compute_type="float16")
+segments, info = model.transcribe(audio_path, language="zh", beam_size=5)
+```
+
+**Why large-v3 is better for Chinese:**
+- Better multilingual training
+- More fluent Chinese output (less robotic/fragmented)
+- RTF 0.006 = 3x faster than medium despite being larger
+- Even faster than small model due to optimization
+
+**Note**: Very short audio (<10s) may default to English. Consider adding minimum length check or medium fallback if needed.
 
 ### System Dependencies
 
@@ -896,9 +973,11 @@ faster-qwen3-tts
 qwen-tts>=0.1.1
 
 # Pipeline - Batch processing
+# NOTE: faster-whisper uses large-v3 model for Chinese transcription
+# large-v3: RTF ~0.006, excellent Chinese fluency, much better than medium/small
 faster-whisper>=1.0.0
 speechbrain>=1.0.0
-pyannote.audio>=3.0.0
+pyannote.audio==4.0.4  # pinned for compatibility
 
 # Metrics
 prometheus-client>=0.19.0
@@ -909,7 +988,64 @@ fastapi.BackgroundTasks (included with FastAPI)
 
 ---
 
-## 16. Post-Implementation Issues & Improvements
+## 16. Segment Quality Scoring (2026-04-06)
+
+### Overview
+
+每個 speaker segment 都會在 pipeline 的 `_extract_speakers()` 步驟中計算品質分數。這讓使用者可以：
+- 在 Training 頁面一眼看出哪些段落是乾淨的
+- 只選擇高品質段落進行訓練
+- 過濾掉重疊、低能量、或太短的段落
+
+### 品質分數計算
+
+**公式:**
+```
+quality_score =
+    (clarity_norm * 0.3) +     # 清晰度權重
+    (snr_norm * 0.3) +         # SNR權重
+    (duration_norm * 0.15) +    # 時長適中性
+    (silence_penalty * 0.15) +  # 沉默罰分
+    (no_flags_bonus * 0.1)      # 無問題標記加分
+```
+
+**分數等級:**
+| 分數範圍 | 品質 | 顏色 | 意義 |
+|----------|------|------|------|
+| 0.8 - 1.0 | 優秀 | 綠色 | 乾淨錄音，直接可用 |
+| 0.6 - 0.8 | 良好 | 黃色 | 可用但有輕微問題 |
+| 0.4 - 0.6 | 一般 | 橙色 | 有問題，建議排除 |
+| 0.0 - 0.4 | 惡劣 | 紅色 | 重疊或噪音嚴重 |
+
+### 品質標記 (quality_flags)
+
+| 標記 | 意義 |
+|------|------|
+| `has_overlap` | 是否有重疊對話 |
+| `low_energy` | 能量是否過低 (RMS < -40dB) |
+| `high_noise` | SNR 是否過低 (< 15dB) |
+| `too_short` | 是否太短 (< 1秒) |
+
+### 實作位置
+
+- **品質計算**: `app/services/recordings/quality.py::analyze_segment()`
+- **Pipeline 集成**: `app/services/recordings/pipeline.py::_extract_speakers()`
+- **UI 顯示**: `app/api/recordings_ui.py`, `app/api/training_ui.py`
+
+### Training 頁面使用方式
+
+1. 每個段落顯示品質分數和標記
+2. 可以按品質過濾（只顯示優秀/良好的段落）
+3. 只選擇高品質段落訓練，確保 LoRA 品質
+
+### 限制
+
+- 目前 `has_overlap` 標記總是 `false` — 需要 VAD 或能量分析才能準確檢測重疊
+- 非常短的段落 (<0.5s) 的 SNR/clarity 計算可能不準確
+
+---
+
+## 17. Post-Implementation Issues & Improvements
 
 > Documented during M2 implementation review (2026-03-29). These issues were found after Phase 1-5 completion.
 
@@ -1195,6 +1331,7 @@ f.write(content)
 | **P1** | ISSUE-4, ISSUE-7, ISSUE-10, ISSUE-12 | ✅ Fixed | Skipped status, recording_ids list, streaming upload, integration tests |
 | **P2** | ISSUE-2, ISSUE-11, ISSUE-13, IMPROVE-1~5 | ✅ Fixed | Design doc, parallel TODO, filesystem tests, env var, logging |
 | **Known** | pyannote.audio torch conflict | ⚠️ Documented | Must restore torch after pyannote install |
+| **Known** | torchcodec requires CUDA 13 | ⚠️ Documented | Use waveform dict workaround; CUDA 13 needs NVIDIA container or native install |
 
 ---
 

@@ -15,7 +15,7 @@ import uuid
 
 
 # Base data directory
-DATA_DIR = Path("/workspace/voice-ai-pipeline-1/data")
+DATA_DIR = Path("/workspace/voice-ai-pipeline/data")
 RECORDINGS_DIR = DATA_DIR / "recordings"
 RAW_DIR = RECORDINGS_DIR / "raw"
 DENOISED_DIR = RECORDINGS_DIR / "denoised"
@@ -213,17 +213,19 @@ def list_all_recordings() -> list[RecordingPaths]:
         recordings = []
         for rec in cache["recordings"]:
             try:
+                # Skip entries missing required fields
+                if "timestamp" not in rec:
+                    continue
                 rp = RecordingPaths(
-                    listener_id=rec["listener_id"],
-                    persona_id=rec["persona_id"],
+                    listener_id=rec.get("listener_id", "default"),
+                    persona_id=rec.get("persona_id", "xiao_s"),
                     timestamp=rec["timestamp"],
                     recording_id=rec["recording_id"],
                 )
                 recordings.append(rp)
             except (ValueError, KeyError):
-                # Skip invalid entries, trigger cache rebuild
-                invalidate_recordings_cache()
-                return list_all_recordings()
+                # Skip invalid entries
+                continue
         recordings.sort(key=lambda r: r.timestamp, reverse=True)
         return recordings
 

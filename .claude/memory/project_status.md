@@ -34,7 +34,7 @@ Voice AI pipeline is WORKING end-to-end:
 - restart.sh: detects uncommitted changes for proper reload
 
 ## For New Sessions
-1. Read /workspace/voice-ai-pipeline-1/CLAUDE.md for full technical docs
-2. Read /workspace/voice-ai-pipeline-1/manual.md for operational notes
+1. Read /workspace/voice-ai-pipeline/CLAUDE.md for full technical docs
+2. Read /workspace/voice-ai-pipeline/manual.md for operational notes
 3. HF_TOKEN and HF_HOME are in .env (gitignored)
-4. Models cached at /workspace/voice-ai-pipeline-1/.cache/huggingface/hub/ (8.7GB total)
+4. Models cached at /workspace/voice-ai-pipeline/.cache/huggingface/hub/ (8.7GB total)

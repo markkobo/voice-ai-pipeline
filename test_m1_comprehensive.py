@@ -655,7 +655,7 @@ def test_logging():
         structured_logger.info("Test message")
 
         # Check if log file exists
-        log_path = Path("/workspace/voice-ai-pipeline-1/logs/app.log")
+        log_path = Path("/workspace/voice-ai-pipeline/logs/app.log")
         if log_path.exists():
             log(f"Log file exists: {log_path}", "PASS")
             # Read last line

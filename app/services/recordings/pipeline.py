@@ -297,8 +297,8 @@ class AudioProcessingPipeline:
                     # Load Sepformer model
                     self._log("Loading speechbrain Sepformer model...")
                     model = SepformerSeparation.from_hparams(
-                        source="speechbrain/sepformer-wham16k",
-                        savedir="pretrained_models/sepformer-wham16k",
+                        source="speechbrain/sepformer-wham-enhancement",
+                        savedir="pretrained_models/sepformer-wham-enhancement",
                         run_opts={"device": "cuda" if torch.cuda.is_available() else "cpu"}
                     )
 
@@ -322,6 +322,8 @@ class AudioProcessingPipeline:
                     del enhanced
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
+                    import gc
+                    gc.collect()
 
                 elapsed_ms = int((time.time() - start_time) * 1000)
                 self.metadata.update_processing_step(
@@ -369,6 +371,7 @@ class AudioProcessingPipeline:
     def _run_diarize(self):
         """Run speaker diarization using pyannote.audio.
 
+        Uses waveform dict approach to bypass torchcodec (CUDA 12/13 mismatch).
         Falls back to empty speaker segments if processing fails.
         """
         self._log("Step 4: Speaker Diarization (pyannote)")
@@ -387,10 +390,24 @@ class AudioProcessingPipeline:
         for attempt in range(MAX_RETRIES):
             try:
                 import torch
+                import soundfile as sf
                 from pyannote.audio import Pipeline
 
                 # Acquire CUDA lock to serialize GPU operations
                 with _cuda_lock:
+                    # Load audio using soundfile (bypasses torchcodec)
+                    self._log(f"Loading audio from: {audio_path}")
+                    audio, sr = sf.read(str(audio_path))
+
+                    # Convert to (channels, samples) format for pyannote
+                    if audio.ndim == 1:
+                        audio = audio.reshape(1, -1)  # mono -> (1, samples)
+                    else:
+                        audio = audio.T  # (samples, channels) -> (channels, samples)
+
+                    waveform = torch.from_numpy(audio).float()
+                    audio_dict = {'waveform': waveform, 'sample_rate': sr}
+
                     # Load pyannote pipeline
                     self._log("Loading pyannote diarization model...")
                     hf_token = os.environ.get("HF_TOKEN")
@@ -404,20 +421,25 @@ class AudioProcessingPipeline:
 
                     # Move to GPU if available
                     if torch.cuda.is_available():
-                        pipeline = pipeline.to("cuda")
+                        pipeline = pipeline.to(torch.device("cuda"))
 
-                    # Run diarization
-                    self._log(f"Running diarization on: {audio_path}")
-                    diarization = pipeline(str(audio_path))
+                    # Run diarization with waveform dict
+                    self._log("Running diarization...")
+                    with torch.no_grad():
+                        diarization_output = pipeline(audio_dict)
 
-                    # Extract speaker segments
-                    speaker_segments = []
-                    for turn, _, speaker in diarization.itertracks(yield_label=True):
-                        speaker_segments.append({
+                    # Use exclusive_speaker_diarization to get merged segments
+                    # (removes overlapping speech turns)
+                    raw_segments = []
+                    for turn, _, speaker in diarization_output.exclusive_speaker_diarization.itertracks(yield_label=True):
+                        raw_segments.append({
                             "speaker_id": speaker,
                             "start_time": turn.start,
                             "end_time": turn.end
                         })
+
+                    # Merge consecutive same-speaker segments with small gaps (<=0.5s)
+                    speaker_segments = self._merge_consecutive_segments(raw_segments, gap_threshold=0.5)
 
                     elapsed_ms = int((time.time() - start_time) * 1000)
 
@@ -434,9 +456,11 @@ class AudioProcessingPipeline:
 
                     # Free GPU memory after diarization
                     del pipeline
-                    del diarization
+                    del diarization_output
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
+                    import gc
+                    gc.collect()
 
                 break
 
@@ -458,6 +482,45 @@ class AudioProcessingPipeline:
                         duration_ms=elapsed_ms
                     )
                     self._log(f"Diarize fallback: no speaker segments")
+
+    def _merge_consecutive_segments(self, segments: list, gap_threshold: float = 0.5) -> list:
+        """Merge consecutive segments from the same speaker if gap is <= gap_threshold.
+
+        Parameters
+        ----------
+        segments : list of dict
+            List of {"speaker_id": str, "start_time": float, "end_time": float}
+        gap_threshold : float
+            Maximum gap in seconds to merge consecutive segments (default: 0.5s)
+
+        Returns
+        -------
+        list of dict
+            Merged segments
+        """
+        if not segments:
+            return []
+
+        # Sort by start time
+        sorted_segments = sorted(segments, key=lambda x: (x["speaker_id"], x["start_time"]))
+
+        merged = []
+        current = sorted_segments[0].copy()
+
+        for seg in sorted_segments[1:]:
+            if (seg["speaker_id"] == current["speaker_id"] and
+                seg["start_time"] - current["end_time"] <= gap_threshold):
+                # Merge: extend current segment
+                current["end_time"] = seg["end_time"]
+            else:
+                # Save current and start new
+                merged.append(current)
+                current = seg.copy()
+
+        # Don't forget the last one
+        merged.append(current)
+
+        return merged
 
     def _extract_speakers(self):
         """Extract audio for each speaker from diarization segments.
@@ -485,39 +548,61 @@ class AudioProcessingPipeline:
 
         try:
             import soundfile as sf
+            from .quality import analyze_segment
 
-            # Load full audio
+            # Load full audio - soundfile returns (samples,) for mono or (samples, channels) for multi-channel
             full_audio, sample_rate = sf.read(str(audio_path))
-            self._log(f"Loaded audio: {len(full_audio)} samples at {sample_rate}Hz")
+            # Ensure 2D: (channels, samples) format
+            if full_audio.ndim == 1:
+                # Mono: (2700226,) -> (1, 2700226)
+                full_audio = full_audio.reshape(1, -1)
+            else:
+                # Multi-channel: (samples, channels) -> (channels, samples)
+                full_audio = full_audio.T
+            self._log(f"Loaded audio: {full_audio.shape[1]} samples, {full_audio.shape[0]} channels at {sample_rate}Hz")
 
             # Create speakers folder
             self.paths.speakers_folder.mkdir(parents=True, exist_ok=True)
 
-            # Group segments by speaker
+            # Calculate quality for each segment AND group by speaker
             speaker_audio = {}
-            for seg in speaker_segments:
+            for i, seg in enumerate(speaker_segments):
                 speaker_id = seg["speaker_id"]
                 start_sample = int(seg["start_time"] * sample_rate)
                 end_sample = int(seg["end_time"] * sample_rate)
 
+                # Get segment audio (channel 0 for mono)
+                seg_audio = full_audio[0, start_sample:end_sample]
+
+                # Calculate per-segment quality
+                quality_result = analyze_segment(seg_audio, sample_rate)
+
+                # Update segment with quality data
+                seg["quality_score"] = quality_result["quality_score"]
+                seg["quality_flags"] = quality_result["quality_flags"]
+                seg["snr_db"] = quality_result["snr_db"]
+                seg["clarity_score"] = quality_result["clarity_score"]
+                seg["training_ready"] = quality_result["training_ready"]
+                # Keep individual duration (not combined)
+                seg["duration_seconds"] = seg["end_time"] - seg["start_time"]
+
+                # Group for speaker audio file creation
                 if speaker_id not in speaker_audio:
                     speaker_audio[speaker_id] = []
-                speaker_audio[speaker_id].append(full_audio[start_sample:end_sample])
+                speaker_audio[speaker_id].append(seg_audio)
 
-            # Save each speaker's audio
+            # Save each speaker's combined audio
             speaker_audio_data = []
             for speaker_id, audio_chunks in speaker_audio.items():
                 speaker_audio_combined = np.concatenate(audio_chunks)
+                # Ensure correct format for soundfile: (samples,) for mono
+                # soundfile expects 2D array (samples, channels) or handles 1D
                 speaker_path = self.paths.speakers_folder / f"{speaker_id}.wav"
-                sf.write(str(speaker_path), speaker_audio_combined, sample_rate)
+                sf.write(str(speaker_path), speaker_audio_combined, sample_rate, subtype='PCM_16')
                 self._log(f"Extracted {speaker_id}: {len(speaker_audio_combined)} samples ({len(audio_chunks)} segments)")
 
-                # Duration in seconds
+                # Speaker-level duration (combined)
                 duration_sec = len(speaker_audio_combined) / sample_rate
-                # Simple quality proxy: longer audio = more usable (capped at 30s)
-                quality_score = min(1.0, duration_sec / 30.0)
-                # Training ready: at least 3s of audio
-                training_ready = duration_sec >= 3.0 and quality_score >= 0.1
 
                 speaker_audio_data.append({
                     "speaker_id": speaker_id,
@@ -525,11 +610,9 @@ class AudioProcessingPipeline:
                     "audio_path": str(speaker_path),
                     "transcription": self.metadata._data.get("transcription", {}).get("text", ""),
                     "transcription_confidence": self.metadata._data.get("transcription", {}).get("confidence", 0.0),
-                    "quality_score": round(quality_score, 3),
-                    "training_ready": training_ready,
                 })
 
-            # Enrich segments with extracted data
+            # Enrich segments with audio path (but NOT duration - we keep per-segment duration)
             self.metadata.enrich_speaker_segments(speaker_audio_data)
 
             self._log(f"Speaker extraction complete: {len(speaker_audio)} speakers")
@@ -558,10 +641,10 @@ class AudioProcessingPipeline:
                 # Serialize CUDA operations to prevent OOM from parallel runs
                 # Only hold lock during model load + transcription, not during retry sleep
                 with _cuda_lock:
-                    # Use small model for speed, medium for quality
-                    # auto-detect GPU and use it if available
+                    # Use large-v3 for best Chinese transcription quality
+                    # faster-whisper large-v3: RTF ~0.006, excellent Chinese fluency
                     model = WhisperModel(
-                        "medium",  # Model size: tiny/base/small/medium/large
+                        "large-v3",
                         device="cuda" if __import__('torch').cuda.is_available() else "cpu",
                         compute_type="float16" if __import__('torch').cuda.is_available() else "int8"
                     )
@@ -620,6 +703,8 @@ class AudioProcessingPipeline:
                     del model
                     if __import__('torch').cuda.is_available():
                         __import__('torch').cuda.empty_cache()
+                    import gc
+                    gc.collect()
 
                 break
 

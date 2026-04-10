@@ -16,18 +16,115 @@ import re
 
 DEFAULT_EMOTION = "默認"
 
-DEFAULT_EMOTION_MAP: dict = {
-    "寵溺": "(gentle, high-pitched, warm and loving tone, soft delivery)",
-    "撒嬌": "(coquettish, soft, slightly slower pace, endearing inflection)",
-    "毒舌": "(witty, fast-paced, sarcastic but playful tone, confident delivery)",
-    "幽默": "(playful, light-hearted, occasional laughs, casual and funny)",
-    "認真": "(serious, thoughtful, measured pace, clear and deliberate)",
-    "溫和": "(calm, gentle, warm, relaxed and reassuring tone)",
-    "調皮": "(mischievous, playful, slightly teasing, energetic)",
-    "感動": "(emotional, sincere, heartfelt, slower and softer)",
-    "生氣": "(annoyed, frustrated, slightly elevated pitch, impatient)",
-    "開心": "(happy, bright, enthusiastic, faster pace with positive energy)",
-    DEFAULT_EMOTION: "(natural, conversational tone, warm and engaging)",
+# Text enhancement rules for Path B (text prosody)
+# Adds emotional markers to text based on emotion
+def _make_enhancer(add_suffix: str, should_add: callable = None):
+    """Create an enhancer that adds suffix if condition is met."""
+    def enhancer(t: str) -> str:
+        if not t:
+            return t
+        # Check if suffix should be added
+        if should_add and should_add(t):
+            return t
+        return t + add_suffix
+    return enhancer
+
+def _enhance_sajiao(t: str) -> str:
+    """撒嬌: Add ～, prolong sounds"""
+    if not t:
+        return t
+    # Add ～ at end if not present
+    if not t.endswith("～"):
+        t = t + "～"
+    # Prolong existing ～
+    t = t.replace("～", "～～")
+    return t
+
+def _enhance_shengqi(t: str) -> str:
+    """生氣: Add emphasis with ！"""
+    if not t:
+        return t
+    # Replace final punctuation with ！
+    if t.endswith(("。", "！", "～")):
+        t = t[:-1] + "！！！"
+    else:
+        t = t + "！！！"
+    return t
+
+def _enhance_kaixin(t: str) -> str:
+    """開心: Add ！"""
+    if not t:
+        return t
+    if not t.endswith(("！", "～")):
+        return t + "！"
+    return t
+
+def _enhance_wenhe(t: str) -> str:
+    """溫和: Add ～ soft ending"""
+    if not t:
+        return t
+    if not t.endswith(("～", "。")):
+        return t + "～"
+    return t
+
+def _enhance_yuemo(t: str) -> str:
+    """幽默: Add casual ending"""
+    if not t:
+        return t
+    if not t.endswith(("～", "！")):
+        return t + "～"
+    return t
+
+def _enhance_chongni(t: str) -> str:
+    """寵溺: Add loving tone"""
+    if not t:
+        return t
+    if not t.endswith("～"):
+        return t + "～"
+    return t
+
+def _enhance_dushe(t: str) -> str:
+    """毒舌: Make it sharp"""
+    if not t:
+        return t
+    if "。" in t:
+        t = t.replace("。", "！")
+    elif not t.endswith("！"):
+        t = t + "！"
+    return t
+
+def _enhance_tiao_pi(t: str) -> str:
+    """調皮: Playful ending"""
+    if not t:
+        return t
+    if not t.endswith(("～", "！")):
+        return t + "～"
+    return t
+
+def _enhance_gandan(t: str) -> str:
+    """感動: Emotional ellipsis"""
+    if not t:
+        return t
+    if not t.endswith(("...", "。")):
+        return t + "..."
+    return t
+
+def _enhance_renzhen(t: str) -> str:
+    """認真: Keep as-is"""
+    return t
+
+EMOTION_TEXT_ENHANCEMENT: dict = {
+    "撒嬌": _enhance_sajiao,
+    "生氣": _enhance_shengqi,
+    "開心": _enhance_kaixin,
+    "溫和": _enhance_wenhe,
+    "幽默": _enhance_yuemo,
+    "寵溺": _enhance_chongni,
+    "毒舌": _enhance_dushe,
+    "調皮": _enhance_tiao_pi,
+    "感動": _enhance_gandan,
+    "認真": _enhance_renzhen,
+    DEFAULT_EMOTION: _enhance_renzhen,  # No enhancement for default
 }
 
 EMOTION_TAG_PATTERN = re.compile(r'[\[［](?:情感|感情)[:：]\s*(.*?)[\]］]\s*')
@@ -37,9 +134,30 @@ TAG_START = "[E:"
 
 
 def get_tts_instruct(emotion: str, custom_map: Optional[dict] = None) -> str:
-    """Get TTS instruction string for given emotion."""
-    mapping = custom_map or DEFAULT_EMOTION_MAP
-    return mapping.get(emotion, mapping.get(DEFAULT_EMOTION))
+    """Get TTS instruction string for given emotion. DEPRECATED - returns None for Path B."""
+    # Path B: We use text enhancement instead of instruct strings
+    return None
+
+
+def enhance_text(text: str, emotion: str) -> str:
+    """
+    Enhance text with prosody markers based on emotion (Path B).
+
+    Adds emotional markers like ～, ！, etc. to trigger TTS's natural
+    prosody generation.
+
+    Args:
+        text: Original text content
+        emotion: Detected emotion (e.g., "撒嬌", "生氣")
+
+    Returns:
+        Enhanced text with prosody markers
+    """
+    if not text:
+        return text
+
+    enhancer = EMOTION_TEXT_ENHANCEMENT.get(emotion, EMOTION_TEXT_ENHANCEMENT.get(DEFAULT_EMOTION))
+    return enhancer(text)
 
 
 class EmotionParser:

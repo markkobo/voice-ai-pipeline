@@ -12,7 +12,7 @@ Target users: family members (child, mom, elder) with persona-aware responses.
 ## Setup & Running
 
 ```bash
-cd /workspace/voice-ai-pipeline-1
+cd /workspace/voice-ai-pipeline
 
 # Install dependencies
 pip install -r requirements.txt

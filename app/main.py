@@ -118,7 +118,8 @@ async def startup_event():
             vm = get_version_manager()
             ready = [v for v in vm.list_versions() if v.status == "ready"]
             if ready:
-                ready.sort(key=lambda v: v.version_id, reverse=True)
+                # Sort by created_at timestamp (newest first), not lexicographic version_id
+                ready.sort(key=lambda v: v.created_at or "", reverse=True)
                 latest = ready[0]
                 logger.info(f"Auto-activating latest merged model: {latest.version_id}")
                 engine.activate_version(latest.version_id)
