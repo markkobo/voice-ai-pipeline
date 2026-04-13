@@ -106,4 +106,4 @@ echo -e "  Claude Code Proxy Env is Ready."
 echo -e "${GREEN}=========================================${NC}"
 
 # 直接呼叫 claude，hash -r 和 set -e 會確保它存在且可執行
-claude --channels plugin:telegram@claude-plugins-official --resume 76069885-62f7-4cc9-93cb-a3e47954f330
+claude
