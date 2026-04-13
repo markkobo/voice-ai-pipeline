@@ -76,27 +76,47 @@ export ANTHROPIC_BASE_URL="http://127.0.0.1:4000"
 export ANTHROPIC_API_KEY="sk-fake-key-for-litellm"
 export ANTHROPIC_MODEL="anthropic/MiniMax-M2.7"
 
-# 6. Start Proxy and Pipe Logs
-echo -e "${YELLOW}>>> Starting LiteLLM Proxy on port 4000...${NC}"
-lsof -ti:4000 | xargs kill -9 2>/dev/null || true
-echo "--- Session Start $(date) ---" > "$LOG_FILE"
+# 6. Start Proxy (reuse if already running)
+echo -e "${YELLOW}>>> Checking LiteLLM Proxy on port 4000...${NC}"
 
-nohup litellm --config litellm_config.yaml --port 4000 >> "$LOG_FILE" 2>&1 &
-PROXY_PID=$!
-
-# 等待 Proxy 啟動並驗證存活
-sleep 3
-if ! kill -0 $PROXY_PID 2>/dev/null; then
-    echo -e "${RED}[!] LiteLLM failed to start. Check $LOG_FILE${NC}"
-    cat "$LOG_FILE"
-    exit 1
+EXISTING_PID=$(lsof -ti:4000 2>/dev/null || true)
+if [ -n "$EXISTING_PID" ]; then
+    if pgrep -f "litellm.*--port 4000" > /dev/null 2>&1; then
+        echo -e "${GREEN}[✓] LiteLLM Proxy already running on port 4000 (PID: $EXISTING_PID), reusing.${NC}"
+        PROXY_PID=$EXISTING_PID
+        DONT_KILL_PROXY=1
+    else
+        echo -e "${YELLOW}[!] Port 4000 occupied by non-litellm process, killing it.${NC}"
+        lsof -ti:4000 | xargs kill -9 2>/dev/null || true
+        sleep 1
+        PROXY_PID=""
+    fi
+else
+    PROXY_PID=""
 fi
-echo -e "${GREEN}[✓] LiteLLM Proxy is running (PID: $PROXY_PID)${NC}"
 
-# 7. Auto-cleanup
-cleanup() { 
-    echo -e "${YELLOW}>>> Shutting down Proxy (PID: $PROXY_PID)...${NC}"
-    kill $PROXY_PID 2>/dev/null || true
+if [ -z "$PROXY_PID" ]; then
+    echo -e "${YELLOW}>>> Starting LiteLLM Proxy on port 4000...${NC}"
+    echo "--- Session Start $(date) ---" > "$LOG_FILE"
+    nohup litellm --config litellm_config.yaml --port 4000 >> "$LOG_FILE" 2>&1 &
+    PROXY_PID=$!
+    sleep 3
+    if ! kill -0 $PROXY_PID 2>/dev/null; then
+        echo -e "${RED}[!] LiteLLM failed to start. Check $LOG_FILE${NC}"
+        cat "$LOG_FILE"
+        exit 1
+    fi
+    echo -e "${GREEN}[✓] LiteLLM Proxy started (PID: $PROXY_PID)${NC}"
+fi
+
+# 7. Auto-cleanup (only kill if WE started it)
+cleanup() {
+    if [ "$DONT_KILL_PROXY" != "1" ]; then
+        echo -e "${YELLOW}>>> Shutting down Proxy (PID: $PROXY_PID)...${NC}"
+        kill $PROXY_PID 2>/dev/null || true
+    else
+        echo -e "${YELLOW}>>> Leaving shared proxy running (PID: $PROXY_PID).${NC}"
+    fi
 }
 trap cleanup EXIT
 

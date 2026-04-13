@@ -18,21 +18,19 @@ DATA_FILE = DATA_DIR / "listeners.json"
 _LOCK_FILE = DATA_DIR / ".listeners.lock"
 
 
-def _with_lock(mode: str, callback):
+def _with_lock(callback):
     """
     Execute a callback while holding an exclusive flock on _LOCK_FILE.
+
+    callback: function that receives nothing and returns the result.
+              The file is opened inside the callback so callers can handle missing files.
     """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     _LOCK_FILE.touch(exist_ok=True)
     with open(_LOCK_FILE, "r") as lockf:
         fcntl.flock(lockf.fileno(), fcntl.LOCK_EX)
         try:
-            f = open(DATA_FILE, mode, encoding="utf-8")
-            try:
-                result = callback(f)
-            finally:
-                f.close()
-            return result
+            return callback()
         finally:
             fcntl.flock(lockf.fileno(), fcntl.LOCK_UN)
 
@@ -76,12 +74,12 @@ def _save_listeners_unlocked(listeners: list[dict]) -> None:
 
 def _load_listeners() -> list[dict]:
     """Load listeners (thread-safe)."""
-    return _with_lock("r", lambda f: _load_listeners_unlocked())
+    return _with_lock(lambda: _load_listeners_unlocked())
 
 
 def _save_listeners(listeners: list[dict]) -> None:
     """Save listeners (thread-safe)."""
-    _with_lock("r", lambda f: _save_listeners_unlocked(listeners))
+    _with_lock(lambda: _save_listeners_unlocked(listeners))
 
 
 def list_listeners() -> list[dict]:
@@ -106,7 +104,7 @@ def create_listener(listener_id: str, name: str, is_family: bool = False,
     Raises:
         ValueError: if listener_id already exists
     """
-    def _txn(f):
+    def _txn():
         listeners = _load_listeners_unlocked()
 
         existing_ids = {l["listener_id"] for l in listeners}
@@ -124,7 +122,7 @@ def create_listener(listener_id: str, name: str, is_family: bool = False,
         _save_listeners_unlocked(listeners)
         return listener
 
-    return _with_lock("r", _txn)
+    return _with_lock(_txn)
 
 
 def update_listener(listener_id: str, name: Optional[str] = None,
@@ -135,7 +133,7 @@ def update_listener(listener_id: str, name: Optional[str] = None,
     Raises:
         ValueError: if listener_id not found
     """
-    def _txn(f):
+    def _txn():
         listeners = _load_listeners_unlocked()
         for l in listeners:
             if l["listener_id"] == listener_id:
@@ -147,7 +145,7 @@ def update_listener(listener_id: str, name: Optional[str] = None,
                 return l
         raise ValueError(f"Listener not found: '{listener_id}'")
 
-    return _with_lock("r", _txn)
+    return _with_lock(_txn)
 
 
 def delete_listener(listener_id: str) -> bool:
@@ -157,7 +155,7 @@ def delete_listener(listener_id: str) -> bool:
     Raises:
         ValueError: if listener_id not found
     """
-    def _txn(f):
+    def _txn():
         listeners = _load_listeners_unlocked()
         new_listeners = [l for l in listeners if l["listener_id"] != listener_id]
         if len(new_listeners) == len(listeners):
@@ -165,4 +163,4 @@ def delete_listener(listener_id: str) -> bool:
         _save_listeners_unlocked(new_listeners)
         return True
 
-    return _with_lock("r", _txn)
+    return _with_lock(_txn)

@@ -25,20 +25,15 @@ def _with_lock(mode: str, callback):
 
     Args:
         mode: "r" to open read-only, "r+" to open read-write (creates if missing)
-        callback: function that receives the open file object and returns the result.
-                  For "r" mode the file is positioned at start, for "r+" at end of load.
+        callback: function that receives nothing and returns the result.
+                  The file is opened inside the callback so callers can handle missing files.
     """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     _LOCK_FILE.touch(exist_ok=True)
     with open(_LOCK_FILE, "r") as lockf:
         fcntl.flock(lockf.fileno(), fcntl.LOCK_EX)
         try:
-            f = open(DATA_FILE, mode, encoding="utf-8")
-            try:
-                result = callback(f)
-            finally:
-                f.close()
-            return result
+            return callback()
         finally:
             fcntl.flock(lockf.fileno(), fcntl.LOCK_UN)
 
@@ -79,12 +74,12 @@ def _save_personas_unlocked(personas: list[dict]) -> None:
 
 def _load_personas() -> list[dict]:
     """Load personas (thread-safe)."""
-    return _with_lock("r", lambda f: _load_personas_unlocked())
+    return _with_lock("r", lambda: _load_personas_unlocked())
 
 
 def _save_personas(personas: list[dict]) -> None:
     """Save personas (thread-safe)."""
-    _with_lock("r", lambda f: _save_personas_unlocked(personas))
+    _with_lock("r", lambda: _save_personas_unlocked(personas))
 
 
 def list_personas() -> list[dict]:
@@ -140,7 +135,7 @@ def update_persona(persona_id: str, name: Optional[str] = None) -> dict:
     Raises:
         ValueError: if persona_id not found
     """
-    def _txn(f):
+    def _txn():
         personas = _load_personas_unlocked()
         for p in personas:
             if p["persona_id"] == persona_id:
@@ -162,7 +157,7 @@ def delete_persona(persona_id: str) -> bool:
     Raises:
         ValueError: if persona_id is fixed or not found
     """
-    def _txn(f):
+    def _txn():
         personas = _load_personas_unlocked()
         fixed_ids = {p["persona_id"] for p in personas if p.get("type") == "fixed"}
 
