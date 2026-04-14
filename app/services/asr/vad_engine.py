@@ -60,6 +60,7 @@ class EnergyVAD(BaseVAD):
         energy_threshold: Optional[float] = None,
         silence_duration_to_commit: Optional[float] = None,
         min_speech_duration: Optional[float] = None,
+        adaptive: bool = True,
     ):
         """
         Initialize Energy VAD.
@@ -70,14 +71,17 @@ class EnergyVAD(BaseVAD):
             energy_threshold: Override RMS threshold (0.0-1.0)
             silence_duration_to_commit: Seconds of silence before commit
             min_speech_duration: Minimum speech duration to register
+            adaptive: If True, auto-calibrate threshold from ambient noise floor
+                      during first few frames (default: True)
         """
         self.sample_rate = sample_rate
         self._bytes_per_sample = 2  # 16-bit PCM
+        self.adaptive = adaptive
 
         # Load preset or use overrides
         preset = self.PRESETS.get(sensitivity, self.PRESETS["medium"])
 
-        self.energy_threshold = (
+        self.base_threshold = (
             energy_threshold
             if energy_threshold is not None
             else preset["energy_threshold"]
@@ -99,6 +103,14 @@ class EnergyVAD(BaseVAD):
         self._is_committing = False
         self._last_energy = 0.0
 
+        # Adaptive calibration state
+        self._calibrated = False
+        self._noise_floor = 0.0
+        self._calibration_samples: list[float] = []
+        self._calibration_frames = 30  # ~30 frames (~1.8s at 24kHz/1440 samples)
+        self._floor_multiplier = 2.5  # threshold = noise_floor * multiplier
+        self._min_abs_threshold = 0.015  # absolute floor to avoid 0 threshold
+
         # Calculate frames from duration
         # Assuming ~60ms of audio per chunk (1440 samples at 24kHz)
         self._chunk_duration_sec = 1440 / self.sample_rate
@@ -107,6 +119,23 @@ class EnergyVAD(BaseVAD):
         )
         self._min_speech_frames = int(
             self.min_speech_duration / self._chunk_duration_sec
+        )
+
+        # Effective threshold (recomputed after calibration)
+        self.energy_threshold = self.base_threshold
+
+    def _update_threshold_from_floor(self):
+        """Update energy_threshold based on calibrated noise floor."""
+        if not self._calibrated or len(self._calibration_samples) == 0:
+            return
+        # Use the lowest 30th percentile of calibration samples as noise floor
+        # (ignores any accidentally-loud frames during calibration)
+        sorted_samples = sorted(self._calibration_samples)
+        idx = max(0, len(sorted_samples) // 3 - 1)
+        self._noise_floor = sorted_samples[idx]
+        self.energy_threshold = max(
+            self._min_abs_threshold,
+            self._noise_floor * self._floor_multiplier
         )
 
     def detect(self, audio_chunk: bytes) -> Tuple[bool, float]:
@@ -148,6 +177,13 @@ class EnergyVAD(BaseVAD):
         normalized_rms = rms / 32768.0
         self._last_energy = normalized_rms
 
+        # Adaptive calibration: collect energy samples until calibrated
+        if self.adaptive and not self._calibrated:
+            self._calibration_samples.append(normalized_rms)
+            if len(self._calibration_samples) >= self._calibration_frames:
+                self._calibrated = True
+                self._update_threshold_from_floor()
+
         is_speech = normalized_rms >= self.energy_threshold
 
         if is_speech:
@@ -170,10 +206,14 @@ class EnergyVAD(BaseVAD):
             return False, normalized_rms
 
     def reset(self):
-        """Reset VAD state for new utterance."""
+        """Reset VAD state for new utterance. Also resets adaptive calibration."""
         self._silence_frames = 0
         self._speech_frames = 0
         self._is_committing = False
+        self._calibrated = False
+        self._calibration_samples.clear()
+        self._noise_floor = 0.0
+        self.energy_threshold = self.base_threshold
 
     @property
     def current_energy(self) -> float:

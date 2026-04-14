@@ -73,28 +73,59 @@ class TestEnergyVAD:
 
     def test_silence_detection(self):
         """Test VAD with silence (zeros)."""
-        vad = EnergyVAD(energy_threshold=0.01)
+        vad = EnergyVAD(energy_threshold=0.01, adaptive=False)
 
         # Silent audio
         silence = b"\x00\x00" * 1000
-        is_speaking, energy = vad.detect(silence)
+        is_committing, energy = vad.detect(silence)
 
-        assert is_speaking is False
+        # detect() returns (is_committing, energy) — is_committing is False for silence
+        assert is_committing is False
         assert energy < 0.01
 
     def test_speech_detection(self):
         """Test VAD with simulated speech."""
-        vad = EnergyVAD(energy_threshold=0.01)
+        vad = EnergyVAD(energy_threshold=0.01, adaptive=False)
 
         # Generate audio with some energy (sine wave-like pattern)
         import struct
         samples = [int(16000 * (i % 10) / 10) for i in range(1000)]
         speech = struct.pack(f"{len(samples)}h", *samples)
 
-        is_speaking, energy = vad.detect(speech)
+        is_committing, energy = vad.detect(speech)
 
-        assert is_speaking is True
+        # detect() returns (is_committing, energy). is_committing is False during
+        # active speech (it only becomes True when silence is detected after enough
+        # speech frames). The key check is that energy reflects the audio level.
         assert energy > 0
+        assert energy > vad.energy_threshold  # speech should exceed threshold
+
+    def test_adaptive_calibration(self):
+        """Test adaptive VAD calibrates threshold from ambient noise floor."""
+        import struct
+
+        vad = EnergyVAD(sensitivity="medium", adaptive=True)
+        # Before calibration: uses preset threshold
+        assert vad._calibrated is False
+        assert vad.energy_threshold == 0.02  # medium preset
+
+        # Simulate 30 frames of ambient noise (quiet, below medium threshold)
+        quiet_frames = 30
+        for i in range(quiet_frames):
+            rms = 0.005 + (i * 0.0001)  # gradually increasing quiet audio
+            samples = [int(rms * 32768 * (j % 10) / 10) for j in range(1440)]
+            chunk = struct.pack(f"{len(samples)}h", *samples)
+            vad.detect(chunk)
+
+        # After calibration: threshold should be ~2.5x noise floor
+        assert vad._calibrated is True
+        assert vad.energy_threshold < 0.02  # should be lower than preset
+        assert vad.energy_threshold >= 0.015  # but not below absolute minimum
+
+        # Reset should clear calibration
+        vad.reset()
+        assert vad._calibrated is False
+        assert vad.energy_threshold == 0.02
 
 
 class TestMockASR:
