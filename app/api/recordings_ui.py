@@ -835,6 +835,7 @@ async def recordings_page():
             <a href="/ui" class="back-btn">← 返回對話</a>
             <h1>錄音管理</h1>
             <div class="header-actions">
+                <button class="action-btn" id="backupBtn" onclick="triggerBackup()" style="background:#2a7;">📤 備份到R2</button>
                 <a href="/ui/training" class="back-btn">跳轉到訓練 →</a>
                 <div class="version-selector">
                     <span>版本:</span>
@@ -1966,6 +1967,41 @@ async def recordings_page():
                 log(`Processing started: ${result.status}`, 'info', 'PIPELINE');
             } catch (e) {
                 log(`Processing trigger failed: ${e.message}`, 'error', 'PIPELINE');
+            }
+        }
+
+        async function triggerBackup() {
+            const btn = document.getElementById('backupBtn');
+            btn.disabled = true;
+            btn.textContent = '備份中...';
+            log('Starting R2 backup...', 'info', 'BACKUP');
+
+            try {
+                const response = await fetch('/api/recordings/backup', { method: 'POST' });
+                const result = await response.json();
+
+                if (result.status === 'timeout') {
+                    log(`Backup timeout: ${result.message}`, 'error', 'BACKUP');
+                    showToast('備份超時！', 'error');
+                } else if (result.status === 'success') {
+                    log(`Backup complete! Lines: ${result.total_lines}`, 'info', 'BACKUP');
+                    showToast('備份成功！', 'success');
+                } else {
+                    log(`Backup completed with issues. Errors: ${result.errors?.length || 0}`, 'warning', 'BACKUP');
+                    if (result.errors?.length > 0) {
+                        result.errors.forEach(e => log(`Backup error: ${e}`, 'error', 'BACKUP'));
+                    }
+                    if (result.output_lines?.length > 0) {
+                        result.output_lines.slice(-10).forEach(l => log(`Backup output: ${l}`, 'info', 'BACKUP'));
+                    }
+                    showToast(`備份完成但有錯誤: ${result.errors?.length || 0}個`, 'warning');
+                }
+            } catch (e) {
+                log(`Backup failed: ${e.message}`, 'error', 'BACKUP');
+                showToast('備份失敗: ' + e.message, 'error');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '📤 備份到R2';
             }
         }
 

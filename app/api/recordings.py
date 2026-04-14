@@ -104,6 +104,60 @@ async def get_recording_stats():
     return get_storage_stats()
 
 
+@router.post("/backup")
+async def backup_to_r2():
+    """
+    Trigger manual backup to R2.
+    Returns detailed status of the backup operation.
+    """
+    import subprocess
+    import threading
+    import queue
+
+    result_queue = queue.Queue()
+    errors = []
+    output_lines = []
+
+    def run_backup():
+        try:
+            # Sync data to R2
+            proc = subprocess.Popen(
+                ['rclone', 'sync', '/workspace/voice-ai-pipeline/data', 'r2:voice-ai-pipeline/data', '-v'],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True
+            )
+            for line in proc.stdout:
+                line = line.rstrip()
+                output_lines.append(line)
+                if 'ERROR' in line or 'Failed' in line:
+                    errors.append(line)
+            proc.wait()
+            result_queue.put(('success', proc.returncode, output_lines, errors))
+        except Exception as e:
+            result_queue.put(('error', str(e), output_lines, errors))
+
+    thread = threading.Thread(target=run_backup)
+    thread.start()
+    thread.join(timeout=300)  # 5 min timeout
+
+    if thread.is_alive():
+        return {
+            "status": "timeout",
+            "message": "Backup timed out after 5 minutes"
+        }
+
+    status, returncode, output_lines, errors = result_queue.get()
+
+    return {
+        "status": "success" if returncode == 0 and not errors else "partial",
+        "return_code": returncode,
+        "errors": errors[:20],  # First 20 errors
+        "output_lines": output_lines[-30:],  # Last 30 output lines
+        "total_lines": len(output_lines)
+    }
+
+
 @router.post("/upload")
 async def upload_recording(
     background_tasks: BackgroundTasks,
