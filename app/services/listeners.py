@@ -55,7 +55,12 @@ def _load_listeners_unlocked() -> list[dict]:
         return SEED_LISTENERS.copy()
 
     with open(DATA_FILE, "r", encoding="utf-8") as f:
-        stored = json.load(f)
+        content = f.read()
+        if not content.strip():
+            # Empty file — re-seed
+            _save_listeners_unlocked(SEED_LISTENERS.copy())
+            return SEED_LISTENERS.copy()
+        stored = json.loads(content)
 
     # Merge seed listeners that aren't in stored
     stored_ids = {l["listener_id"] for l in stored}

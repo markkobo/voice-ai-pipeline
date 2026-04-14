@@ -1667,8 +1667,22 @@ async def recordings_page():
                 try {
                     // Get updated recording data
                     const recResponse = await fetch('/api/recordings');
+                    if (!recResponse.ok) {
+                        log(`Poll ${waited}s: API returned ${recResponse.status}`, 'warning', 'PIPELINE');
+                        continue;
+                    }
                     const recData = await recResponse.json();
-                    const rec = recData.find(r => r.recording_id === recordingId);
+                    // API returns paginated {recordings: [...]} or direct [...]
+                    let recArray;
+                    if (Array.isArray(recData)) {
+                        recArray = recData;
+                    } else if (recData.recordings && Array.isArray(recData.recordings)) {
+                        recArray = recData.recordings;
+                    } else {
+                        log(`Poll ${waited}s: unexpected response type`, 'warning', 'PIPELINE');
+                        continue;
+                    }
+                    const rec = recArray.find(r => r.recording_id === recordingId);
 
                     if (!rec) {
                         log(`Recording ${recordingId} not found during poll`, 'error', 'PIPELINE');

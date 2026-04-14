@@ -125,5 +125,4 @@ echo -e "${GREEN}=========================================${NC}"
 echo -e "  Claude Code Proxy Env is Ready."
 echo -e "${GREEN}=========================================${NC}"
 
-# 直接呼叫 claude，hash -r 和 set -e 會確保它存在且可執行
-claude
+claude --resume 1ec46e05-3395-474f-b411-592d69fa0356

@@ -247,12 +247,15 @@ class AudioProcessingPipeline:
                 device = 'cuda' if torch.cuda.is_available() else 'cpu'
                 self._log(f"Denoising with noisereduce on {device}...")
 
-                # Stationary noise reduction (frame-level)
+                # Non-stationary noise reduction (Wiener filtering)
+                # Better at reducing musical noise artifacts common in vocal-separated audio
                 reduced_noise = nr.reduce_noise(
                     y=audio,
                     sr=sample_rate,
                     y_noise=noise_clip,
-                    stationary=True,
+                    stationary=False,  # Use non-stationary for less musical noise
+                    n_fft=2048,
+                    prop_decrease=0.8,  # Balance between noise reduction and voice quality
                     device=device
                 )
 
@@ -333,6 +336,10 @@ class AudioProcessingPipeline:
                     # Load audio
                     audio, sample_rate = sf.read(str(audio_path))
                     audio_tensor = torch.from_numpy(audio).float()
+
+                    # Ensure mono for Sepformer (convert stereo [samples,2] -> [samples])
+                    if audio_tensor.ndim == 2 and audio_tensor.shape[1] == 2:
+                        audio_tensor = audio_tensor.mean(dim=1)  # stereo to mono
 
                     # Separate (enhance)
                     self._log("Running speech enhancement...")
@@ -419,6 +426,17 @@ class AudioProcessingPipeline:
             try:
                 import torch
                 import soundfile as sf
+
+                # Patch torch.load BEFORE pyannote import to handle cached checkpoints
+                # that were saved with older PyTorch (contain TorchVersion class)
+                _original_torch_load = torch.load
+                def _patched_torch_load(*args, **kwargs):
+                    # Force weights_only=False since cached checkpoints contain
+                    # TorchVersion class from older PyTorch that is not allowlisted
+                    kwargs['weights_only'] = False
+                    return _original_torch_load(*args, **kwargs)
+                torch.load = _patched_torch_load
+
                 from pyannote.audio import Pipeline
 
                 # Acquire CUDA lock to serialize GPU operations
@@ -444,7 +462,7 @@ class AudioProcessingPipeline:
                     self._log(f"Using HF_TOKEN: {hf_token[:8]}...")
                     pipeline = Pipeline.from_pretrained(
                         "pyannote/speaker-diarization-3.1",
-                        token=hf_token
+                        use_auth_token=hf_token
                     )
 
                     # Move to GPU if available
@@ -468,6 +486,30 @@ class AudioProcessingPipeline:
 
                     # Merge consecutive same-speaker segments with small gaps (<=0.5s)
                     speaker_segments = self._merge_consecutive_segments(raw_segments, gap_threshold=0.5)
+
+                    # If no segments found (diarization succeeded but found no speakers),
+                    # create a single segment covering the whole audio for training
+                    if len(speaker_segments) == 0:
+                        self._log(f"Diarize found 0 speaker segments, creating single whole-audio segment", "WARNING")
+                        audio_path = self.paths.enhanced_audio_path
+                        if not audio_path.exists():
+                            audio_path = self.paths.denoised_audio_path
+                        if not audio_path.exists():
+                            audio_path = self.paths.raw_audio_path
+                        if audio_path.exists():
+                            import soundfile as sf
+                            info = sf.info(str(audio_path))
+                            duration = info.duration
+                            speaker_segments = [{
+                                "speaker_id": "SPEAKER_00",
+                                "start_time": 0.0,
+                                "end_time": duration
+                            }]
+                            self._log(f"Created single segment for whole audio: {duration:.1f}s")
+                            self.metadata.update_speaker_segments(speaker_segments)
+                        else:
+                            self._log(f"Could not find audio file for single segment fallback", "ERROR")
+                            self.metadata.update_speaker_segments([])
 
                     elapsed_ms = int((time.time() - start_time) * 1000)
 
@@ -499,9 +541,29 @@ class AudioProcessingPipeline:
                     self._log(f"Diarize attempt {attempt + 1} failed, retrying in {sleep_time}s: {e}", "WARNING")
                     time.sleep(sleep_time)
                 else:
-                    # Fallback: empty speaker segments
-                    self._log(f"Diarize failed, using empty segments: {e}", "WARNING")
-                    self.metadata.update_speaker_segments([])
+                    # Fallback: no speaker segments found (single-speaker or diarization failed)
+                    # Create a single segment covering the whole audio for training purposes
+                    self._log(f"Diarize found no speaker segments: {e}", "WARNING")
+                    # Find the best available audio to get duration
+                    audio_path = self.paths.enhanced_audio_path
+                    if not audio_path.exists():
+                        audio_path = self.paths.denoised_audio_path
+                    if not audio_path.exists():
+                        audio_path = self.paths.raw_audio_path
+
+                    if audio_path.exists():
+                        import soundfile as sf
+                        info = sf.info(str(audio_path))
+                        duration = info.duration
+                        single_segment = [{
+                            "speaker_id": "SPEAKER_00",
+                            "start_time": 0.0,
+                            "end_time": duration
+                        }]
+                        self._log(f"Created single segment for whole audio: {duration:.1f}s")
+                        self.metadata.update_speaker_segments(single_segment)
+                    else:
+                        self.metadata.update_speaker_segments([])
 
                     elapsed_ms = int((time.time() - start_time) * 1000)
                     self.metadata.update_processing_step(
