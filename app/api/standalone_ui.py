@@ -822,6 +822,41 @@ UI_HTML = """
                 await audioContext.resume();
             }
 
+            // --- Web Audio preprocessing chain ---
+            // Source → HighPass(80Hz) → Compressor → ScriptProcessor → Destination
+            // High-pass removes low-frequency rumble (fan, HVAC, electrical hum)
+            // Compressor normalizes volume spikes, making voice more consistent
+
+            // High-pass filter: remove frequencies below 80Hz
+            const highPass = audioContext.createBiquadFilter();
+            highPass.type = 'highpass';
+            highPass.frequency.value = 80;   // Hz - removes rumble below human speech range
+            highPass.Q.value = 0.7;
+            log('High-pass filter: 80Hz (removes low-frequency noise)');
+
+            // Dynamics compressor: normalize voice volume, reduce clipping
+            const compressor = audioContext.createDynamicsCompressor();
+            compressor.threshold.value = -24;  // dB - start compressing here
+            compressor.knee.value = 12;         // dB - soft knee
+            compressor.ratio.value = 4;         // 4:1 compression above threshold
+            compressor.attack.value = 0.003;    // 3ms attack - fast enough for speech
+            compressor.release.value = 0.1;     // 100ms release - smooth
+            log('Dynamics compressor: -24dB threshold, 4:1 ratio');
+
+            // Noise gate state: track running energy to suppress ambient noise
+            // Calibrate on first 10 chunks to establish noise floor
+            const noiseGate = {
+                calibrated: false,
+                noiseFloor: 0.0,
+                sampleCount: 0,
+                calibrationSamples: 10,
+                threshold: 0.015,  // RMS threshold - chunks below this are suppressed
+                // Adaptive: raise threshold slightly above measured noise floor
+                getThreshold: function() {
+                    return Math.max(this.threshold, this.noiseFloor * 2.5);
+                }
+            };
+
             // Create and configure script processor
             if (scriptProcessor) {
                 scriptProcessor.disconnect();
@@ -839,34 +874,60 @@ UI_HTML = """
                 if (!localIsRecording.value) return;
                 const inputData = e.inputBuffer.getChannelData(0); // Float32 mono
 
-                // Debug: check if audio data is non-zero
-                let sum = 0;
+                // --- Noise gate: calibrate on first N chunks, then suppress quiet ambient ---
+                let chunkRMS = 0;
                 for (let i = 0; i < inputData.length; i++) {
-                    sum += Math.abs(inputData[i]);
+                    chunkRMS += inputData[i] * inputData[i];
                 }
-                debugSum += sum;
-                debugSampleCount++;
-                if (debugSampleCount <= 3) {
-                    log('audio chunk ' + debugSampleCount + ': avg_abs=' + (sum/inputData.length).toFixed(4));
+                chunkRMS = Math.sqrt(chunkRMS / inputData.length);
+
+                // Calibrate noise floor from first few chunks
+                if (!noiseGate.calibrated) {
+                    noiseGate.noiseFloor = Math.max(noiseGate.noiseFloor, chunkRMS);
+                    noiseGate.sampleCount++;
+                    if (noiseGate.sampleCount >= noiseGate.calibrationSamples) {
+                        noiseGate.calibrated = true;
+                        log('Noise gate calibrated: floor=' + noiseGate.noiseFloor.toFixed(4) +
+                            ', threshold=' + noiseGate.getThreshold().toFixed(4));
+                    }
                 }
 
-                // Convert Float32 [-1,1] -> Int16 [−32768, 32767]
-                const int16 = new Int16Array(inputData.length);
-                for (let i = 0; i < inputData.length; i++) {
-                    const s = Math.max(-1, Math.min(1, inputData[i]));
-                    int16[i] = s < 0 ? s * 32768 : s * 32767;
+                // Suppress chunks below adaptive threshold (gating, not muting)
+                // Mute entirely if not yet calibrated
+                if (!noiseGate.calibrated || chunkRMS >= noiseGate.getThreshold()) {
+                    // Debug: check if audio data is non-zero
+                    let sum = 0;
+                    for (let i = 0; i < inputData.length; i++) {
+                        sum += Math.abs(inputData[i]);
+                    }
+                    debugSum += sum;
+                    debugSampleCount++;
+                    if (debugSampleCount <= 3) {
+                        log('audio chunk ' + debugSampleCount + ': avg_abs=' + (sum/inputData.length).toFixed(4));
+                    }
+
+                    // Convert Float32 [-1,1] -> Int16 [−32768, 32767]
+                    const int16 = new Int16Array(inputData.length);
+                    for (let i = 0; i < inputData.length; i++) {
+                        const s = Math.max(-1, Math.min(1, inputData[i]));
+                        int16[i] = s < 0 ? s * 32768 : s * 32767;
+                    }
+                    // Send chunk to server immediately for VAD processing
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(int16.buffer);
+                    }
+                    // Also accumulate for later sending on commit
+                    accumulatedChunks.push(int16.buffer);
                 }
-                // Send chunk to server immediately for VAD processing
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                    ws.send(int16.buffer);
-                }
-                // Also accumulate for later sending on commit
-                accumulatedChunks.push(int16.buffer);
+                // else: chunk suppressed by noise gate - do NOT send or accumulate
             };
 
             // Connect the nodes (needed to start processing)
+            // Chain: source → highpass → compressor → scriptProcessor → destination
             const source = audioContext.createMediaStreamSource(stream);
-            source.connect(scriptProcessor);
+            source.connect(highPass);
+            highPass.connect(compressor);
+            compressor.connect(scriptProcessor);
             scriptProcessor.connect(audioContext.destination);
 
             accumulatedChunks = []; // Reset accumulation buffer

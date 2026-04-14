@@ -128,11 +128,13 @@ class AudioProcessingPipeline:
             self._run_enhance()
 
             # Step 4 & 5: Diarize and Transcribe can run in parallel
-            # (both depend only on enhanced audio output)
-            # TODO(P2): Use asyncio.gather for parallel execution when
-            # actual implementations are added (pyannote + whisper)
-            self._run_diarize()
-            self._run_transcribe()
+            # (both depend only on enhanced audio output, both share _cuda_lock anyway)
+            t_diarize = threading.Thread(target=self._run_diarize, name="diarize")
+            t_transcribe = threading.Thread(target=self._run_transcribe, name="transcribe")
+            t_diarize.start()
+            t_transcribe.start()
+            t_diarize.join()
+            t_transcribe.join()
 
             # Step 6: Extract speaker audio files
             self._extract_speakers()
@@ -213,9 +215,32 @@ class AudioProcessingPipeline:
                 audio, sample_rate = sf.read(str(self.paths.raw_audio_path))
 
                 # Use stationary noise reduction (better for speech)
-                # Estimate noise from first 0.5 seconds
-                noise_sample = int(0.5 * sample_rate)
-                noise_clip = audio[:noise_sample]
+                # Estimate noise from the lowest-energy portions of the ENTIRE audio,
+                # not just the first 0.5s (which would be wrong if speech starts immediately).
+                frame_length = int(0.5 * sample_rate)  # 500ms frames
+                hop = int(0.25 * sample_rate)           # 250ms hop (50% overlap)
+                energies = []
+                for start in range(0, len(audio) - frame_length, hop):
+                    frame = audio[start:start + frame_length]
+                    energies.append(np.sqrt(np.mean(frame ** 2)))
+                energies = np.array(energies)
+                # Use the quietest 20% of frames as noise estimate
+                energy_threshold = np.percentile(energies, 20)
+                noise_frames = energies <= energy_threshold
+                # Collect all quiet frames and concatenate
+                noise_audio = np.concatenate([
+                    audio[start:start + frame_length]
+                    for i, (start, is_quiet) in enumerate(zip(range(0, len(audio) - frame_length, hop), noise_frames))
+                    if is_quiet
+                ])
+                # Limit to 3 seconds of noise samples max to avoid dilution
+                max_noise_samples = int(3.0 * sample_rate)
+                if len(noise_audio) > max_noise_samples:
+                    # Uniformly sample 3 seconds from the noise collection
+                    indices = np.linspace(0, len(noise_audio) - 1, max_noise_samples).astype(int)
+                    noise_clip = noise_audio[indices]
+                else:
+                    noise_clip = noise_audio
 
                 # Denoise using noisereduce
                 # Use GPU if available
@@ -296,9 +321,12 @@ class AudioProcessingPipeline:
                 with _cuda_lock:
                     # Load Sepformer model
                     self._log("Loading speechbrain Sepformer model...")
+                    # sepformer-wsj02mix is trained on WSJ0-2Mix (2-speaker clean speech separation)
+                    # This is the right model for voice enhancement/denoising of speech.
+                    # sepformer-wham-enhancement was wrong — trained on environmental noise datasets.
                     model = SepformerSeparation.from_hparams(
-                        source="speechbrain/sepformer-wham-enhancement",
-                        savedir="pretrained_models/sepformer-wham-enhancement",
+                        source="speechbrain/sepformer-wsj02mix",
+                        savedir="pretrained_models/sepformer-wsj02mix",
                         run_opts={"device": "cuda" if torch.cuda.is_available() else "cpu"}
                     )
 
@@ -682,8 +710,10 @@ class AudioProcessingPipeline:
                     # Calculate average confidence from log probabilities
                     if segment_count > 0:
                         avg_logprob = total_confidence / segment_count
-                        # Convert log probability to confidence (0-1)
-                        confidence = min(1.0, max(0.0, np.exp(avg_logprob)))
+                        # Convert log probability to confidence (0-1).
+                        # faster-whisper avg_logprob is base-10 log, so use 10^logprob.
+                        # np.exp() would be wrong (that's for natural log).
+                        confidence = min(1.0, max(0.0, np.power(10.0, avg_logprob)))
                     else:
                         confidence = 0.0
 
