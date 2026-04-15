@@ -23,6 +23,8 @@ from app.services.training_service import (
     LoraTrainer,
     TrainingConfig,
     TrainingJob,
+    SFTConfig,
+    SftTrainer,
 )
 from app.services.training import (
     get_version_manager,
@@ -48,6 +50,7 @@ class TrainingRequest(BaseModel):
     rank: int = 16
     num_epochs: int = 10
     batch_size: int = 4
+    training_type: str = "lora"  # "lora" or "sft"
 
 
 # ============================================================================
@@ -274,6 +277,7 @@ async def create_training(request: TrainingRequest):
         "version_id": version.version_id,
         "persona_id": persona_id,
         "segment_ids": segment_ids,
+        "training_type": request.training_type,
         "recordings": [
             {
                 "recording_id": rec["recording_id"],
@@ -286,35 +290,62 @@ async def create_training(request: TrainingRequest):
         "total_duration_seconds": actual_duration,
         "training_config": {
             "rank": rank,
-            "learning_rate": 1e-4,
+            "learning_rate": 1e-4 if request.training_type == "lora" else 1e-6,
             "num_epochs": num_epochs,
             "batch_size": batch_size,
+            "training_type": request.training_type,
         },
     }
     manager.save_manifest(version.version_id, manifest)
 
-    # Estimate training time
-    estimated_time = ProgressTracker.estimate_training_time(actual_duration, num_epochs)
+    # Estimate training time (SFT is ~5x slower than LoRA)
+    base_estimate = ProgressTracker.estimate_training_time(actual_duration, num_epochs)
+    estimated_time = base_estimate * 5 if request.training_type == "sft" else base_estimate
 
     # Start training job
-    config = TrainingConfig(
-        rank=rank,
-        num_epochs=num_epochs,
-        batch_size=batch_size,
-    )
-
-    job = TrainingJob(
-        version_id=version.version_id,
-        version_dir=Path(version.lora_path),
-        audio_paths=audio_paths,
-        config=config,
-        total_audio_duration=actual_duration,
-    )
+    if request.training_type == "sft":
+        # SFT training - trains full model
+        config = SFTConfig(
+            learning_rate=1e-6,
+            num_epochs=num_epochs,
+            batch_size=1,  # Small batch for full model
+            gradient_accumulation_steps=8,
+        )
+        sft_trainer = SftTrainer(
+            version_id=version.version_id,
+            persona_id=persona_id,
+            audio_paths=audio_paths,
+            output_dir=Path(version.lora_path),
+            config=config,
+        )
+        job = TrainingJob(
+            version_id=version.version_id,
+            version_dir=Path(version.lora_path),
+            audio_paths=audio_paths,
+            config=config,  # Pass SFTConfig
+            total_audio_duration=actual_duration,
+            training_type="sft",
+        )
+    else:
+        # LoRA training (default)
+        config = TrainingConfig(
+            rank=rank,
+            num_epochs=num_epochs,
+            batch_size=batch_size,
+        )
+        job = TrainingJob(
+            version_id=version.version_id,
+            version_dir=Path(version.lora_path),
+            audio_paths=audio_paths,
+            config=config,
+            total_audio_duration=actual_duration,
+            training_type="lora",
+        )
 
     _training_jobs[version.version_id] = job
     job.start()
 
-    logger.info(f"[TRAINING] Started {version.version_id}: {len(audio_paths)} files, ~{estimated_time}s")
+    logger.info(f"[TRAINING] Started {version.version_id} ({request.training_type}): {len(audio_paths)} files, ~{estimated_time}s")
 
     return {
         "version_id": version.version_id,
@@ -325,6 +356,7 @@ async def create_training(request: TrainingRequest):
         "estimated_time_seconds": estimated_time,
         "rank": rank,
         "num_epochs": num_epochs,
+        "training_type": request.training_type,
     }
 
 

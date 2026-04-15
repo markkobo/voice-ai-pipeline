@@ -35,12 +35,14 @@ class TrainingJob:
         audio_paths: list[Path],
         config: TrainingConfig,
         total_audio_duration: float,
+        training_type: str = "lora",
     ):
         self.version_id = version_id
         self.version_dir = Path(version_dir)
         self.audio_paths = audio_paths
         self.config = config
         self.total_audio_duration = total_audio_duration
+        self.training_type = training_type
 
         self._thread: Optional[threading.Thread] = None
         self._result: Optional[TrainingResult] = None
@@ -87,19 +89,22 @@ class TrainingJob:
 
             # Create training script
             train_script = self.version_dir / "train_lora.py"
+            use_lora = (self.training_type == "lora")
             # Use native PyTorch training with correct forward_sub_talker_finetune approach
-            script = '''
-# INLINE SCRIPT MARKER - Correct LoRA training for Qwen3-TTS voice cloning
+            script = f'''
+# INLINE SCRIPT MARKER - {"LoRA" if use_lora else "SFT"} training for Qwen3-TTS voice cloning
 # Uses forward_sub_talker_finetune which is the proper training method
 import os, sys, json, time, logging
 from pathlib import Path
 import torch
 import soundfile as sf
 import numpy as np
-from peft import LoraConfig, get_peft_model
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
-# Use native PyTorch training without AMP
+
+USE_LORA = {str(use_lora).lower()}
+if USE_LORA:
+    from peft import LoraConfig, get_peft_model
 
 from qwen_tts.core.models import Qwen3TTSForConditionalGeneration
 from qwen_tts import Qwen3TTSTokenizer
@@ -133,17 +138,33 @@ def main():
         logger.info(f"Model loaded: {type(model)}")
         logger.info(f"num_code_groups: {model.talker.config.num_code_groups}")
 
-        # Apply LoRA to both talker and code_predictor
-        logger.info("Applying LoRA...")
-        lora_config = LoraConfig(
-            r=RANK, lora_alpha=RANK*2,
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-            lora_dropout=0.05, bias="none",
-        )
-        # LoRA on the talker model (text + speaker encoding)
-        model.talker.model = get_peft_model(model.talker.model, lora_config, adapter_name="talker_lora")
-        # LoRA on the code_predictor
-        model.talker.code_predictor = get_peft_model(model.talker.code_predictor, lora_config, adapter_name="codec_lora")
+        if USE_LORA:
+            # Apply LoRA to both talker and code_predictor
+            logger.info("Applying LoRA...")
+            lora_config = LoraConfig(
+                r=RANK, lora_alpha=RANK*2,
+                target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+                lora_dropout=0.05, bias="none",
+            )
+            # LoRA on the talker model (text + speaker encoding)
+            model.talker.model = get_peft_model(model.talker.model, lora_config, adapter_name="talker_lora")
+            # LoRA on the code_predictor
+            model.talker.code_predictor = get_peft_model(model.talker.code_predictor, lora_config, adapter_name="codec_lora")
+
+            # Only train LoRA parameters
+            for name, param in model.named_parameters():
+                if "lora" in name.lower():
+                    param.requires_grad = True
+                else:
+                    param.requires_grad = False
+        else:
+            # SFT mode - train ALL parameters
+            logger.info("SFT mode: training all parameters (no LoRA)")
+            for param in model.parameters():
+                param.requires_grad = True
+            # Enable gradient checkpointing to save memory
+            if hasattr(model, 'enable_gradient_checkpointing'):
+                model.enable_gradient_checkpointing()
 
         # Print trainable parameters
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -202,17 +223,23 @@ def main():
         # Use native PyTorch training with correct forward approach
         model.train()
 
-        # Only train LoRA parameters
-        trainable_params = []
-        for name, param in model.named_parameters():
-            if "lora" in name.lower():
+        if USE_LORA:
+            # Only train LoRA parameters
+            trainable_params = []
+            for name, param in model.named_parameters():
+                if "lora" in name.lower():
+                    param.requires_grad = True
+                    trainable_params.append(param)
+                else:
+                    param.requires_grad = False
+            optimizer = AdamW(trainable_params, lr=LEARNING_RATE)
+            logger.info(f"Training with {len(trainable_params)} trainable LoRA parameters")
+        else:
+            # SFT mode - train all parameters with lower LR
+            for param in model.parameters():
                 param.requires_grad = True
-                trainable_params.append(param)
-            else:
-                param.requires_grad = False
-
-        optimizer = AdamW(trainable_params, lr=LEARNING_RATE)
-        logger.info(f"Training with {len(trainable_params)} trainable LoRA parameters")
+            optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
+            logger.info(f"SFT training: all {sum(1 for _ in model.parameters())} parameters")
 
         logger.info(f"Starting training: {len(dataset)} samples, {NUM_EPOCHS} epochs")
         logger.info(f"Using forward_sub_talker_finetune for proper loss computation")
@@ -330,46 +357,58 @@ def main():
 
         training_time = int(time.time() - start_time)
 
-        # Save LoRA adapter weights
-        lora_path = Path(OUTPUT_DIR) / "adapter"
-        lora_path.mkdir(parents=True, exist_ok=True)
+        if USE_LORA:
+            # Save LoRA adapter weights
+            lora_path = Path(OUTPUT_DIR) / "adapter"
+            lora_path.mkdir(parents=True, exist_ok=True)
 
-        # Save only the LoRA trainable parameters (not full model)
-        from safetensors.torch import save_file
+            # Save only the LoRA trainable parameters (not full model)
+            from safetensors.torch import save_file
 
-        # Collect all LoRA state dicts
-        state_dict = {}
-        for name, param in model.named_parameters():
-            if param.requires_grad and "lora" in name.lower():
-                state_dict[name] = param.cpu()
+            # Collect all LoRA state dicts
+            state_dict = {}
+            for name, param in model.named_parameters():
+                if param.requires_grad and "lora" in name.lower():
+                    state_dict[name] = param.cpu()
 
-        # Save as safetensors
-        save_file(state_dict, lora_path / "adapter_model.safetensors")
+            # Save as safetensors
+            save_file(state_dict, lora_path / "adapter_model.safetensors")
 
-        # Save adapter config with proper PEFT format
-        adapter_config = {
-            "base_model_name_or_path": BASE_MODEL,
-            "peft_type": "LORA",
-            "task_type": "CAUSAL_LM",
-            "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"],
-            "r": RANK,
-            "lora_alpha": RANK * 2,
-            "lora_dropout": 0.05,
-            "bias": "none",
-        }
-        import json as json_module
-        with open(lora_path / "adapter_config.json", "w") as f:
-            json_module.dump(adapter_config, f)
+            # Save adapter config with proper PEFT format
+            adapter_config = {
+                "base_model_name_or_path": BASE_MODEL,
+                "peft_type": "LORA",
+                "task_type": "CAUSAL_LM",
+                "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"],
+                "r": RANK,
+                "lora_alpha": RANK * 2,
+                "lora_dropout": 0.05,
+                "bias": "none",
+            }
+            import json as json_module
+            with open(lora_path / "adapter_config.json", "w") as f:
+                json_module.dump(adapter_config, f)
 
-        logger.info(f"LoRA saved to: {lora_path}")
+            logger.info(f"LoRA saved to: {lora_path}")
+            result = {
+                "success": True,
+                "lora_path": str(lora_path),
+                "final_loss": float(avg_loss) if not np.isnan(avg_loss) else 0.0,
+                "training_time_seconds": training_time,
+            }
+        else:
+            # SFT mode - save full model
+            sft_path = Path(OUTPUT_DIR) / "sft_model"
+            sft_path.mkdir(parents=True, exist_ok=True)
+            model.save_pretrained(sft_path)
+            logger.info(f"SFT model saved to: {sft_path}")
+            result = {
+                "success": True,
+                "sft_path": str(sft_path),
+                "final_loss": float(avg_loss) if not np.isnan(avg_loss) else 0.0,
+                "training_time_seconds": training_time,
+            }
 
-        # Save result
-        result = {
-            "success": True,
-            "lora_path": str(lora_path),
-            "final_loss": float(avg_loss) if not np.isnan(avg_loss) else 0.0,
-            "training_time_seconds": training_time,
-        }
         with open(Path(OUTPUT_DIR) / "training_result.json", "w") as f:
             json.dump(result, f)
 
