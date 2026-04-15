@@ -1137,11 +1137,14 @@ async def training_page():
 
             selectedSegments.forEach(segId => {
                 // segId format: {recording_id}_{speaker_id}
-                // recording_id can be variable length (UUID or descriptive name)
-                // speaker_id is always after the last underscore
-                const lastSep = segId.lastIndexOf('_');
-                const recId = segId.substring(0, lastSep);
-                const actualSpeakerId = segId.substring(lastSep + 1);
+                // speaker_id is SPEAKER_XX, so find the _SPEAKER_ pattern from the end
+                const speakerIndex = segId.indexOf('_SPEAKER_');
+                if (speakerIndex === -1) {
+                    log(`Invalid segId format (no _SPEAKER_): ${segId}`, 'warning', 'TRAINING');
+                    return;
+                }
+                const recId = segId.substring(0, speakerIndex);
+                const actualSpeakerId = segId.substring(speakerIndex + 1);  // Include the leading underscore
                 const rec = allRecordings.find(r => r.recording_id === recId);
                 if (!rec) {
                     log(`Recording not found: ${recId}`, 'warning', 'TRAINING');
@@ -1210,9 +1213,10 @@ async def training_page():
             let totalDuration = 0;
             segmentIds.forEach(segId => {
                 // segId format: {recording_id}_{speaker_id}
-                const lastSep = segId.lastIndexOf('_');
-                const recId = segId.substring(0, lastSep);
-                const actualSpeakerId = segId.substring(lastSep + 1);
+                const speakerIndex = segId.indexOf('_SPEAKER_');
+                if (speakerIndex === -1) return;
+                const recId = segId.substring(0, speakerIndex);
+                const actualSpeakerId = segId.substring(speakerIndex + 1);
                 const rec = allRecordings.find(r => r.recording_id === recId);
                 const segment = rec?.speaker_segments?.find(s => s.speaker_id === actualSpeakerId);
                 if (segment) totalDuration += segment.duration_seconds || 0;
