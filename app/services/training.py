@@ -319,13 +319,15 @@ def get_training_audio_for_persona(
     for seg_id in (segment_ids or []):
         # Parse segment_id = "{recording_id}_{speaker_id}"
         # recording_id is UUID (36 chars: 8-4-4-4-12 with dashes)
-        # speaker_id is like SPEAKER_00
-        if len(seg_id) < 37:
-            logger.warning(f"[TRAINING] Invalid segment_id format (too short): {seg_id}")
+        # speaker_id is like SPEAKER_00, use _SPEAKER_ pattern to split
+        speaker_marker = '_SPEAKER_'
+        marker_pos = seg_id.rfind(speaker_marker)
+        if marker_pos == -1:
+            logger.warning(f"[TRAINING] Invalid segment_id format (no {speaker_marker}): {seg_id}")
             continue
 
-        rec_id = seg_id[:36]  # UUID is first 36 chars
-        speaker_id = seg_id[37:]  # After underscore at position 36
+        rec_id = seg_id[:marker_pos]
+        speaker_id = seg_id[marker_pos + 1:]  # Include the leading underscore
 
         # Find recording
         rec = rec_by_id.get(rec_id)
