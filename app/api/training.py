@@ -212,14 +212,15 @@ async def create_training(request: TrainingRequest):
 
     # Parse segment_ids to extract recording_ids
     # segment_id format: {recording_id}_{speaker_id}
-    # recording_id is UUID (36 chars: 8-4-4-4-12 with dashes)
-    # speaker_id is like SPEAKER_00
+    # speaker_id is like SPEAKER_00, use _SPEAKER_ pattern to split
     rec_ids_set = set()
     for seg_id in segment_ids:
-        if len(seg_id) < 37:
-            raise HTTPException(400, f"Invalid segment_id format: {seg_id} (too short)")
-        rec_id = seg_id[:36]  # UUID is first 36 chars
-        speaker_id = seg_id[37:]  # After underscore at position 36
+        speaker_marker = '_SPEAKER_'
+        marker_pos = seg_id.rfind(speaker_marker)
+        if marker_pos == -1:
+            raise HTTPException(400, f"Invalid segment_id format (no {speaker_marker}): {seg_id}")
+        rec_id = seg_id[:marker_pos]
+        speaker_id = seg_id[marker_pos + 1:]
         rec_ids_set.add(rec_id)
 
     recording_ids = list(rec_ids_set)
