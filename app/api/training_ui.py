@@ -1136,14 +1136,22 @@ async def training_page():
             const items = [];
 
             selectedSegments.forEach(segId => {
-                // segId format: {recording_id}_{speaker_id} (no index in selectionKey!)
-                // speaker_id is SPEAKER_00, recording_id is UUID with dashes
-                const recId = segId.substring(0, 36);  // UUID is first 36 chars (8-4-4-4-12 with dashes)
-                const actualSpeakerId = segId.substring(37);  // After underscore at position 36
+                // segId format: {recording_id}_{speaker_id}
+                // recording_id can be variable length (UUID or descriptive name)
+                // speaker_id is always after the last underscore
+                const lastSep = segId.lastIndexOf('_');
+                const recId = segId.substring(0, lastSep);
+                const actualSpeakerId = segId.substring(lastSep + 1);
                 const rec = allRecordings.find(r => r.recording_id === recId);
-                if (!rec) return;
+                if (!rec) {
+                    log(`Recording not found: ${recId}`, 'warning', 'TRAINING');
+                    return;
+                }
                 const segment = rec.speaker_segments?.find(s => s.speaker_id === actualSpeakerId);
-                if (!segment) return;
+                if (!segment) {
+                    log(`Segment not found: ${actualSpeakerId} in ${recId}`, 'warning', 'TRAINING');
+                    return;
+                }
 
                 const duration = segment.duration_seconds || 0;
                 totalDuration += duration;
@@ -1153,6 +1161,7 @@ async def training_page():
                     duration,
                     segId
                 });
+                log(`Preview: ${recId}/${actualSpeakerId} = ${duration}s`, 'info', 'TRAINING');
             });
 
             const personaName = getPersonaName(personaId);
@@ -1200,9 +1209,10 @@ async def training_page():
             // Calculate total duration
             let totalDuration = 0;
             segmentIds.forEach(segId => {
-                // segId format: {recording_id}_{speaker_id} (UUID with dashes + underscore + SPEAKER_00)
-                const recId = segId.substring(0, 36);  // UUID is first 36 chars
-                const actualSpeakerId = segId.substring(37);  // After underscore at position 36
+                // segId format: {recording_id}_{speaker_id}
+                const lastSep = segId.lastIndexOf('_');
+                const recId = segId.substring(0, lastSep);
+                const actualSpeakerId = segId.substring(lastSep + 1);
                 const rec = allRecordings.find(r => r.recording_id === recId);
                 const segment = rec?.speaker_segments?.find(s => s.speaker_id === actualSpeakerId);
                 if (segment) totalDuration += segment.duration_seconds || 0;
