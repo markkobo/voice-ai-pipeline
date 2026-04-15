@@ -1680,7 +1680,12 @@ async def recordings_page():
                     } else if (recData.recordings && Array.isArray(recData.recordings)) {
                         recArray = recData.recordings;
                     } else {
-                        log(`Poll ${waited}s: unexpected response type`, 'warning', 'PIPELINE');
+                        log(`Poll ${waited}s: unexpected response type: ${typeof recData}`, 'warning', 'PIPELINE');
+                        if (recData && typeof recData === 'object') {
+                            log(`Poll response keys: ${Object.keys(recData).join(', ')}`, 'warning', 'PIPELINE');
+                        } else {
+                            log(`Poll raw response: ${String(recData).substring(0, 100)}`, 'warning', 'PIPELINE');
+                        }
                         continue;
                     }
                     const rec = recArray.find(r => r.recording_id === recordingId);
