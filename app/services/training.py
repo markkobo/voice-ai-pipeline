@@ -34,6 +34,7 @@ class TrainingVersion:
     base_model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
     lora_path: Optional[str] = None
     model_type: Optional[str] = None  # "custom_voice" for SFT, None for LoRA
+    training_type: Optional[str] = None  # "sft" or "lora"
     rank: int = 16
     learning_rate: float = 1e-4
     num_epochs: int = 10
@@ -58,7 +59,7 @@ class TrainingVersion:
         # Fields that TrainingVersion actually has
         fields = {
             "version_id", "persona_id", "status", "nickname", "base_model",
-            "lora_path", "model_type", "rank", "learning_rate", "num_epochs", "batch_size",
+            "lora_path", "model_type", "training_type", "rank", "learning_rate", "num_epochs", "batch_size",
             "final_loss", "training_time_seconds", "recording_ids_used",
             "segment_ids_used", "num_recordings_used", "created_at", "completed_at"
         }
@@ -115,6 +116,7 @@ class VersionManager:
         num_epochs: int = 10,
         batch_size: int = 4,
         segment_ids: list[str] = None,
+        model_type: Optional[str] = None,
     ) -> TrainingVersion:
         """Create a new training version."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -131,6 +133,7 @@ class VersionManager:
             learning_rate=learning_rate,
             num_epochs=num_epochs,
             batch_size=batch_size,
+            model_type=model_type,
             created_at=datetime.now().isoformat(),
         )
 
@@ -152,11 +155,32 @@ class VersionManager:
                 return v
         return None
 
+    def get_version_training_type(self, version_id: str) -> Optional[str]:
+        """Get training_type from manifest without recursion."""
+        # Construct manifest path directly from version_id
+        # version_id format: v1_20260427_131334
+        # lora_path format: data/models/persona_v1_20260427_131334
+        for v in self._versions:
+            if v.version_id == version_id and v.lora_path:
+                manifest_path = Path(v.lora_path) / "manifest.json"
+                if manifest_path.exists():
+                    with open(manifest_path, "r") as f:
+                        manifest = json.load(f)
+                    return manifest.get("training_type")
+        return None
+
     def list_versions(self, persona_id: Optional[str] = None) -> list[TrainingVersion]:
-        """List all versions, optionally filtered by persona."""
-        if persona_id:
-            return [v for v in self._versions if v.persona_id == persona_id]
-        return self._versions
+        """List all versions, optionally filtered by persona. Loads training_type from manifest."""
+        result = []
+        for v in self._versions:
+            if persona_id is None or v.persona_id == persona_id:
+                # Load training_type from manifest if not already set
+                if v.training_type is None:
+                    training_type = self.get_version_training_type(v.version_id)
+                    if training_type:
+                        v.training_type = training_type
+                result.append(v)
+        return result
 
     def get_active_version(self, persona_id: str) -> Optional[TrainingVersion]:
         """Get the active version for a persona."""
@@ -233,6 +257,17 @@ class VersionManager:
             lora_path = Path(version.lora_path)
             if lora_path.exists():
                 shutil.rmtree(lora_path)
+
+            # For SFT models, also delete the merged model directory
+            # Merged path: {lora_path parent}/merged_qwen3_tts_{version_base}
+            if version.model_type in ('sft', 'custom_voice', 'custom_voice_compatible'):
+                parts = lora_path.name.split('_')
+                version_base = '_'.join(parts[:3])  # e.g., persona_new_v3
+                merged_name = f"merged_qwen3_tts_{version_base}"
+                merged_path = lora_path.parent / merged_name
+                if merged_path.exists():
+                    shutil.rmtree(merged_path)
+                    logger.info(f"[TRAINING] Deleted merged model: {merged_path}")
 
         self._save_index()
         logger.info(f"[TRAINING] Deleted version: {version_id}")

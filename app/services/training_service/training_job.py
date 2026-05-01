@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Optional
 
 from .lora_trainer import LoraTrainer, TrainingConfig, TrainingResult
-from .progress_tracker import ProgressTracker
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +35,7 @@ class TrainingJob:
         config: TrainingConfig,
         total_audio_duration: float,
         training_type: str = "lora",
+        persona_id: str = "persona_new",
     ):
         self.version_id = version_id
         self.version_dir = Path(version_dir)
@@ -43,6 +43,7 @@ class TrainingJob:
         self.config = config
         self.total_audio_duration = total_audio_duration
         self.training_type = training_type
+        self.persona_id = persona_id
 
         self._thread: Optional[threading.Thread] = None
         self._result: Optional[TrainingResult] = None
@@ -62,14 +63,6 @@ class TrainingJob:
     def _run_training(self):
         """Run training synchronously."""
         try:
-            # Initialize progress tracker
-            tracker = ProgressTracker(
-                version_id=self.version_id,
-                version_dir=self.version_dir,
-                total_epochs=self.config.num_epochs,
-                total_audio_duration=self.total_audio_duration,
-            )
-
             # Create trainer
             trainer = LoraTrainer(
                 version_id=self.version_id,
@@ -97,12 +90,17 @@ class TrainingJob:
 import os, sys, json, time, logging
 from pathlib import Path
 import torch
+
+# Patch: add missing float8_e8m0fnu dtype for PyTorch 2.6 compatibility with PEFT 0.19
+if not hasattr(torch, "float8_e8m0fnu"):
+    torch.float8_e8m0fnu = torch.float8_e5m2  # Use float8_e5m2 as fallback
+
 import soundfile as sf
 import numpy as np
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
 
-USE_LORA = {str(use_lora).lower()}
+USE_LORA = {use_lora}
 if USE_LORA:
     from peft import LoraConfig, get_peft_model
 
@@ -115,14 +113,31 @@ logger = logging.getLogger(__name__)
 AUDIO_PATHS = ''' + json.dumps([str(p) for p in self.audio_paths], ensure_ascii=False) + '''
 OUTPUT_DIR = "''' + str(self.version_dir) + '''"
 BASE_MODEL = "''' + self.config.base_model + '''"
-RANK = ''' + str(self.config.rank) + '''
+RANK = ''' + str(getattr(self.config, 'rank', 16)) + '''
 LEARNING_RATE = ''' + str(self.config.learning_rate) + '''
 NUM_EPOCHS = ''' + str(self.config.num_epochs) + '''
 BATCH_SIZE = ''' + str(self.config.batch_size) + '''
 TRACKER_PATH = Path(OUTPUT_DIR) / "progress.json"
+PERSONA_ID = "''' + self.persona_id + '''"
+
+# Initialize progress.json before training starts
+def init_progress():
+    prog = {
+        "status": "training",
+        "current_epoch": 0,
+        "progress_pct": 0,
+        "persona_id": PERSONA_ID,
+        "training_type": "lora" if USE_LORA else "sft",
+    }
+    with open(TRACKER_PATH, "w") as f:
+        json.dump(prog, f)
+    logger.info(f"Progress initialized: {TRACKER_PATH}")
 
 def main():
     try:
+        # Initialize progress tracking
+        init_progress()
+
         logger.info(f"Loading model: {BASE_MODEL}")
         logger.info(f"AUDIO_PATHS: {AUDIO_PATHS}")
 
@@ -174,6 +189,7 @@ def main():
         # Encode audio to tokens
         logger.info("Encoding audio files...")
         all_audio_codes = []  # List of (seq_len, num_code_groups) tensors
+        TARGET_SR = 24000  # Qwen3-TTS requires 24kHz
         for path in AUDIO_PATHS:
             p = Path(path)
             if p.exists():
@@ -181,6 +197,14 @@ def main():
                 # Ensure audio is float32
                 if audio.dtype != np.float32:
                     audio = audio.astype(np.float32)
+                # Resample to 24kHz if needed (Qwen3-TTS only supports 24kHz)
+                if sr != TARGET_SR:
+                    logger.info(f"Resampling {path} from {sr}Hz to {TARGET_SR}Hz")
+                    # Use scipy for high-quality resampling
+                    from scipy import signal
+                    num_samples = int(len(audio) * TARGET_SR / sr)
+                    audio = signal.resample(audio, num_samples)
+                    sr = TARGET_SR
                 enc = speech_tokenizer.encode(audio, sr=sr)
                 codes = enc["audio_codes"][0]  # (seq_len, num_code_groups)
                 all_audio_codes.append(codes)
@@ -197,28 +221,125 @@ def main():
         # Create dataset that yields (codec_ids, talker_hidden_state) pairs
         # For voice cloning: we use audio_codes as both input and target
         # talker_hidden_state comes from processing the audio through speaker encoder
+        #
+        # IMPORTANT: Chunk audio into smaller segments to increase training samples.
+        # Original design had only 3 samples (one per audio file), causing overfitting.
+        # Now we create overlapping chunks of ~5-10 seconds each for 50-100+ samples.
         class SpeechDataset(Dataset):
-            def __init__(self, audio_codes_list, num_code_groups):
-                self.audio_codes = audio_codes_list
+            def __init__(self, audio_codes_list, num_code_groups, chunk_size=300, hop_size=150):
+                """
+                Args:
+                    audio_codes_list: List of (seq_len, num_code_groups) tensors
+                    num_code_groups: Number of code groups (typically 16)
+                    chunk_size: Max frames per chunk (default 300 ~5-10 sec)
+                    hop_size: Hop size for overlapping chunks (default 150)
+                """
                 self.num_code_groups = num_code_groups
+                self.samples = []  # List of (chunk_tensor, audio_file_index)
+                self.audio_file_indices = []  # Maps sample index -> audio file index
+
+                for audio_idx, audio_codes in enumerate(audio_codes_list):
+                    seq_len = audio_codes.shape[0]
+                    # Create overlapping chunks
+                    for start in range(0, seq_len, hop_size):
+                        end = min(start + chunk_size, seq_len)
+                        chunk_len = end - start
+                        if chunk_len >= 50:  # Minimum chunk size for meaningful training
+                            chunk = audio_codes[start:end].clone()
+                            self.samples.append(chunk)
+                            self.audio_file_indices.append(audio_idx)
+
+                logger.info(f"Created {len(self.samples)} chunks from {len(audio_codes_list)} audio files")
 
             def __len__(self):
-                return len(self.audio_codes)
+                return len(self.samples)
 
             def __getitem__(self, idx):
-                codes = self.audio_codes[idx]  # (seq_len, num_code_groups)
-                # Use middle portion of audio for training (skip very start/end)
-                seq_len = codes.shape[0]
-                if seq_len > 10:
-                    start = seq_len // 4
-                    end = seq_len - seq_len // 4
-                    codes = codes[start:end]
-
-                # Target: all code groups at each time step
-                # Input: same sequence length for predicting next step
-                return codes  # (seq_len, num_code_groups)
+                return self.samples[idx], self.audio_file_indices[idx]
 
         dataset = SpeechDataset(all_audio_codes, num_code_groups)
+
+        # Validate dataset before training
+        total_chunks = len(dataset)
+        MIN_CHUNKS = 30  # Minimum for meaningful SFT training
+
+        logger.info(f"[VALIDATION] Training dataset: {total_chunks} chunks from {len(AUDIO_PATHS)} audio files")
+        logger.info(f"[VALIDATION] Expected chunks per file: ~{total_chunks // max(len(AUDIO_PATHS), 1)}")
+
+        if total_chunks < MIN_CHUNKS:
+            logger.error(f"[VALIDATION] FAILED: Insufficient training samples! {total_chunks} < {MIN_CHUNKS} minimum required")
+            raise ValueError(f"Insufficient training samples for SFT: {total_chunks} < {MIN_CHUNKS}. Need more/longer audio.")
+
+        logger.info(f"[VALIDATION] PASSED: {total_chunks} chunks >= {MIN_CHUNKS} minimum")
+
+        # Log dataset statistics
+        chunk_size = 300  # Frames per chunk
+        hop_size = 150    # Hop size for overlapping chunks
+        min_chunk_size = 50  # Minimum chunk size for meaningful training
+        total_frames = sum(s.shape[0] for s in dataset.samples)
+        avg_chunk_len = total_frames / len(dataset.samples)
+        logger.info(f"[DATASET] Total chunks: {len(dataset)}, Total frames: {total_frames}, Avg chunk len: {avg_chunk_len:.1f}")
+        logger.info(f"[DATASET] Chunk size: {chunk_size}, Hop size: {hop_size}, Min chunk: {min_chunk_size}")
+
+        # For SFT: extract and cache speaker embeddings BEFORE training
+        # We need one embedding per ORIGINAL audio file, not per chunk
+        # Since dataset is now chunked, we need to map chunk -> audio file
+        audio_for_speaker_embeds = []
+        TARGET_SR = 24000  # Qwen3-TTS requires 24kHz
+        if not USE_LORA:
+            logger.info("SFT mode: pre-extracting speaker embeddings...")
+            # First load all audio for speaker embedding extraction
+            for path in AUDIO_PATHS:
+                p = Path(path)
+                if p.exists():
+                    audio_data, sr = sf.read(str(p))
+                    if audio_data.dtype != np.float32:
+                        audio_data = audio_data.astype(np.float32)
+                    # Resample to 24kHz if needed
+                    if sr != TARGET_SR:
+                        logger.info(f"Resampling {path} from {sr}Hz to {TARGET_SR}Hz")
+                        from scipy import signal
+                        num_samples = int(len(audio_data) * TARGET_SR / sr)
+                        audio_data = signal.resample(audio_data, num_samples)
+                        sr = TARGET_SR
+                    # Normalize
+                    max_val = np.abs(audio_data).max()
+                    if max_val > 0:
+                        audio_data = audio_data / max_val
+                    audio_for_speaker_embeds.append((audio_data, sr))
+                    logger.info(f"Loaded: {path}, {len(audio_data)/sr:.1f}s")
+                else:
+                    audio_for_speaker_embeds.append((None, None))
+                    logger.warning(f"Audio file not found: {path}")
+
+            # Pre-extract speaker embeddings for each audio file
+            # Create a list that maps dataset index -> speaker embedding
+            # We need to track which chunk comes from which audio file
+            logger.info("Extracting speaker embeddings from each audio file...")
+            speaker_embeddings_cache = []  # List of (1, hidden_size) tensors per audio file
+            for audio_data, sr in audio_for_speaker_embeds:
+                if audio_data is not None:
+                    with torch.no_grad():
+                        emb = model.extract_speaker_embedding(audio_data, sr)
+                        speaker_embeddings_cache.append(emb.unsqueeze(0))
+                        logger.info(f"Extracted embedding shape={emb.shape}")
+                else:
+                    speaker_embeddings_cache.append(None)
+            logger.info(f"Cached {len(speaker_embeddings_cache)} speaker embeddings")
+
+            # Validate speaker embeddings
+            for i, emb in enumerate(speaker_embeddings_cache):
+                if emb is None:
+                    logger.error(f"[VALIDATION] Speaker embedding {i} is None!")
+                    raise ValueError(f"Failed to extract speaker embedding from audio file {i}")
+
+                emb_std = emb.std().item()
+                emb_mean = emb.abs().mean().item()
+
+                logger.info(f"[SPEAKER_EMB] File {i}: mean={emb_mean:.6f}, std={emb_std:.6f}")
+
+                if emb_std < 0.01:
+                    logger.warning(f"[SPEAKER_EMB] File {i} has suspiciously low std={emb_std:.6f} - may indicate silent/corrupt audio")
 
         # Use native PyTorch training with correct forward approach
         model.train()
@@ -246,6 +367,34 @@ def main():
 
         start_time = time.time()
 
+        # For SFT with Base model, load audio files once for speaker embedding extraction
+        audio_for_speaker_embeds = []
+        TARGET_SR = 24000  # Qwen3-TTS requires 24kHz
+        if not USE_LORA:
+            logger.info("SFT mode: loading audio for speaker embedding extraction...")
+            for path in AUDIO_PATHS:
+                p = Path(path)
+                if p.exists():
+                    audio_data, sr = sf.read(str(p))
+                    if audio_data.dtype != np.float32:
+                        audio_data = audio_data.astype(np.float32)
+                    # Resample to 24kHz if needed (Qwen3-TTS only supports 24kHz)
+                    if sr != TARGET_SR:
+                        logger.info(f"Resampling {path} from {sr}Hz to {TARGET_SR}Hz for speaker embedding")
+                        from scipy import signal
+                        num_samples = int(len(audio_data) * TARGET_SR / sr)
+                        audio_data = signal.resample(audio_data, num_samples)
+                        sr = TARGET_SR
+                    # Normalize audio
+                    max_val = np.abs(audio_data).max()
+                    if max_val > 0:
+                        audio_data = audio_data / max_val
+                    audio_for_speaker_embeds.append((audio_data, sr))
+                    logger.info(f"Loaded audio for speaker embedding: {path}, {len(audio_data)/sr:.1f}s")
+                else:
+                    audio_for_speaker_embeds.append((None, None))
+                    logger.warning(f"Audio file not found for speaker embedding: {path}")
+
         for epoch in range(NUM_EPOCHS):
             epoch_loss = 0.0
             num_batches = 0
@@ -264,57 +413,46 @@ def main():
             except Exception as e:
                 logger.error(f"Progress update error: {e}")
 
-            # Training loop - process each audio file
+            # Training loop - process each chunk
             for sample_idx in range(len(dataset)):
-                sample_codes = dataset[sample_idx]  # (seq_len, num_code_groups)
+                sample_codes, audio_file_idx = dataset[sample_idx]  # Unpack chunk and audio file index
                 seq_len = sample_codes.shape[0]
+                device = next(model.parameters()).device
 
-                # Process each time step
-                for step in range(min(seq_len - 1, 50)):  # Limit steps per sample
-                    # Get codec_ids for this and next step
-                    # codec_ids: (num_code_groups,) - current step
-                    # target_ids: (num_code_groups,) - next step (for labels)
-                    device = next(model.parameters()).device
-                    codec_ids = sample_codes[step].to(device)  # (num_code_groups,) - move to device
-
-                    # Get speaker embedding from reference audio
-                    # Use average of audio embeddings as speaker representation
-                    # In practice, you'd use the speaker_encoder, but for simplicity
-                    # we use a learned or fixed representation
-
-                    # For voice cloning, we create a "pseudo" talker_hidden_state
-                    # by averaging the audio embeddings
+                # For SFT: use cached speaker embedding from the audio file this chunk came from
+                # For LoRA: use code embedding averaging
+                if not USE_LORA and speaker_embeddings_cache and speaker_embeddings_cache[audio_file_idx] is not None:
+                    # Use cached speaker embedding from pre-extracted list
+                    talker_hidden = speaker_embeddings_cache[audio_file_idx]
+                    logger.debug(f"Chunk {sample_idx} from audio {audio_file_idx}: using cached speaker embedding")
+                else:
+                    # Fallback: use code embedding averaging
                     with torch.no_grad():
-                        # Get audio embeddings from code_predictor's embeddings
                         audio_embeds = []
                         # First code group uses talker's embeddings
                         embed = model.talker.get_input_embeddings()(
-                            codec_ids[0].unsqueeze(0).to(device)
-                        )  # (1, hidden_size)
+                            sample_codes[0].unsqueeze(0).to(device)
+                        )
                         audio_embeds.append(embed)
                         # Remaining code groups use code_predictor's embeddings
                         for g in range(1, num_code_groups):
                             embed = model.talker.code_predictor.get_input_embeddings()[g-1](
-                                codec_ids[g].unsqueeze(0).to(device)
-                            )  # (1, hidden_size)
+                                sample_codes[g].unsqueeze(0).to(device)
+                            )
                             audio_embeds.append(embed)
-                        audio_embeds = torch.stack(audio_embeds, dim=1).squeeze(0)  # (num_code_groups, hidden_size)
+                        audio_embeds = torch.stack(audio_embeds, dim=1).squeeze(0)
 
                         # Average as speaker representation
-                        talker_hidden = audio_embeds.mean(dim=0, keepdim=True)  # (1, hidden_size)
+                        talker_hidden = audio_embeds.mean(dim=0, keepdim=True)
 
-                    # Now use forward_sub_talker_finetune
-                    # It expects codec_ids as (batch, num_code_groups) and talker_hidden as (batch, hidden_size)
+                # Process each time step
+                for step in range(min(seq_len - 1, 50)):
+                    codec_ids = sample_codes[step].to(device)
+
                     try:
-                        # Prepare inputs - move to model device
-                        codec_ids_batch = codec_ids.unsqueeze(0).long().to(device)  # (1, num_code_groups)
-                        talker_hidden_batch = talker_hidden.to(device)  # (1, hidden_size)
+                        codec_ids_batch = codec_ids.unsqueeze(0).long().to(device)
+                        talker_hidden_batch = talker_hidden.to(device)
 
-                        # Call forward_sub_talker_finetune
-                        # This computes loss properly by:
-                        # 1. Concatenating talker_hidden with audio code embeddings
-                        # 2. Running through code_predictor.forward_finetune
-                        # 3. Computing loss between predicted and actual next codes
                         _, loss = model.talker.forward_sub_talker_finetune(
                             codec_ids=codec_ids_batch,
                             talker_hidden_states=talker_hidden_batch,
@@ -338,7 +476,7 @@ def main():
                         continue
 
             avg_loss = epoch_loss / max(num_batches, 1)
-            logger.info(f"Epoch {epoch+1} complete: avg_loss={avg_loss:.6f}, batches={num_batches}")
+            logger.info(f"Epoch {epoch+1}/{NUM_EPOCHS}: processing {len(dataset)} chunks, loss={avg_loss:.6f}, batches={num_batches}")
 
             # Update progress after epoch
             try:
@@ -398,10 +536,173 @@ def main():
             }
         else:
             # SFT mode - save full model
+            # Note: model.save_pretrained() fails due to KeyError: 'dtype' in transformers'
+            # recursive_diff_dict when comparing config against default. We save manually instead.
             sft_path = Path(OUTPUT_DIR) / "sft_model"
             sft_path.mkdir(parents=True, exist_ok=True)
-            model.save_pretrained(sft_path)
+
+            # For the merged model directory, use base model as template
+            # (has speech_tokenizer/, merges.txt, etc.) and replace model.safetensors
+            import shutil
+            from huggingface_hub import snapshot_download
+            base_model_path = Path(snapshot_download(BASE_MODEL))
+
+            # Copy base model directory structure
+            parts = Path(OUTPUT_DIR).name.split('_')
+            version_base = '_'.join(parts[:3])  # xiao_s_v33
+            merged_name = f"merged_qwen3_tts_{version_base}"
+            merged_path = Path(OUTPUT_DIR).parent / merged_name
+
+            if merged_path.exists():
+                logger.info(f"[MERGE] Merged SFT model already exists: {merged_path}")
+            else:
+                # Copy base model directory structure
+                shutil.copytree(base_model_path, merged_path, dirs_exist_ok=True)
+                logger.info(f"[MERGE] Copied base model to: {merged_path}")
+
+            # =====================================================================
+            # OPTION A: Convert Base model to CustomVoice by baking speaker embeddings
+            # =====================================================================
+            # Step 1: Extract speaker embedding from training audio using speaker_encoder
+            # Step 2: Get the speaker embedding index (spk_id) for this persona
+            # Step 3: Copy the speaker embedding into talker.codec_embedding at that index
+            # Step 4: Remove speaker_encoder from state dict (not needed for CustomVoice)
+            # Step 5: Update config to tts_model_type="custom_voice"
+            # =====================================================================
+
+            logger.info("[MERGE] Extracting speaker embedding for CustomVoice conversion...")
+
+            # Load first audio file for speaker embedding extraction
+            if audio_for_speaker_embeds and audio_for_speaker_embeds[0][0] is not None:
+                ref_audio, ref_sr = audio_for_speaker_embeds[0]
+            else:
+                # Fallback: load from first AUDIO_PATH
+                ref_path = Path(AUDIO_PATHS[0])
+                if ref_path.exists():
+                    ref_audio, ref_sr = sf.read(str(ref_path))
+                    if ref_audio.dtype != np.float32:
+                        ref_audio = ref_audio.astype(np.float32)
+                    max_val = np.abs(ref_audio).max()
+                    if max_val > 0:
+                        ref_audio = ref_audio / max_val
+                else:
+                    raise ValueError("No audio available for speaker embedding extraction")
+
+            # Extract speaker embedding using trained model's speaker_encoder
+            with torch.no_grad():
+                speaker_embedding = model.extract_speaker_embedding(ref_audio, ref_sr)
+                # speaker_embedding shape: (hidden_size,) - 1D array
+                logger.info(f"[MERGE] Extracted speaker embedding: shape={speaker_embedding.shape}")
+
+            # Get the trained state dict and modify it
+            state_dict = model.state_dict()
+
+            # Find the spk_id for this persona from base model config
+            # The base model config has spk_id dict like {"xiao_s": 1, "persona_new": 2, ...}
+            # We need to find the next available index or use a specific index
+            merged_config_path = merged_path / "config.json"
+            with open(merged_config_path) as f:
+                merged_config = json.load(f)
+
+            # Get or create spk_id for PERSONA_ID
+            spk_id_dict = merged_config.get("talker_config", {}).get("spk_id", {})
+            if PERSONA_ID.lower() in spk_id_dict:
+                spk_id = spk_id_dict[PERSONA_ID.lower()]
+            else:
+                # Assign next available index (find max + 1)
+                max_id = max(spk_id_dict.values()) if spk_id_dict else 0
+                spk_id = max_id + 1
+                spk_id_dict[PERSONA_ID.lower()] = spk_id
+                logger.info(f"[MERGE] Assigned new spk_id={spk_id} for {PERSONA_ID}")
+
+            # Update config with new spk_id
+            if "talker_config" not in merged_config:
+                merged_config["talker_config"] = {}
+            merged_config["talker_config"]["spk_id"] = spk_id_dict
+
+            # Mark speaker as using Chinese dialect to preserve accent
+            # spk_is_dialect[speaker] should be the dialect name string (e.g., "chinese")
+            # NOT a boolean True - the inference code uses it as codec_language_id[dialect] key
+            spk_is_dialect = merged_config.get("talker_config", {}).get("spk_is_dialect", {})
+            spk_is_dialect[PERSONA_ID.lower()] = "chinese"  # Use "chinese" for Chinese language preservation
+            merged_config["talker_config"]["spk_is_dialect"] = spk_is_dialect
+
+            # Update tts_model_type to custom_voice
+            merged_config["tts_model_type"] = "custom_voice"
+
+            # Remove speaker_encoder keys from state dict (not needed for CustomVoice)
+            keys_to_remove = [k for k in state_dict.keys() if 'speaker_encoder' in k]
+            for k in keys_to_remove:
+                del state_dict[k]
+                logger.info(f"[MERGE] Removed speaker_encoder key: {k}")
+
+            # =====================================================================
+            # Bake speaker embedding into talker.codec_embedding at spk_id index
+            # =====================================================================
+            # The talker.codec_embedding is an nn.Embedding that stores speaker embeddings
+            # indexed by spk_id. For CustomVoice, we copy our extracted speaker embedding
+            # into this table at the persona's spk_id position.
+            codec_embed_key = "talker.model.codec_embedding.weight"
+            if codec_embed_key in state_dict:
+                embed_weight = state_dict[codec_embed_key]  # (vocab_size, hidden_size)
+                hidden_size = embed_weight.shape[1]
+
+                # Ensure speaker_embedding has correct shape
+                if speaker_embedding.shape[0] != hidden_size:
+                    # Resample if needed (should match hidden_size)
+                    logger.warning(f"[MERGE] Speaker embedding size mismatch: {speaker_embedding.shape[0]} vs {hidden_size}")
+                    # Use first hidden_size elements or pad
+                    if speaker_embedding.shape[0] > hidden_size:
+                        speaker_embedding = speaker_embedding[:hidden_size]
+                    else:
+                        # Pad with zeros
+                        padding = torch.zeros(hidden_size - speaker_embedding.shape[0])
+                        speaker_embedding = torch.cat([speaker_embedding, padding])
+
+                # Copy speaker embedding into codec_embedding at spk_id position
+                embed_weight[spk_id] = speaker_embedding.to(embed_weight.dtype)
+                state_dict[codec_embed_key] = embed_weight
+                logger.info(f"[MERGE] Baked speaker embedding into {codec_embed_key} at index {spk_id}")
+            else:
+                logger.warning(f"[MERGE] {codec_embed_key} not found in state dict. Available keys: {list(state_dict.keys())[:10]}...")
+
+            # Remove speaker_encoder_config from config (not needed for CustomVoice)
+            merged_config.pop("speaker_encoder_config", None)
+            # Keep tts_model_type = "custom_voice"
+
+            # Save modified state dict to merged path
+            from safetensors.torch import save_file
+            save_file(state_dict, merged_path / "model.safetensors")
+            logger.info(f"[MERGE] Saved trained model (without speaker_encoder) to: {merged_path}")
+
+            # Save updated config
+            with open(merged_config_path, "w") as f:
+                json.dump(merged_config, f, indent=2)
+            logger.info(f"[MERGE] Updated merged config: tts_model_type=custom_voice, spk_id={spk_id_dict}")
+
+            # Also save filtered config.json in sft_model for reference
+            import json as json_module
+            config_dict = model.config.to_dict()
+            # Keys that Qwen3TTSSpeakerEncoderConfig accepts
+            speaker_encoder_valid_keys = {
+                'mel_dim', 'enc_dim', 'enc_channels', 'enc_kernel_sizes',
+                'enc_dilations', 'enc_attention_channels', 'enc_res2net_scale',
+                'enc_se_channels', 'sample_rate'
+            }
+            # Filter speaker_encoder_config if present
+            if 'speaker_encoder_config' in config_dict:
+                spk_cfg = config_dict['speaker_encoder_config']
+                if isinstance(spk_cfg, dict):
+                    config_dict['speaker_encoder_config'] = {
+                        k: v for k, v in spk_cfg.items() if k in speaker_encoder_valid_keys
+                    }
+            # Remove dtype/torch_dtype at top level
+            config_dict.pop('dtype', None)
+            config_dict.pop('torch_dtype', None)
+            with open(sft_path / "config.json", "w") as f:
+                json_module.dump(config_dict, f)
             logger.info(f"SFT model saved to: {sft_path}")
+
             result = {
                 "success": True,
                 "sft_path": str(sft_path),
@@ -471,16 +772,60 @@ if __name__ == "__main__":
                 env=env,
             )
 
-            # Monitor progress
-            tracker = ProgressTracker(
-                version_id=self.version_id,
-                version_dir=self.version_dir,
-                total_epochs=self.config.num_epochs,
-                total_audio_duration=self.total_audio_duration,
-            )
+            # Wait for process with timeout - read output in real-time
+            stdout_lines = []
+            start_time = time.time()
+            # SFT training is slow - full model training with chunked audio can take 4-8 hours
+            # Increase from 2 hours to 8 hours to allow full training
+            timeout_seconds = 28800  # 8 hour max for SFT training
 
-            # Wait for process to complete
-            stdout, _ = process.communicate()
+            # Read stdout in real-time using non-blocking reads
+            import select
+            while True:
+                # Check if process exited
+                retcode = process.poll()
+                if retcode is not None:
+                    # Process exited
+                    remaining = process.stdout.read()
+                    if remaining:
+                        stdout_lines.append(remaining)
+                    break
+
+                # Check timeout
+                elapsed = time.time() - start_time
+                if elapsed > timeout_seconds:
+                    process.kill()
+                    logger.error(f"[TRAINING:{self.version_id[:8]}] Training timed out after {timeout_seconds}s")
+                    stdout_lines.append(f"\n[TIMEOUT] Training killed after {timeout_seconds}s")
+                    # Update progress.json status to "failed" so UI shows correct status
+                    try:
+                        tracker_file = self.version_dir / "progress.json"
+                        if tracker_file.exists():
+                            with open(tracker_file) as f:
+                                prog = json.load(f)
+                            prog["status"] = "failed"
+                            prog["error_message"] = f"Training timed out after {timeout_seconds}s"
+                            with open(tracker_file, "w") as f:
+                                json.dump(prog, f)
+                            logger.info(f"[TRAINING:{self.version_id[:8]}] Updated progress.json to failed status")
+                    except Exception as e:
+                        logger.warning(f"[TRAINING:{self.version_id[:8]}] Failed to update progress.json: {e}")
+                    break
+
+                # Read available stdout (non-blocking)
+                try:
+                    if select.select([process.stdout], [], [], 1.0)[0]:
+                        chunk = process.stdout.read(4096)
+                        if chunk:
+                            stdout_lines.append(chunk)
+                            # Also log chunk for real-time monitoring
+                            for line in chunk.splitlines(keepends=True):
+                                if line.strip():
+                                    logger.info(f"[TRAINING:{self.version_id[:8]}] {line.rstrip()}")
+                except (OSError, IOError):
+                    pass
+
+            stdout = "".join(stdout_lines)
 
             # Log output for debugging
             if stdout:
@@ -511,10 +856,27 @@ if __name__ == "__main__":
                         with open(tracker_file, "w") as f:
                             json.dump(prog, f)
 
-                    merged_path = merge_lora(self.version_dir)
-                    if merged_path and merged_path.exists():
-                        logger.info(f"[TRAINING:{self.version_id[:8]}] Merge complete: {merged_path}")
+                    # For SFT, the model is already saved to merged_qwen3_tts_{version_base}
+                    # in the parent directory (same location as LoRA merged models)
+                    if self.training_type == "sft":
+                        parts = self.version_dir.name.split('_')
+                        version_base = '_'.join(parts[:3])  # xiao_s_v32
+                        merged_name = f"merged_qwen3_tts_{version_base}"
+                        merged_path = self.version_dir.parent / merged_name
+                        if merged_path.exists():
+                            logger.info(f"[TRAINING:{self.version_id[:8]}] SFT model ready: {merged_path}")
+                        else:
+                            merged_path = None
+                            logger.error(f"[TRAINING:{self.version_id[:8]}] SFT model not found at {merged_path}")
+                    else:
+                        # LoRA training - need to merge adapter with base model
+                        merged_path = merge_lora(self.version_dir)
+                        if merged_path and merged_path.exists():
+                            logger.info(f"[TRAINING:{self.version_id[:8]}] Merge complete: {merged_path}")
+                        else:
+                            logger.error(f"[TRAINING:{self.version_id[:8]}] Merge failed or returned None")
 
+                    if merged_path and merged_path.exists():
                         # Update tracker status
                         if tracker_file.exists():
                             with open(tracker_file) as f:
@@ -523,14 +885,30 @@ if __name__ == "__main__":
                             with open(tracker_file, "w") as f:
                                 json.dump(prog, f)
 
+                        # Update version manager status to "ready" in index.json
+                        try:
+                            from app.services.training import get_version_manager
+                            vm = get_version_manager()
+                            # Extract version_id from version_dir name (e.g., "test_v1_20260424_005711")
+                            # The version_id in index.json is like "v1_20260424_005711"
+                            # We need to find by lora_path
+                            matching = [v for v in vm.list_versions() if v.lora_path and Path(v.lora_path) == self.version_dir]
+                            if matching:
+                                latest = matching[0]
+                                vm.update_version_status(
+                                    latest.version_id,
+                                    "ready",
+                                    final_loss=self._result.final_loss if hasattr(self._result, 'final_loss') else None,
+                                    training_time_seconds=self._result.training_time_seconds if hasattr(self._result, 'training_time_seconds') else None
+                                )
+                                logger.info(f"[TRAINING:{self.version_id[:8]}] Updated index.json status to ready for {latest.version_id}")
+                        except Exception as vm_err:
+                            logger.warning(f"[TRAINING:{self.version_id[:8]}] Failed to update version manager: {vm_err}")
+
                         # Auto-activate the new merged model
                         try:
                             from app.services.tts import get_tts_engine
                             engine = get_tts_engine()
-                            # Extract version_id from version_dir name (e.g. xiao_s_v12_20260330_223729)
-                            # The TrainingVersion.version_id is the first part (e.g. v12_20260330_223729)
-                            # We need to find the right version_id for the version manager
-                            # Use the version_dir name to find matching version
                             from app.services.training import get_version_manager
                             vm = get_version_manager()
                             # Find version by lora_path matching our version_dir
@@ -544,13 +922,13 @@ if __name__ == "__main__":
                         except Exception as act_err:
                             logger.warning(f"[TRAINING:{self.version_id[:8]}] Auto-activate failed: {act_err}")
                     else:
-                        logger.error(f"[TRAINING:{self.version_id[:8]}] Merge failed or returned None")
-                        # Update status to failed since merge is critical
+                        logger.error(f"[TRAINING:{self.version_id[:8]}] Model preparation failed (SFT: sft_model missing or LoRA: merge failed)")
+                        # Update status to failed since model is critical
                         if tracker_file.exists():
                             with open(tracker_file) as f:
                                 prog = json.load(f)
                             prog["status"] = "failed"
-                            prog["error_message"] = "Merge failed"
+                            prog["error_message"] = "Model preparation failed"
                             with open(tracker_file, "w") as f:
                                 json.dump(prog, f)
                 except Exception as merge_err:
@@ -561,6 +939,27 @@ if __name__ == "__main__":
         except Exception as e:
             logger.error(f"[TRAINING:{self.version_id[:8]}] Training error: {e}")
             self._result = TrainingResult(success=False, error=str(e))
+        finally:
+            # Always release training locks after training completes (success or failure)
+            self._release_training_locks()
+
+    def _release_training_locks(self):
+        """Release TTS/ASR training locks after SFT training completes."""
+        if self.training_type != "sft":
+            return
+        logger.info(f"[TRAINING:{self.version_id[:8]}] Releasing SFT training locks...")
+        try:
+            from app.services.tts.qwen_tts_engine import set_tts_training_lock
+            set_tts_training_lock(False)
+            logger.info("[TRAINING] TTS training lock released")
+        except Exception as e:
+            logger.warning(f"[TRAINING] Failed to release TTS lock: {e}")
+        try:
+            from app.services.asr.engine import set_asr_training_lock
+            set_asr_training_lock(False)
+            logger.info("[TRAINING] ASR training lock released")
+        except Exception as e:
+            logger.warning(f"[TRAINING] Failed to release ASR lock: {e}")
 
     def poll(self) -> Optional[TrainingResult]:
         """Poll for result (returns None if still running)."""

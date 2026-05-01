@@ -51,6 +51,7 @@ class TrainingRequest(BaseModel):
     num_epochs: int = 10
     batch_size: int = 4
     training_type: str = "lora"  # "lora" or "sft"
+    learning_rate: Optional[float] = None  # Auto-selected if not provided
 
 
 # ============================================================================
@@ -263,6 +264,7 @@ async def create_training(request: TrainingRequest):
 
     # Create version
     manager = get_version_manager()
+    model_type = "custom_voice" if request.training_type == "sft" else None
     version = manager.create_version(
         persona_id=persona_id,
         recording_ids=recording_ids,
@@ -270,6 +272,7 @@ async def create_training(request: TrainingRequest):
         num_epochs=num_epochs,
         batch_size=batch_size,
         segment_ids=segment_ids,
+        model_type=model_type,
     )
 
     # Save manifest
@@ -302,11 +305,32 @@ async def create_training(request: TrainingRequest):
     base_estimate = ProgressTracker.estimate_training_time(actual_duration, num_epochs)
     estimated_time = base_estimate * 5 if request.training_type == "sft" else base_estimate
 
+    # For SFT training, unload TTS/ASR to free VRAM
+    if request.training_type == "sft":
+        logger.info("[TRAINING] SFT mode: unloading TTS/ASR to free VRAM")
+        try:
+            from app.services.tts.qwen_tts_engine import unload_tts_engine, set_tts_training_lock
+            unload_tts_engine()
+            set_tts_training_lock(True)
+        except Exception as e:
+            logger.warning(f"[TRAINING] Failed to unload TTS: {e}")
+        try:
+            from app.services.asr.engine import set_asr_training_lock, unload_asr_engine
+            # Also unload ASR if it exists in state manager
+            from app.api.ws_asr import state_manager
+            if hasattr(state_manager, '_default_asr') and state_manager._default_asr is not None:
+                unload_asr_engine(state_manager._default_asr)
+            set_asr_training_lock(True)
+        except Exception as e:
+            logger.warning(f"[TRAINING] Failed to unload ASR: {e}")
+
     # Start training job
     if request.training_type == "sft":
         # SFT training - trains full model
+        # Use provided learning_rate or default to 1e-6 for SFT
+        sft_lr = request.learning_rate if request.learning_rate else 1e-6
         config = SFTConfig(
-            learning_rate=1e-6,
+            learning_rate=sft_lr,
             num_epochs=num_epochs,
             batch_size=1,  # Small batch for full model
             gradient_accumulation_steps=8,
@@ -325,6 +349,7 @@ async def create_training(request: TrainingRequest):
             config=config,  # Pass SFTConfig
             total_audio_duration=actual_duration,
             training_type="sft",
+            persona_id=persona_id,
         )
     else:
         # LoRA training (default)
@@ -340,6 +365,7 @@ async def create_training(request: TrainingRequest):
             config=config,
             total_audio_duration=actual_duration,
             training_type="lora",
+            persona_id=persona_id,
         )
 
     _training_jobs[version.version_id] = job
@@ -495,8 +521,13 @@ async def cancel_training(version_id: str):
     return {"status": "cancelled", "version_id": version_id}
 
 
+class PreviewRequest(BaseModel):
+    text: Optional[str] = None
+    ref_audio_path: Optional[str] = None  # Custom reference audio path
+
+
 @router.post("/versions/{version_id}/preview")
-async def preview_version(version_id: str, text: Optional[str] = None):
+async def preview_version(version_id: str, request: PreviewRequest = None):
     """
     Generate preview audio for a training version.
 
@@ -505,7 +536,7 @@ async def preview_version(version_id: str, text: Optional[str] = None):
 
     Args:
         version_id: The training version to preview
-        text: Optional custom preview text (default: "你好，這是我的聲音測試。")
+        request: Optional JSON body with "text" field for custom preview text
     """
     from app.services.tts.qwen_tts_engine import get_tts_engine
 
@@ -521,36 +552,59 @@ async def preview_version(version_id: str, text: Optional[str] = None):
     engine = get_tts_engine()
     engine.activate_version(version_id)
 
+    # Check if this is an SFT model - it HAS the voice baked in, so ref_audio is NOT needed
+    # SFT models use 'custom_voice' model_type (the merged SFT model IS the voice)
+    is_sft_model = version.model_type in ('sft', 'custom_voice', 'custom_voice_compatible')
+
+    # Only use reference audio for non-SFT (LoRA/base) models
+    # For SFT: activate_voice_clone with xvec_only=True would bypass the trained model!
+    ref_audio = request.ref_audio_path if request and request.ref_audio_path and not is_sft_model else None
+
+    if ref_audio:
+        # Only activate voice clone for non-SFT models (LoRA with optional x-vector enhancement)
+        engine.activate_voice_clone(version.persona_id, ref_audio_path=ref_audio)
+    elif is_sft_model:
+        # For SFT, log that we're using the trained model directly (no ref audio needed)
+        logger.info(f"[TTS] SFT model - using trained model directly (ref_audio ignored)")
+    else:
+        # LoRA model without ref_audio - just use the merged LoRA
+        logger.info(f"[TTS] LoRA model - using merged adapter (no ref audio)")
+
     # Preview text (use custom or default)
-    preview_text = text.strip() if text and text.strip() else "你好，這是我的聲音測試。"
+    preview_text = request.text.strip() if request and request.text and request.text.strip() else "你好，這是我的聲音測試。"
 
     async def audio_stream():
         """Generate audio chunks and yield them as WAV data."""
-        import io
-        import wave
+        # Use lock to prevent concurrent generation (corrupts CUDA graphs)
+        from app.services.tts.qwen_tts_engine import get_tts_generation_lock
+        lock = get_tts_generation_lock()
 
-        audio_chunks = []
-        sample_rate = 24000
+        async with lock:
+            import io
+            import wave
 
-        async for event in engine.generate_streaming(
-            text=preview_text,
-            instruct=None,  # Path B: Use merged model's voice, no instruct
-            language="Chinese",
-        ):
-            if event.event == "audio_chunk" and event.audio_data:
-                audio_chunks.append(event.audio_data)
+            audio_chunks = []
+            sample_rate = 24000
 
-        if audio_chunks:
-            full_audio = b"".join(audio_chunks)
-            # Convert to WAV format
-            wav_io = io.BytesIO()
-            with wave.open(wav_io, 'wb') as wav_file:
-                wav_file.setnchannels(1)
-                wav_file.setsampwidth(2)
-                wav_file.setframerate(sample_rate)
-                wav_file.writeframes(full_audio)
-            wav_io.seek(0)
-            yield wav_io.read()
+            async for event in engine.generate_streaming(
+                text=preview_text,
+                instruct=None,  # Path B: Use merged model's voice, no instruct
+                language="Chinese",
+            ):
+                if event.event == "audio_chunk" and event.audio_data:
+                    audio_chunks.append(event.audio_data)
+
+            if audio_chunks:
+                full_audio = b"".join(audio_chunks)
+                # Convert to WAV format
+                wav_io = io.BytesIO()
+                with wave.open(wav_io, 'wb') as wav_file:
+                    wav_file.setnchannels(1)
+                    wav_file.setsampwidth(2)
+                    wav_file.setframerate(sample_rate)
+                    wav_file.writeframes(full_audio)
+                wav_io.seek(0)
+                yield wav_io.read()
 
     return StreamingResponse(
         audio_stream(),
