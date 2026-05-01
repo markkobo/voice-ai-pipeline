@@ -753,3 +753,85 @@ for audio_chunk, sr, timing in self._model.generate_voice_design_streaming(
 - Merged model: data/models/merged_qwen3_tts_xiao_s_v12/
 - Training Selection UI (M4.8): Persona/recording selection with speaker labeling
 - Model Summary UI (M4.9): Active badge, preview button, recording details, version sorting
+
+---
+
+## 16. SFT Training Lessons Learned (2026-05-01)
+
+### 16.1 Critical: Audio Chunking Required for SFT
+
+**Problem**: Original SFT design had only 3 samples (one per audio file). For 100 epochs over 3 samples, model overfits and produces garbled audio.
+
+**Solution**: Split audio into overlapping 5-10 second chunks using `SpeechDataset`:
+```python
+class SpeechDataset(Dataset):
+    def __init__(self, audio_codes_list, num_code_groups, chunk_size=300, hop_size=150):
+        # Creates 50-100+ training samples from 3 audio files
+        for audio_idx, audio_codes in enumerate(audio_codes_list):
+            for start in range(0, seq_len, hop_size):
+                end = min(start + chunk_size, seq_len)
+                if end - start >= 50:  # Minimum chunk size
+                    self.samples.append(audio_codes[start:end])
+```
+
+**Requirements**:
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| MIN_CHUNKS | 30 | Minimum samples for SFT |
+| CHUNK_SIZE | 300 | ~5-10 seconds at 24kHz |
+| HOP_SIZE | 150 | 50% overlap |
+| MIN_CHUNK_SIZE | 50 | Minimum frames per chunk |
+| NUM_EPOCHS | 100 | Full SFT needs many epochs |
+| LEARNING_RATE | 1e-6 | Lower than LoRA |
+
+### 16.2 Loss ≠ Quality
+
+**Observation**:
+| Model | Loss | Quality |
+|-------|------|---------|
+| v4 | 0.053 | Works (slow) |
+| v5 | 0.058 | Garbled |
+| v6 | 0.125 | Garbled |
+
+Lower loss doesn't mean better quality. Chunking is more important than minimizing loss.
+
+### 16.3 Model Type for SFT: custom_voice
+
+SFT-trained models use `tts_model_type: "custom_voice"`:
+```json
+{
+  "tts_model_type": "custom_voice",
+  "talker_config": {
+    "spk_id": {"persona": 1},
+    "spk_is_dialect": {"persona": "chinese"}
+  }
+}
+```
+
+### 16.4 Generation Speed: custom_voice vs voice_design
+
+- `voice_design` (LoRA merged): ~27s for 1.2s audio
+- `custom_voice` (SFT merged): >60s for single characters
+
+This is expected behavior due to more detailed synthesis with trained embeddings.
+
+### 16.5 Verification Checklist for New SFT Training
+
+After starting new SFT training:
+- [ ] Check logs for `[DATASET] Created X chunks from Y audio files` (X should be >30)
+- [ ] Check logs for `[VALIDATION] PASSED`
+- [ ] Preview generates clear audio without overlapping/broken artifacts
+- [ ] Generation completes in reasonable time
+
+### 16.6 Speaker Embedding Baking
+
+For SFT models, speaker embedding is baked into `talker.model.codec_embedding.weight`:
+```python
+# Extract and bake speaker embedding at spk_id position
+speaker_embedding = model.extract_speaker_embedding(ref_audio, ref_sr)
+embed_weight[spk_id] = speaker_embedding
+```
+
+codec_embedding analysis shows training effect:
+- Base indices: mean ~0.0002, std ~0.015 (generic)
+- Trained index: mean ~0.006, std ~0.42 (activated)

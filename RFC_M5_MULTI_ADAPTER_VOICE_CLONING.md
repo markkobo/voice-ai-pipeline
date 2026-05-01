@@ -411,6 +411,120 @@ For existing recordings without listener_id:
 
 ---
 
+## 14. Lessons Learned (2026-05-01)
+
+### 14.1 SFT Training: Chunking is Critical
+
+**Problem**: Original SFT training had only 3 samples (one per audio file). For 100 epochs over 3 samples, the model overfits to very few examples, producing garbled audio.
+
+**Solution**: Split audio into overlapping 5-10 second chunks using `SpeechDataset`:
+- Creates 50-100+ training samples from 3 audio files
+- Prevents overfitting
+- Must be committed before training (not in uncommitted changes)
+
+**Code location**: `app/services/training_service/training_job.py` - `SpeechDataset` class
+
+### 14.2 Loss Value ≠ Quality
+
+**Observation**:
+| Model | Loss | Audio Quality |
+|-------|------|---------------|
+| v4 | 0.053 | Works (slow) |
+| v5 | 0.058 | Garbled |
+| v6 | 0.125 | Garbled |
+
+Lower loss doesn't always mean better quality. v6 had the highest loss but also produced garbled audio. The chunking fix is more important than minimizing loss.
+
+### 14.3 Model Type: custom_voice for SFT
+
+SFT-trained models use `tts_model_type: "custom_voice"` in the merged model config. The speaker embedding is baked into `talker.model.codec_embedding.weight` at the speaker's `spk_id` index.
+
+**Config keys**:
+```json
+{
+  "tts_model_type": "custom_voice",
+  "talker_config": {
+    "spk_id": {"test": 1},
+    "spk_is_dialect": {"test": "chinese"}
+  }
+}
+```
+
+### 14.4 Generation Speed: custom_voice vs voice_design
+
+**Observation**:
+- `voice_design` (LoRA base): ~27s for 1.2s audio, DONE event fires correctly
+- `custom_voice` (SFT merged): >60s timeout for single characters
+
+The trained speaker embeddings in `custom_voice` models cause the model to synthesize more detailed (but longer) audio. This is expected behavior, not a bug.
+
+### 14.5 Cloudflare Tunnel Timeout (Error 524)
+
+**Problem**: Preview requests fail with 524 after ~60s even though TTS is working.
+
+**Root cause**: Cloudflared tunnel has a 60s HTTP request timeout. TTS generation for SFT models takes >60s.
+
+**Solution**: 
+- Client should use longer timeout when calling preview endpoint
+- Or accept that SFT preview takes >60s
+
+### 14.6 SFT Training Flow
+
+For SFT models:
+1. Training runs in subprocess, creates `sft_model/` directory
+2. After training, merge process copies base model to `merged_qwen3_tts_{version_base}/`
+3. Speaker embedding is extracted and baked into `codec_embedding.weight`
+4. `speaker_encoder` keys are removed from state dict
+5. Model works with `generate_custom_voice_streaming()` directly
+
+No separate merge step needed - it's all part of the SFT training flow.
+
+### 14.7 Minimum Viable SFT Training
+
+```python
+# Requirements for working SFT training:
+MIN_CHUNKS = 30          # Minimum training samples
+MIN_CHUNK_SIZE = 50      # Minimum frames per chunk
+CHUNK_SIZE = 300        # ~5-10 seconds at 24kHz
+HOP_SIZE = 150          # 50% overlap for more samples
+NUM_EPOCHS = 100        # Full SFT needs many epochs
+LEARNING_RATE = 1e-6    # Lower LR for full model SFT
+```
+
+### 14.8 Speaker Embedding Analysis
+
+**codec_embedding.weight** analysis shows training effect:
+- Base/unused indices: mean ~0.0002, std ~0.015 (generic)
+- Trained index (e.g., "test" at position 1): mean ~0.006, std ~0.42 (activated)
+
+High std (0.42 vs 0.015) indicates the embedding was meaningfully trained, not just initialized.
+
+---
+
+## 15. Updated Work Items
+
+### 15.1 Backend Engineer (Updated)
+
+| Item | Description | Priority | Status |
+|------|-------------|----------|--------|
+| **B-1**: SFT chunking | Chunking code committed, ensure new training uses it | P0 | Done |
+| **B-2**: Train baseline voice | Run SFT with chunking on recordings | P0 | Needs new training |
+| **B-3**: Generation timeout | Handle >60s generation for custom_voice models | P1 | Known limitation |
+| **B-4**: Adapter registry | New `adapter_registry.json` + endpoints | P1 | Not started |
+| **B-5**: Listener-filtered training | Filter segments by `listener_id` | P1 | Not started |
+| **B-6**: Multi-adapter loading | TTS engine loads adapter based on `listener_id` | P1 | Not started |
+
+### 15.2 Verification Checklist for New Training
+
+After starting new SFT training:
+- [ ] Check progress.json shows status "training"
+- [ ] Check logs for `[DATASET] Created X chunks from Y audio files` (should be >30 chunks)
+- [ ] Check logs for `[VALIDATION] PASSED`
+- [ ] Preview generates audio without garbling
+- [ ] Generation completes in reasonable time (<2min for short text)
+
+---
+
 ## 12. Dependencies
 
 - **M5.2-M5.7** depend on **M5.0** (working baseline voice)
