@@ -34,34 +34,16 @@ os.environ.setdefault("OPENAI_API_KEY", "test-key-not-used")
 # records metrics in-process.
 os.environ.setdefault("TELEMETRY_HTTP_DISABLED", "true")
 
-# Redirect MODELS_DIR off the hardcoded /workspace path. app/services/training.py
-# reads this env var (line 20) and creates the dir at import time, so it must be
-# set before that module is imported.
-import tempfile as _tempfile_models  # noqa: E402
+# Point app.config at tmp dirs via env vars. With the Phase 1.3 cleanup of
+# /workspace hardcodes, this is now the canonical way to redirect — no more
+# monkey-patching of setup_json_logging or module-level constants.
+import tempfile as _tempfile  # noqa: E402
 
-_models_session_dir = Path(_tempfile_models.gettempdir()) / "voice-ai-test-models"
-_models_session_dir.mkdir(parents=True, exist_ok=True)
-os.environ.setdefault("MODELS_DIR", str(_models_session_dir))
-
-# app.logging_config hardcodes /workspace/voice-ai-pipeline/logs and mkdirs at
-# import time. Patch it before any app.* import so the log dir lands in tmp.
-# This is a Phase 0 workaround; logging_config will read LOG_DIR from env once
-# config is centralized in Phase 1.3 cross-cutting work.
-import tempfile as _tempfile
-
-_test_log_dir = Path(_tempfile.gettempdir()) / "voice-ai-test-logs"
-_test_log_dir.mkdir(parents=True, exist_ok=True)
-
-import app.logging_config as _logging_config
-
-_original_setup_json_logging = _logging_config.setup_json_logging
-
-
-def _setup_json_logging_for_tests(log_dir: str = str(_test_log_dir)):
-    return _original_setup_json_logging(log_dir=log_dir)
-
-
-_logging_config.setup_json_logging = _setup_json_logging_for_tests  # type: ignore[assignment]
+_session_tmp = Path(_tempfile.gettempdir())
+os.environ.setdefault("MODELS_DIR", str(_session_tmp / "voice-ai-test-models"))
+os.environ.setdefault("LOG_DIR", str(_session_tmp / "voice-ai-test-logs"))
+# DATA_ROOT is set per-test by the isolated_data fixture so each test gets
+# its own data tree; setting a default here would leak between tests.
 
 
 # ---------------------------------------------------------------------------
