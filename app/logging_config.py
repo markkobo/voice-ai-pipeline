@@ -41,15 +41,21 @@ class JSONFormatter(logging.Formatter):
         return json.dumps(log_entry, ensure_ascii=False)
 
 
-def setup_json_logging(log_dir: str = "/workspace/voice-ai-pipeline/logs"):
+def setup_json_logging(log_dir: str | None = None):
     """
     Setup structured JSON logging for the application.
 
     Args:
-        log_dir: Directory for log files
+        log_dir: Directory for log files. Default resolves through
+                 app.config.log_dir() — honors LOG_DIR env var, falls
+                 back to /workspace/voice-ai-pipeline/logs on production
+                 or /tmp/voice-ai-logs on a dev box without /workspace.
     """
-    # Create log directory
-    log_path = Path(log_dir)
+    if log_dir is None:
+        from app import config as _config
+        log_path = _config.log_dir()
+    else:
+        log_path = Path(log_dir)
     log_path.mkdir(parents=True, exist_ok=True)
 
     log_file = log_path / "app.log"

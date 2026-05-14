@@ -22,13 +22,9 @@ _default_service: Optional[ListenersService] = None
 
 
 def _resolve_data_root() -> Path:
-    explicit = os.environ.get("DATA_ROOT")
-    if explicit:
-        return Path(explicit)
-    legacy = Path("/workspace/voice-ai-pipeline/data")
-    if legacy.parent.exists():
-        return legacy
-    return Path("data")
+    """Thin wrapper around app.config.data_root() — kept for back-compat."""
+    from app import config as _cfg
+    return _cfg.data_root()
 
 
 def _get_default_service() -> ListenersService:

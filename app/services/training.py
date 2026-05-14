@@ -16,8 +16,11 @@ from dataclasses import dataclass, asdict, field
 
 logger = logging.getLogger(__name__)
 
-# Base directory for models (configurable via env var)
-MODELS_DIR = Path(os.environ.get("MODELS_DIR", "/workspace/voice-ai-pipeline/data/models"))
+# Base directory for models — see app.config.models_dir(); honors MODELS_DIR
+# env var, defaults to {data_root}/models.
+from app import config as _config
+
+MODELS_DIR = _config.models_dir()
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Version index file

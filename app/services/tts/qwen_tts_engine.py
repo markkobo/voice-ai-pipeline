@@ -47,7 +47,9 @@ class FasterQwenTTSEngine:
         "1.7B": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
     }
     # Merged LoRA models (weight merging replaces need for PEFT at inference)
-    MERGED_MODELS_DIR = Path(os.environ.get("MODELS_DIR", "/workspace/voice-ai-pipeline/data/models"))
+    # Centralized via app.config — honors MODELS_DIR env var.
+    from app import config as _config
+    MERGED_MODELS_DIR = _config.models_dir()
 
     def __init__(
         self,
@@ -268,7 +270,8 @@ class FasterQwenTTSEngine:
         }
 
         prefix = persona_prefix_map.get(persona_id, f"default_{persona_id}_")
-        recordings_raw = Path("/workspace/voice-ai-pipeline/data/recordings/raw")
+        from app import config as _cfg
+        recordings_raw = _cfg.raw_dir()
 
         if not recordings_raw.exists():
             return None

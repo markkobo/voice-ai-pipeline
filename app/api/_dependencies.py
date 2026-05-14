@@ -73,14 +73,10 @@ class ListenerValidator:
 # config module.
 # ---------------------------------------------------------------------------
 def _resolve_data_root() -> Path:
-    explicit = os.environ.get("DATA_ROOT")
-    if explicit:
-        return Path(explicit)
-    legacy = Path("/workspace/voice-ai-pipeline/data")
-    if legacy.parent.exists():
-        return legacy
-    # On hosts that don't have /workspace, default to ./data relative to CWD.
-    return Path("data")
+    """Thin wrapper around app.config.data_root() — kept for back-compat with
+    callers that imported this name directly."""
+    from app import config as _cfg
+    return _cfg.data_root()
 
 
 # ---------------------------------------------------------------------------
@@ -123,13 +119,8 @@ def get_listener_validator() -> IdValidator:
 # Training service singleton (Phase 1.2).
 # ---------------------------------------------------------------------------
 def _resolve_models_dir() -> Path:
-    import os as _os
-
-    explicit = _os.environ.get("MODELS_DIR")
-    if explicit:
-        return Path(explicit)
-    data_root = _resolve_data_root()
-    return data_root / "models"
+    from app import config as _cfg
+    return _cfg.models_dir()
 
 
 def _get_or_create_training_service(app_state) -> TrainingService:

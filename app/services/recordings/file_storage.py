@@ -14,14 +14,18 @@ from typing import Optional
 import uuid
 
 
-# Base data directory
-DATA_DIR = Path("/workspace/voice-ai-pipeline/data")
-RECORDINGS_DIR = DATA_DIR / "recordings"
-RAW_DIR = RECORDINGS_DIR / "raw"
-DENOISED_DIR = RECORDINGS_DIR / "denoised"
-ENHANCED_DIR = RECORDINGS_DIR / "enhanced"
-VOICE_PROFILES_DIR = DATA_DIR / "voice_profiles"
-MODELS_DIR = DATA_DIR / "models"
+# Base data directory — resolved through app.config which honors DATA_ROOT
+# env var, falls back to /workspace/voice-ai-pipeline/data on production
+# deployments (entrypoint.sh), then to ./data for local dev.
+from app import config as _config
+
+DATA_DIR = _config.data_root()
+RECORDINGS_DIR = _config.recordings_dir()
+RAW_DIR = _config.raw_dir()
+DENOISED_DIR = _config.denoised_dir()
+ENHANCED_DIR = _config.enhanced_dir()
+VOICE_PROFILES_DIR = _config.voice_profiles_dir()
+MODELS_DIR = _config.models_dir()
 
 # Recording index cache for fast lookup
 RECORDINGS_INDEX_FILE = RECORDINGS_DIR / "index.json"
