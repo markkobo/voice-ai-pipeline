@@ -396,3 +396,77 @@ EMOTION_MAP = {
 - Full fine-tuning (LoRA only for MVP)
 - File upload to KB (RAG only after M4)
 - Distributed container deployment
+
+---
+
+## Implementation Status — 2026-05-14 (post Phase 1.1–2 refactor)
+
+All four phases of the API/service/streaming refactor are complete. Detailed
+per-phase acceptance reports live in `tests/_phase1_1_acceptance.md`,
+`tests/_phase1_2_acceptance.md`, `tests/_phase1_3_acceptance.md`,
+`tests/_phase2_acceptance.md`.
+
+**Headline numbers (vs Phase 0 baseline):**
+- Tests passing: **109 → 270** (+161 substantive)
+- Failures: **7 → 0** (all chronic baseline failures resolved)
+- Coverage: **31.6% → 52.4%** (+20.8 pp)
+
+**Architecture as built** — every layer the RFC sketched got a clean
+split into models / repository / service / API per module:
+
+| RFC concept | Built at |
+|---|---|
+| Streaming pipeline (VAD→ASR→LLM→emotion→TTS) | `app/api/ws_asr.py` + `app/services/{asr,llm,tts}/` |
+| Recording infrastructure | `app/services/recordings/{models,repository,service}.py` + `app/api/recordings.py` |
+| Training (LoRA + SFT) | `app/services/training_service/{models,repository,service,audio_resolver}.py` + `app/api/training.py` |
+| Persona system | `app/services/personas/` package + `app/api/personas.py` |
+| Listener routing | `app/services/listeners/` package + `app/api/listeners.py` |
+| Emotion parsing `[E:情緒]內容` | `app/services/tts/emotion_mapper.py` |
+
+**Cross-cutting additions not in the original RFC:**
+- **`app/config.py`** — central path resolution (DATA_ROOT / MODELS_DIR /
+  LOG_DIR env vars with sensible fallbacks). Replaced 8 hardcoded
+  `/workspace/voice-ai-pipeline` references across 7 files.
+- **`app/api/_errors.py`** — uniform error envelope (`{error, message,
+  details, detail}`) instead of raw `HTTPException`. Backwards-compat
+  `detail` mirror added in Phase 1.3 after UI smoke testing flushed the
+  legacy-FastAPI-shape regression.
+- **`app/api/_dependencies.py`** — FastAPI `Depends()` providers so tests
+  inject fakes via `dependency_overrides`.
+- **`app/api/_ws_helpers.py`** — `drain_emotion_parser`, `safe_send_text`,
+  `await_prior_tts_task` — eliminated 6 silent `except Exception: pass`
+  swallows and 3 duplicated drain loops in `ws_asr.py`.
+- **fcntl flock + atomic-rename pattern** in every repository
+  (recordings, training, personas, listeners). Proven safe against 50-thread
+  concurrent writes by `test_parallel_updates_all_persist`.
+- **Sticky-cancel flag** `SessionState.llm_pending_cancel` — fixes the
+  race where cancel arrives before `set_llm_task` registers.
+- **`threading.RLock` around TTS engine model reload** — prevents the
+  documented double-load race on `activate_version`.
+- **Contract test layer** at `tests/contract/` — 116 tests pinning
+  Pydantic schemas across recordings/training/personas/listeners.
+- **Hypothesis property tests** at `tests/unit/test_emotion_parser_property.py`
+  — ~450 random chunk splits verify streaming-parser correctness.
+
+**Pipeline bug fixes (2026-05-14):**
+- `pyannote.audio` 3.4 removed `.exclusive_speaker_diarization` — the
+  pipeline silently fell through to a 1-speaker fallback for every
+  recording. Fixed in `app/services/recordings/pipeline.py` by using
+  the plain `.itertracks()` API.
+- Speaker-count hint heuristic: `podcast` in folder → `num_speakers=2`,
+  `IG` in folder → `num_speakers=1`, otherwise `min_speakers=1,
+  max_speakers=4`.
+- Whisper large-v3 OOM on the A10G (24 GB): added `gc.collect() +
+  torch.cuda.empty_cache()` before model load and switched to
+  `compute_type="int8_float16"` (cuts Whisper VRAM ~50%).
+- All 28 retrievable recordings re-processed and verified:
+  15/15 podcasts now produce `[SPEAKER_00, SPEAKER_01]`, 13/13 IG clips
+  produce `[SPEAKER_00]`, 2623 total speaker segments, all
+  training_ready=True.
+
+**Deferred (not blocking MVP):**
+- Async-client end-to-end tests for the WebSocket pipeline (TestClient's
+  sync model races on cancel timing).
+- Subprocess-side training code coverage (training_job.py at 10%).
+- Multi-listener LoRA routing (RFC_M5 P-B path) — single-LoRA-per-persona
+  works; per-listener adapters need the inference-time loader wiring.

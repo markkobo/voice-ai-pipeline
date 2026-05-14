@@ -61,3 +61,48 @@
 > 3. 修改 `api/ws_asr.py`：在 commit_utterance 後，將 LLM 產出的內容流式餵給 TTS，並確保情感標籤能引導 TTS 的語氣。
 > 4. 建立 `/api/voice/clone` 端點，支援針對特定 Listener 上傳參考音訊。
 > 5. 撰寫單元測試，驗證切換 `listener_id` 時，系統是否能正確加載對應的 `.wav` 參考音並產出帶有正確情感指令的請求。」
+
+---
+
+## Implementation Status — 2026-05-14
+
+RFC 2.3 is ~60% built. Emotion routing and the `voice_profiles/`
+directory layout are in place. The zero-shot voice-clone path
+specified here was superseded in practice by the LoRA approach (see
+RFC_M4_LORA_TRAINING.md) — the live system fine-tunes per persona
+instead of doing reference-audio-based cloning at inference time.
+
+**As built:**
+- `app/resources/voice_profiles/{persona_id}/default.wav` — placeholder
+  reference audio per persona. Path resolution in
+  `app/services/tts/qwen_tts_engine.py:find_reference_audio()`.
+- `app/services/tts/emotion_mapper.py:EMOTION_TEXT_ENHANCEMENT` — maps
+  emotion tags to text-prosody markers (Path B) instead of TTS instruct
+  strings. Implemented enhancers: 撒嬌 / 生氣 / 開心 / 溫和 / 幽默 /
+  寵溺 / 毒舌 / 調皮 / 感動 / 認真 / 默認.
+- Listener-aware emotion: `Listener.default_emotion` (Phase 1.3) drives
+  the prompt; LLM emits `[E:情緒]` accordingly; emotion_mapper enhances
+  the content before feeding TTS.
+- `app/api/training.py:POST /api/training/voice-clone/activate` —
+  activates voice-clone mode on the TTS engine (x-vector from reference
+  audio); Pydantic body `VoiceCloneActivateRequest`.
+
+**Path A vs Path B:** RFC 2.3 specified TTS instruct strings ("Path A"
+in code comments). The codebase migrated to Path B (text-prosody
+enhancement via `enhance_text(content, emotion)`) because instruct
+strings on Qwen3-TTS gave inconsistent results. `get_tts_instruct`
+remains as a no-op stub returning None for backwards compat. See
+`emotion_mapper.py` header comment and Phase 2 acceptance doc.
+
+**Not built:**
+- `POST /api/voice/clone` for uploading per-listener reference audio —
+  the user-facing endpoint doesn't exist. Voice profiles are baked in
+  at `app/resources/voice_profiles/`.
+- Per-listener `.wav` files at
+  `voice_profiles/{persona_id}/{listener_id}.wav` — only `default.wav`
+  per persona; listener routing to a per-listener reference is the
+  RFC_M5 multi-adapter work, also deferred.
+- "Listener changes voice acoustically" — explicitly NOT done.
+  Listener changes the LLM prompt + the emotion enhancer, not the
+  voice model. Per RFC_2_2 §3: "Listener affects emotion routing only,
+  not voice model." That's the design.

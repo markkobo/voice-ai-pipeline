@@ -1371,3 +1371,85 @@ f.write(content)
 3. Version management
 4. UI integration
 5. Metrics tracking
+
+---
+
+## Implementation Status — 2026-05-14 (post Phase 1.1 + pipeline fixes)
+
+See `tests/_phase1_1_acceptance.md` for the Phase 1.1 deep restructure of
+recordings. This addendum captures what's actually built today plus the
+pipeline bug fixes from 2026-05-14.
+
+**Recording infrastructure as built:**
+
+```
+app/services/recordings/
+├── models.py          ✅ Pydantic Recording / SpeakerSegment / QualityMetrics
+├── repository.py      ✅ JsonRecordingsRepository (fcntl flock + atomic rename)
+├── service.py         ✅ RecordingsService — pure business logic
+├── pipeline.py        ⚠️  denoise/enhance/diarize/transcribe (uses legacy
+│                          RecordingMetadata; refactor deferred)
+├── quality.py         ✅ AudioQualityAnalyzer — SNR / RMS / clarity
+├── file_storage.py    ✅ RecordingPaths, list_all_recordings (uses app.config)
+└── metadata.py        ⚠️  Legacy dict-based class still alive for pipeline.py
+
+app/api/recordings.py  ✅ 13 endpoints, all Pydantic bodies + DomainError
+```
+
+**All 17 endpoint defects from §16 of this RFC are resolved by Phase 1.1.**
+The most consequential ones:
+- `metadata.json` race: fixed via `fcntl.flock` exclusive lock around
+  `JsonRecordingsRepository.save()` + `update()`. The latter is a
+  read-modify-write under one lock; 50 concurrent updates converge.
+- Path traversal / hardcoded paths: replaced with `app.config` resolution.
+- Bare `except Exception: pass`: zero remaining in the recordings API.
+- 6 superficial tests deleted; replaced by 47 contract tests at
+  `tests/contract/test_recordings_contract.py`.
+
+**Pipeline bug fixes (2026-05-14)** — `app/services/recordings/pipeline.py`:
+
+1. **`pyannote.audio` 3.4 API change.** The pipeline accessed
+   `diarization_output.exclusive_speaker_diarization.itertracks(...)` —
+   that attribute no longer exists in pyannote 3.4. Every call raised
+   `AttributeError`, the generic `except Exception` caught it, logged as
+   WARNING, and fell through to a single-segment whole-audio fallback.
+   So **every recording was falsely showing 1 speaker**, including the
+   podcast recordings the user knew had 2 speakers (host + guest).
+   Fix: switched to `.itertracks(yield_label=True)` on the Annotation
+   directly.
+
+2. **No speaker-count hints to pyannote.** Auto-detection on quiet
+   recordings sometimes classified silence as a third "speaker". Added
+   folder-name heuristic:
+   - `podcast` in name → `num_speakers=2`
+   - `IG` in name → `num_speakers=1` (single-creator clips)
+   - otherwise → `min_speakers=1, max_speakers=4`
+
+3. **Whisper large-v3 OOM** on the A10G (24 GB). The pipeline runs
+   speechbrain (enhance) + pyannote (diarize) + Whisper (transcribe)
+   sequentially but doesn't free the previous model. Added
+   `gc.collect() + torch.cuda.empty_cache()` before Whisper load and
+   switched to `compute_type="int8_float16"` (cuts Whisper VRAM ~50%
+   with negligible Chinese-transcription quality loss).
+
+4. **torch 2.6 + pyannote weights_only.** torch 2.6 defaults
+   `weights_only=True`, which rejects pyannote's checkpoints because
+   they pickle `TorchVersion`. Pipeline already has a local monkey-patch
+   that sets `weights_only=False` around the `Pipeline.from_pretrained`
+   call — keep this in place.
+
+**Verification after fixes (all 28 retrievable recordings):**
+- 15/15 podcasts → `[SPEAKER_00, SPEAKER_01]` ✓
+- 13/13 IG clips → `[SPEAKER_00]` ✓
+- 2623 total speaker segments
+- 28/28 training_ready=True
+- Avg pipeline runtime: 95s/recording
+
+**Quality metrics:** SNR / RMS / clarity / silence_ratio per recording
+land in `quality_metrics`; per-segment quality_score in
+`SpeakerSegment.quality_score` plus flags (`has_overlap`, `low_energy`,
+`high_noise`, `too_short`).
+
+**Deferred:** pipeline.py rewrite to use new `Recording` model (instead
+of legacy `RecordingMetadata` dict-class); background scheduler for
+`cleanup-expired`.

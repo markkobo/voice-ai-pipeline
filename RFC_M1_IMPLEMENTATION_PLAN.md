@@ -342,3 +342,69 @@ app/
         └── xiao_s/
             └── default.wav         ✅ New (placeholder)
 ```
+
+---
+
+## Implementation Status — 2026-05-14 (post Phase 2 streaming hardening)
+
+The M1 streaming pipeline is fully built and the chronic baseline test
+failures it spawned are resolved. See `tests/_phase2_acceptance.md` for the
+full delta.
+
+**Streaming pipeline as built (`app/api/ws_asr.py`):**
+- Browser PCM → WebSocket → VAD → ASR → LLM stream → emotion parser →
+  per-sentence TTS → PCM chunks back via WS binary.
+- VAD: still `EnergyVAD` (RFC marked Silero as planned but not done —
+  energy-based works well enough; switch when the latency budget tightens).
+- ASR: Qwen3-ASR streaming via `app/services/asr/engine.py:Qwen3ASR`.
+- LLM: OpenAI streaming client at `app/services/llm/openai_client.py`,
+  per-listener prompts from `app/services/llm/prompt_manager.py`.
+- Emotion: state-machine parser at `app/services/tts/emotion_mapper.py`,
+  `[E:情緒]內容` format.
+- TTS: `FasterQwen3TTS` with CUDA-graph capture; falls back to non-streaming
+  Qwen3TTSModel on capture failure.
+
+**Phase 2 bug fixes (chronic baseline failures resolved):**
+1. **`EmotionParser.is_ready` permanently False under Path B** — `Path B`
+   replaced TTS instruct strings with text prosody enhancement, so
+   `get_tts_instruct` always returns None. The `is_ready` property
+   required `current_instruct is not None`, so it never went True.
+   Fixed: `is_ready` now just checks `is_emotion_locked`.
+2. **Cancel-before-LLM-start race** — `cancel_llm_task` was a no-op when
+   the LLM task hadn't called `set_llm_task` yet. Added
+   `llm_pending_cancel` sticky flag to `StateManager.SessionState`;
+   `set_llm_task` honors it immediately. Proven by
+   `tests/test_ws_asr.py:TestStickyCancel`.
+3. **3 duplicated drain loops** at lines 395/473/518 — consolidated into
+   `drain_emotion_parser(parser)` with `DRAIN_MAX_ITERATIONS=256`
+   termination cap so a future parser bug can't infinite-loop the WS
+   handler.
+4. **6 silent `except Exception: pass` swallows** around TTS task awaits
+   — replaced with `await_prior_tts_task(task, "context")` which logs
+   the exception via `log.exception` and sends a `tts_error` frame so
+   the client knows audio went sideways.
+5. **`websocket.send_*` not guarded** — every send now goes through
+   `safe_send_text` / `safe_send_bytes` which catches only client-
+   disconnect errors and re-raises everything else.
+6. **TTS engine double-load race** — `threading.RLock` around
+   `_ensure_loaded()` and `activate_version()`. Without it, two
+   concurrent `generate_streaming()` calls both observed
+   `is_loaded=False` and both triggered model load, leaking VRAM.
+   Proven safe under 50-thread contention by
+   `tests/unit/test_tts_engine_lock.py`.
+7. **Dead code removed:** `EMOTION_TAG_RE` (line 284) and the legacy
+   `tts_ready` HTTP-fetch frame (lines 569-600). CLAUDE.md confirmed
+   the client doesn't read `tts_ready`.
+
+**Helpers extracted:** `app/api/_ws_helpers.py` with `drain_emotion_parser`,
+`safe_send_text`, `safe_send_bytes`, `await_prior_tts_task`,
+`send_tts_error_frame`, all unit-tested.
+
+**Property testing:** `tests/unit/test_emotion_parser_property.py` runs
+~450 random chunk-split scenarios through the parser via Hypothesis.
+
+**Latency:** WS round-trip + TTFT + TTS-first-chunk still well under the
+2s budget on the A10G.
+
+**Deferred:** Silero VAD upgrade; httpx-ws-based async integration tests
+for cancel timing (the TestClient sync model races at the cancel point).

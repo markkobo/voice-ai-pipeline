@@ -835,3 +835,85 @@ embed_weight[spk_id] = speaker_embedding
 codec_embedding analysis shows training effect:
 - Base indices: mean ~0.0002, std ~0.015 (generic)
 - Trained index: mean ~0.006, std ~0.42 (activated)
+
+---
+
+## Implementation Status — 2026-05-14 (post Phase 1.2 training restructure)
+
+See `tests/_phase1_2_acceptance.md` for the full restructure log. M4 is
+~98% built — every endpoint specified is implemented, plus the LoRA+SFT
+training paths the user has been exercising in practice.
+
+**Training infrastructure as built:**
+
+```
+app/services/training_service/
+├── models.py         ✅ Pydantic TrainingVersion / TrainingManifest /
+│                         ProgressSnapshot + TrainingType/VersionStatus enums
+├── repository.py     ✅ JsonTrainingRepository — fcntl flock + atomic rename
+├── service.py        ✅ TrainingService orchestrator (pure, no FastAPI)
+├── audio_resolver.py ✅ RecordingsAudioResolver — refuses unknown-duration
+│                         segments (was silently defaulting to 30s)
+├── training_job.py   ✅ Subprocess runner (LoRA + SFT, weight merging)
+├── progress_tracker.py ✅ Per-version progress.json writer
+├── lora_trainer.py   ✅ TrainingConfig
+└── sft_trainer.py    ✅ SFTConfig
+
+app/api/training.py   ✅ 13 endpoints, Pydantic bodies, bounded SSE poll
+app/api/_errors.py    ✅ Training-specific DomainError subclasses
+                          (TrainingVersionNotFoundError, VersionNotReadyError,
+                          InvalidTrainingParamsError, NoTrainingAudioError,
+                          ActiveVersionLockedError, MergedModelMissingError)
+```
+
+**Endpoint coverage:** 13/13 endpoints implemented + contract-tested.
+Coverage on `app/api/training.py` 13.6% → 63.1% literal (~87% of testable;
+remaining 13% is TTS-engine integration that needs the live engine).
+
+**Defects from §16 of this RFC — Phase 1.2 fixes:**
+- **JSON corruption race in `VersionManager._save_index`** → fixed by
+  `JsonTrainingRepository.update()` using exclusive flock + atomic
+  rename. Proven by 50-thread concurrent-update test.
+- **In-memory `self._versions` stale-cache** → repository has no
+  in-memory cache; every read hits disk under shared lock.
+- **Module-level `_training_jobs` global** → moved to instance-scope
+  `TrainingService._jobs` dict.
+- **`list_versions()` read-with-write side-effect** → split into
+  `list_versions()` (pure read) and `refresh_status_from_progress()`
+  (explicit sync).
+- **6 silent `except Exception` swallows** around TTS/ASR unload + LoRA
+  activation → replaced with logged retries or wrapped as DomainError.
+- **`cancel_training` reached into `manager._save_index()` private** →
+  service exposes `cancel_version()` with a clean API.
+- **`get_training_audio_for_persona` silently defaulted duration to 30s**
+  → `AudioResolver` raises `NoTrainingAudioError` when duration is None.
+  Recordings with bad metadata can no longer slip past the 10s minimum
+  audio check.
+- **PATCH used query param `nickname`, POST /voice-clone used query
+  params** → both now require Pydantic bodies (`UpdateVersionRequest`,
+  `VoiceCloneActivateRequest`).
+- **Concurrent-training guard** → service returns 409
+  `training_in_progress` if another version is in `training` status.
+
+**Validators centralized:** `app/services/training_service/models.py`
+exports `validate_rank` (must be in {4,8,16,32}), `validate_epochs`
+(1-50), `validate_batch_size` (1-32), `parse_segment_id` (single source
+of truth — was duplicated in api/training.py and services/training.py).
+
+**SSE progress endpoint** (`GET /versions/{id}/progress`): bounded poll
+with `SSE_MAX_WAIT_SECONDS = 30 min` and explicit `event: timeout` /
+`event: complete` / `event: error` frames. The legacy unbounded
+`while True` is gone.
+
+**SFT chunking lessons learned (preserved from §16):** still apply.
+`SpeechDataset` chunks 5-10s windows with 50% hop overlap; min 30 chunks
+required before training fires.
+
+**Deferred:**
+- Subprocess-side training code coverage (training_job.py at 10% — needs
+  container with GPU + a tiny-fixture smoke test).
+- Extracting `build_training_script(config) -> str` as a pure function
+  for snapshot-testable script-gen.
+- Legacy `VersionManager` in `app/services/training.py` still around for
+  `app/main.py:startup_event` (auto-activate latest merged model);
+  remove after migrating startup to TrainingService.

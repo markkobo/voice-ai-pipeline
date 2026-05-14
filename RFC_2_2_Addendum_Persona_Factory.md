@@ -52,3 +52,44 @@ api/ws_asr.py 需確保傳遞正確的 persona_id（預設 xiao_s）與從 confi
 驗證情感標籤解析邏輯（Regex）在動態載入的 Prompt 下依然運作正常。
 
 新增測試案例：建立一個名為 test_legacy.json 的偽造人格，驗證系統能否在不改動代碼的情況下切換到新的人格語氣。」
+
+---
+
+## Implementation Status — 2026-05-14
+
+The persona-as-data factory pattern is built. Personas load from
+`app/resources/personas/*.json` and the prompt synthesis happens
+without code changes when a new JSON is dropped in.
+
+**As built:**
+- Schema per JSON: `persona_id`, `base_personality`, `emotion_instruction`,
+  `relationships: {listener_id → modifier}`, `default_relationship`,
+  optional `tone_examples`.
+- Currently `xiao_s.json` is the only file in `app/resources/personas/`
+  — see it for the canonical schema.
+- `app/services/llm/prompt_manager.py:PersonaManager` loads on first
+  call, caches in-process (`@lru_cache`), composes prompts per request.
+- Falls back to `default_relationship` if a `(persona_id, listener_id)`
+  pair has no relationship modifier.
+
+**Note on the two persona systems:** there are now TWO persona-related
+data stores in the repo. They serve different layers and are not yet
+unified:
+
+1. **`app/resources/personas/*.json`** — prompt content + emotion instructions
+   (this RFC). Read by `prompt_manager.py` to build LLM prompts.
+2. **`data/personas/personas.json`** — CRUD registry of persona IDs (with
+   `type=fixed|dynamic`, `name`, `is_family`). Owned by
+   `app/services/personas/` package (Phase 1.3). Used by the API for
+   validation (does this persona_id exist?) and the recordings UI
+   dropdown.
+
+Unifying them is out of scope; the relevant gap is that if a user adds
+a new dynamic persona via `POST /api/personas/`, there's no
+corresponding JSON in `app/resources/personas/`, so the prompt would
+fall back to a generic template. Adding a UI-driven persona-JSON
+authoring flow is a future milestone.
+
+**Test gap:** the RFC asked for a `test_legacy.json` smoke test. Not
+written yet — the prompt_manager has tests that load `xiao_s.json` but
+no contract test that drops a new JSON file and re-loads.

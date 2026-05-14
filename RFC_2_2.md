@@ -58,3 +58,37 @@
 > 2. 修改 `api/ws_asr.py` 使其能接收 `listener_id` 並傳遞給 LLM。
 > 3. 在 LLM 串流回調中實作狀態機解析，提取 `[E:情緒]` 標籤並放入 JSON 幀的 `emotion` 欄位，同時將其從 `content` 中剔除。
 > 4. 更新現有測試案例並新增「關係切換測試」。
+
+---
+
+## Implementation Status — 2026-05-14
+
+RFC 2.2 is ~100% implemented. All four action items in §5 are done.
+
+**Where each piece lives:**
+- Relationship-aware prompt matrix: `app/services/llm/prompt_manager.py`
+  reads persona JSON from `app/resources/personas/` and synthesizes
+  `Prompt = base_personality + relationships[listener_id] +
+  emotion_instruction` per request.
+- `listener_id` flows through the WS config frame in `app/api/ws_asr.py`
+  → stored on `SessionState` → passed to `prompt_manager.get_prompt()`.
+- `[E:情緒]內容` state-machine parser at
+  `app/services/tts/emotion_mapper.py:EmotionParser` extracts the tag,
+  emits emotion in the JSON frame's `emotion` field, strips it from
+  `content` before display.
+- 14 example-based tests in `tests/unit/test_emotion_parser.py` + 5
+  Hypothesis property tests (`~450 random chunk-splits`) in
+  `tests/unit/test_emotion_parser_property.py`.
+
+**Phase 2 fixed two parser bugs** introduced by the Path B transition
+(text prosody enhancement replacing TTS instruct strings) — see
+`tests/_phase2_acceptance.md`:
+- `is_ready` no longer requires `current_instruct is not None` (which
+  was permanently None after Path B); it just checks `is_emotion_locked`.
+- The unknown-emotion test was rewritten to assert the Path B contract
+  (unknown emotion routes through the default enhancer in `enhance_text`).
+
+**Per-listener tone:** the prompt for `(xiao_s, child)` instructs warm
+寵溺 tone; `(xiao_s, mom)` is 撒嬌貼心; `(xiao_s, reporter)` is 毒舌
+機智. The LLM is asked to prefix `[E:情緒]` accordingly so the parser
+sees a deterministic tag.

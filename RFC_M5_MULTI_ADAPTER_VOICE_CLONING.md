@@ -539,3 +539,43 @@ After starting new SFT training:
 - `RFC_M4_LORA_TRAINING.md` — Current training pipeline (LoRA + SFT, single model)
 - `RFC_MVP_REDESIGN.md` — Recording/persona/listener data model
 - `RFC_2_3_Adaptive_Voice_Cloning.md` — Emotion-aware voice cloning (superseded by this RFC)
+
+---
+
+## Implementation Status — 2026-05-14
+
+M5 is ~40% built. The training-side scaffolding (per-listener segment
+filtering, listener_id on TrainingVersion, listener-aware audio
+resolution) all landed during Phase 1.2. The inference-side
+multi-adapter routing — the load-different-LoRA-per-listener flow —
+has NOT been wired.
+
+**What's done:**
+- `app/services/training_service/audio_resolver.py:RecordingsAudioResolver`
+  resolves segment_ids to audio paths and surfaces both persona_id and
+  listener_id from the source `SpeakerSegment`. Trainer can filter by
+  (persona, listener) pair without code changes.
+- `app/services/training_service/models.py:TrainingVersion.recording_ids_used`
+  / `segment_ids_used` track exactly which segments fed each version,
+  so a future adapter-registry can group versions by listener_id.
+- `Listener.default_emotion` (Phase 1.3) provides per-listener tone
+  routing for the LLM prompt — Path-A-style conditioning is already
+  live at the LLM tier.
+
+**What's not done (B-1 through B-7 in §9):**
+- B-1 SFT-per-listener training runs — pipeline supports it but no
+  driver script kicks off one-per-listener.
+- B-2 baseline retraining with the chunking fix — chunking fix landed
+  in Phase 1.2 (`tests/_phase1_2_acceptance.md`); re-run not yet done.
+- B-3 adapter registry as a separate JSON file
+  (`data/models/adapter_registry.json`) — current code stores adapters
+  inside the version's `TrainingVersion` row.
+- B-4 `GET /api/training/adapters?persona_id=...` grouping endpoint.
+- B-5 `StateManager.get_adapter_for_listener()` and corresponding
+  dynamic load in `qwen_tts_engine.activate_version()`.
+- B-6 / B-7 UI for adapter comparison + A/B test.
+
+**Single-LoRA-per-persona works today** — the recordings UI lets the
+user select segments + train + activate, and the TTS engine loads the
+merged LoRA. The multi-adapter path is the next milestone, not a
+blocker for the current MVP.

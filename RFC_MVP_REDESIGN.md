@@ -476,3 +476,50 @@ data/
 - [x] M4.1: Conversation model version dropdown with nicknames
 - [x] M4.2: Start/Stop toggle button
 - [x] M4.3: Version info tooltip
+
+---
+
+## Implementation Status — 2026-05-14
+
+The data-model + 3-page UI is ~95% built. See `tests/_phase1_1_acceptance.md`
+and `tests/_phase1_3_acceptance.md` for the full restructure log.
+
+**Data models — all Pydantic (`extra="forbid"` on requests, `extra="ignore"`
+on legacy persisted JSON):**
+- `Recording` / `SpeakerSegment` / `QualityMetrics` in
+  `app/services/recordings/models.py`
+- `TrainingVersion` / `TrainingManifest` / `ProgressSnapshot` in
+  `app/services/training_service/models.py`
+- `Persona` / `PersonaType` (fixed vs dynamic) in
+  `app/services/personas/models.py`
+- `Listener` with new `is_seed: bool` flag in
+  `app/services/listeners/models.py`
+
+**Three UI pages:** `/ui` (chat), `/ui/recordings` (tree view + speaker
+segment editing), `/ui/training` (segment multi-select + version
+management). All three render against the new APIs; verified end-to-end
+against R2-restored data.
+
+**API surface — uniformly Pydantic per endpoint, errors via DomainError:**
+- Recordings: 13 endpoints, 47 contract tests
+- Training: 13 endpoints, 35 contract tests + 18 repo unit tests
+- Personas: 5 endpoints, 17 contract tests
+- Listeners: 5 endpoints, 17 contract tests
+- Pagination added: `{recordings, total, page, limit, total_pages}` on
+  list endpoints.
+
+**Readonly guards (new in Phase 1.3):**
+- `FIXED_PERSONAS` (xiao_s, caregiver, elder_gentle, elder_playful) cannot
+  be deleted or renamed via API — raises `FixedPersonaReadonlyError` (400).
+- `SEED_LISTENERS` (child, mom, dad, friend, elder, reporter, default)
+  cannot be deleted — raises `SeedListenerReadonlyError` (400). The
+  service checks both the `is_seed` flag AND a hardcoded id-set fallback,
+  because legacy R2-restored data has `is_seed=False` (the flag is new).
+
+**Concurrency:** every repository uses `fcntl.flock` + atomic
+`os.replace`. The PATCH races the original metadata.json had (last-write
+wins, lost updates, truncated JSON on kill mid-write) are gone. Proven
+by the 30/50-thread tests.
+
+**Listener CRUD UI:** API exists, UI not wired (deferred).
+**Version comparison:** not implemented (still in `[]`).

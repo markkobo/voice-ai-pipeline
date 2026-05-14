@@ -469,15 +469,33 @@ class AudioProcessingPipeline:
                     if torch.cuda.is_available():
                         pipeline = pipeline.to(torch.device("cuda"))
 
-                    # Run diarization with waveform dict
-                    self._log("Running diarization...")
+                    # Run diarization with waveform dict.
+                    # Speaker-count hints: if the recording's folder_name
+                    # contains "podcast", assume 2 speakers (host + guest).
+                    # IG clips are mostly single-speaker. Otherwise let
+                    # pyannote auto-detect within a 1-4 range to avoid the
+                    # spurious 3rd-speaker classification we observed on
+                    # quiet recordings.
+                    pipeline_kwargs: dict = {}
+                    folder = self.paths.folder_name.lower()
+                    if "podcast" in folder:
+                        pipeline_kwargs = {"num_speakers": 2}
+                    elif "ig" in folder.split("_") or "ig_" in folder:
+                        pipeline_kwargs = {"num_speakers": 1}
+                    else:
+                        pipeline_kwargs = {"min_speakers": 1, "max_speakers": 4}
+                    self._log(f"Running diarization (hints={pipeline_kwargs})...")
                     with torch.no_grad():
-                        diarization_output = pipeline(audio_dict)
+                        diarization_output = pipeline(audio_dict, **pipeline_kwargs)
 
-                    # Use exclusive_speaker_diarization to get merged segments
-                    # (removes overlapping speech turns)
+                    # pyannote 3.4 returns a plain Annotation. The old
+                    # `.exclusive_speaker_diarization` attribute is gone in
+                    # 3.x — calling it here silently AttributeError'd on
+                    # EVERY recording and the generic except fell through
+                    # to the 1-speaker fallback. That's why every podcast
+                    # showed `[SPEAKER_00]`.
                     raw_segments = []
-                    for turn, _, speaker in diarization_output.exclusive_speaker_diarization.itertracks(yield_label=True):
+                    for turn, _, speaker in diarization_output.itertracks(yield_label=True):
                         raw_segments.append({
                             "speaker_id": speaker,
                             "start_time": turn.start,
@@ -724,6 +742,15 @@ class AudioProcessingPipeline:
 
         self._log(f"Transcribing audio from: {audio_path}")
 
+        # Free any VRAM held by previous pipeline steps (enhance, diarize).
+        # Without this, Whisper large-v3 OOMs on a 24 GB A10G because the
+        # pyannote pipeline + speechbrain SepFormer are still in VRAM.
+        import gc as _gc
+        import torch as _torch
+        _gc.collect()
+        if _torch.cuda.is_available():
+            _torch.cuda.empty_cache()
+
         for attempt in range(MAX_RETRIES):
             try:
                 from faster_whisper import WhisperModel
@@ -731,12 +758,15 @@ class AudioProcessingPipeline:
                 # Serialize CUDA operations to prevent OOM from parallel runs
                 # Only hold lock during model load + transcription, not during retry sleep
                 with _cuda_lock:
-                    # Use large-v3 for best Chinese transcription quality
-                    # faster-whisper large-v3: RTF ~0.006, excellent Chinese fluency
+                    # Use large-v3 for best Chinese transcription quality.
+                    # int8_float16 quantization cuts VRAM ~50% vs float16
+                    # with negligible quality loss — keeps headroom for the
+                    # other pipeline models still in VRAM.
+                    use_cuda = _torch.cuda.is_available()
                     model = WhisperModel(
                         "large-v3",
-                        device="cuda" if __import__('torch').cuda.is_available() else "cpu",
-                        compute_type="float16" if __import__('torch').cuda.is_available() else "int8"
+                        device="cuda" if use_cuda else "cpu",
+                        compute_type="int8_float16" if use_cuda else "int8",
                     )
 
                     self._log("Whisper model loaded, starting transcription...")
