@@ -228,9 +228,15 @@ async def domain_error_handler(request: Request, exc: DomainError) -> JSONRespon
     return JSONResponse(
         status_code=exc.status_code,
         content={
+            # Modern shape (introduced in Phase 1.1).
             "error": exc.error_code,
             "message": exc.message,
             "details": exc.details or None,
+            # Legacy FastAPI shape — the existing UI reads `err.detail` first
+            # (see app/api/recordings_ui.py:1950 and 4 other call sites).
+            # Mirroring `message` here keeps the UI's error-toast text correct
+            # without forcing a UI-side refactor.
+            "detail": exc.message,
         },
     )
 

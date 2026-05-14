@@ -14,8 +14,13 @@ from app.api._errors import (
     SeedListenerReadonlyError,
 )
 
-from .models import VALID_EMOTIONS, Listener
+from .models import SEED_LISTENERS, VALID_EMOTIONS, Listener
 from .repository import JsonListenerRepository, ListenerNotFound
+
+# Set of seed listener_ids — used to enforce read-only protection even when
+# legacy data was loaded without the `is_seed` field set. R2-restored JSON
+# from before Phase 1.3 doesn't include the flag, so we double-check by id.
+_SEED_IDS: frozenset[str] = frozenset(l.listener_id for l in SEED_LISTENERS)
 
 log = logging.getLogger(__name__)
 
@@ -107,10 +112,9 @@ class ListenersService:
 
     def delete(self, listener_id: str) -> None:
         existing = self.get(listener_id)
-        if existing.is_seed:
-            # New in Phase 1.3: seeded listeners cannot be deleted via API.
-            # The legacy code allowed this, which broke any downstream code
-            # that assumes `child`/`mom`/`default` exist.
+        # Both checks are required: `is_seed` for new data, the id-set fallback
+        # for R2-restored legacy data that pre-dates the `is_seed` field.
+        if existing.is_seed or listener_id in _SEED_IDS:
             raise SeedListenerReadonlyError(
                 f"Cannot delete seeded listener: {listener_id!r}",
                 details={"listener_id": listener_id},

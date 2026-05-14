@@ -1,16 +1,37 @@
 # Voice AI Pipeline Requirements
 #
-# INSTALLATION NOTES:
-# 1. PyTorch MUST be installed first from PyTorch's index URL:
-#    pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+# INSTALLATION (recommended order for a fresh GPU pod):
+#   sudo apt install -y ffmpeg sox cifs-utils
+#   sudo apt install -y nvidia-driver-595 nvidia-utils-595   # for Ubuntu 24.04 + A10G/A100; verify with `nvidia-detector`
+#   sudo modprobe nvidia                                      # or reboot
+#   python3 -m venv .venv && source .venv/bin/activate
+#   pip install torch==2.6.0 torchaudio==2.6.0 torchvision==0.21.0 \
+#       --index-url https://download.pytorch.org/whl/cu124
+#   pip install --use-deprecated=legacy-resolver -r requirements.txt
 #
-# 2. For fresh install with all dependencies, use legacy resolver (qwen-asr and qwen-tts
-#    pin conflicting transformers versions):
-#    pip install --use-deprecated=legacy-resolver -r requirements.txt
-#
-# 3. pyannote.audio 4.x requires torch>=2.8.0 which breaks CUDA graphs - use 3.x
+# WHY EACH PIN: every "==" below corresponds to a real version conflict found
+# during install on Ubuntu 24.04. The legacy resolver alone resolves to a
+# broken combo (torchvision 0.26 vs torch 2.6 → "torchvision::nms doesn't
+# exist"; tokenizers 0.23.1 vs qwen-asr/tts cap; etc.). The pins are the
+# minimum set that satisfies both pip's resolver and the qwen-* runtime
+# version checks.
 
-# Core
+# ============================================================================
+# PyTorch (must install separately first — see header)
+# ============================================================================
+# These three are also listed here for documentation; the actual install
+# command uses --index-url https://download.pytorch.org/whl/cu124 so the
+# +cu124 wheels are picked up.
+torch==2.6.0
+torchaudio==2.6.0
+torchvision==0.21.0
+# Why 0.21.0 (not >=0.20.0): the loose constraint resolved to 0.26.0 which is
+# built against torch 2.9 and aborts with "operator torchvision::nms does not
+# exist" on torch 2.6. 0.21.0 is the matching release for torch 2.6.
+
+# ============================================================================
+# Web framework
+# ============================================================================
 fastapi>=0.100.0
 uvicorn>=0.23.0
 pydantic>=2.0.0
@@ -20,45 +41,60 @@ openai>=1.0.0
 pydub>=0.25.0
 python-dotenv>=1.0.0
 
-# PyTorch CUDA 12.4 — MUST use exact version for CUDA graphs compatibility
-# Install with: pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
-# The +cu124 suffix only works with PyTorch's index URL
-torch==2.6.0
-torchaudio==2.6.0
-torchvision>=0.20.0
-
-# ASR - Real-time streaming for WebSocket voice chat
+# ============================================================================
+# ASR / TTS — streaming via Qwen3
+# ============================================================================
 qwen-asr>=0.0.6
-
-# TTS - Voice synthesis (FasterQwen3TTS with CUDA graphs)
-faster-qwen3-tts
 qwen-tts>=0.1.1
+faster-qwen3-tts
+# Why these pins: qwen-asr 0.0.6 hard-asserts these at import time.
+accelerate==1.12.0
+tokenizers==0.22.2
+# Why 0.22.2: qwen-asr/qwen-tts runtime check enforces
+# `tokenizers>=0.22.0,<=0.23.0`. 0.23.0 doesn't exist on PyPI; 0.22.2 is the
+# highest valid release. (transformers 4.57.x would pull in 0.23.1, which
+# fails the cap.)
 
-# Audio Processing Pipeline
-# NOTE: pyannote.audio 3.x is compatible with torch 2.6.0 (CUDA graphs)
-# pyannote.audio 4.x requires torch>=2.8.0 which breaks CUDA graphs
-# faster-whisper uses large-v3 model for Chinese transcription (RTF ~0.006)
+# transformers — pinned indirectly via qwen-asr / qwen-tts. Letting the
+# resolver pick gets 4.57.6 today, which is what qwen-asr requires.
+# transformers (no explicit pin)
+
+# huggingface_hub: transformers wants <1.0; latest 1.x exists and pip would
+# pick it. Cap explicitly so the resolver doesn't pull in a 1.x release.
+huggingface-hub>=0.34.0,<1.0
+
+# ============================================================================
+# Audio processing pipeline
+# ============================================================================
+# pyannote 3.x is compatible with torch 2.6 (CUDA graphs); 4.x requires
+# torch>=2.8 which we can't use.
+pyannote.audio>=3.0.0,<4.0.0
 faster-whisper>=1.0.0
 speechbrain>=1.0.0
-pyannote.audio>=3.0.0,<4.0.0
 noisereduce>=3.0.0
 
-# LoRA Fine-tuning (M4)
-# Note: transformers is pinned by qwen-tts and qwen-asr to specific versions
-# (qwen-tts==0.1.1 requires transformers==4.57.3, qwen-asr requires transformers==4.57.6)
-# Adding a separate transformers requirement would conflict
+# ============================================================================
+# Training (LoRA / SFT)
+# ============================================================================
 peft>=0.10.0
 datasets>=2.18.0
-accelerate>=0.28.0
 soundfile>=0.12.0
 
+# ============================================================================
 # Testing
+# ============================================================================
 pytest>=7.4.0
 pytest-asyncio>=0.21.0
 pytest-cov>=4.1.0
 hypothesis>=6.100.0
 httpx>=0.24.0
 
-# System dependencies (install via apt/apt-get):
-# ffmpeg - audio format conversion (sudo apt install ffmpeg)
-# rnnoise - noise reduction (sudo apt install rnnoise)
+# ============================================================================
+# System dependencies (NOT installed via pip — install via apt):
+#   ffmpeg   — audio decoding / transcoding (REQUIRED by pydub and the
+#              speaker-audio slicer in the recordings API)
+#   sox      — used at runtime by qwen-asr; without it, qwen-asr emits a
+#              warning at import and degrades to manual PyTorch decoding
+#   rnnoise  — optional alternative noise reducer
+#   cifs-utils — for mounting SMB shares (e.g. HomeNAS backup)
+# ============================================================================
