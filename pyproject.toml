@@ -1,0 +1,43 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "strict"
+addopts = [
+    "--strict-markers",
+    "--tb=short",
+    "-ra",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "gpu: marks tests that require a real GPU",
+    "integration: marks tests that hit the FastAPI app end-to-end",
+    "contract: marks tests that pin the public API/response schema",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:pkg_resources.*",
+    "ignore::DeprecationWarning:pyannote.*",
+    "ignore::DeprecationWarning:speechbrain.*",
+    "ignore::UserWarning:torchaudio.*",
+]
+
+[tool.coverage.run]
+source = ["app"]
+branch = true
+omit = [
+    "*/__init__.py",
+    "*/__pycache__/*",
+    "app/api/gradio_ui.py",
+    "app/api/standalone_ui.py",
+    "app/api/recordings_ui.py",
+    "app/api/training_ui.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+show_missing = true
+skip_covered = false
+precision = 1

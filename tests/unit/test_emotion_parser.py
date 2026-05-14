@@ -122,12 +122,24 @@ class TestNewFormatEdgeCases:
         result = parser.update('哈')
         assert result == ('調皮', '哈')
 
-    def test_unknown_emotion_uses_default_instruct(self):
-        """Unknown emotion uses default TTS instruct."""
+    def test_unknown_emotion_falls_back_to_default_enhancer(self):
+        """Unknown emotion is preserved on the parser but falls back to the
+        default enhancer when text is enhanced.
+
+        Path B (active) replaced TTS instruct strings with text-prosody
+        enhancement, so `current_instruct` is always None. The contract that
+        actually matters is that `enhance_text(..., unknown_emotion)` doesn't
+        crash — it routes through the default enhancer.
+        """
+        from app.services.tts.emotion_mapper import enhance_text, DEFAULT_EMOTION
+
         parser = EmotionParser()
         parser.update('[E:未知情緒]哈')
         assert parser.current_emotion == '未知情緒'
-        assert parser.current_instruct == "(natural, conversational tone, warm and engaging)"
+        # Path B: instruct strings are gone — current_instruct stays None.
+        assert parser.current_instruct is None
+        # Unknown emotion routes through the default enhancer (no-op for default).
+        assert enhance_text("哈哈", "未知情緒") == enhance_text("哈哈", DEFAULT_EMOTION)
 
     def test_pure_content_single_e(self):
         """Single 'E' without [ is content."""

@@ -71,11 +71,30 @@ class FasterQwenTTSEngine:
         self._speaker_name: Optional[str] = None  # speaker name for custom_voice models
         self._ref_audio_path: Optional[str] = None  # reference audio for voice_clone mode
 
+        # Phase 2: serialize model load + activate so concurrent calls don't
+        # double-load the model. RLock so a method that re-enters another
+        # locked method (e.g. activate_version → _ensure_loaded) doesn't
+        # deadlock. The lock is also held during model swap, which makes
+        # `is_loaded` reads racy-but-safe — readers see either the old or
+        # new model, never a half-swapped state.
+        import threading
+        self._load_lock = threading.RLock()
+
     def _ensure_loaded(self):
-        """Lazy load the model(s)."""
+        """Lazy load the model(s). Idempotent + thread-safe."""
+        # Fast path: already loaded. Avoid taking the lock for the common case.
         if self._is_loaded:
             return
 
+        # Slow path: serialize load. Double-check inside the lock because a
+        # concurrent caller may have loaded it while we were waiting.
+        with self._load_lock:
+            if self._is_loaded:
+                return
+            self._ensure_loaded_locked()
+
+    def _ensure_loaded_locked(self):
+        """Internal: assumes the caller holds self._load_lock."""
         import torch
         from faster_qwen3_tts import FasterQwen3TTS
 
@@ -204,11 +223,16 @@ class FasterQwenTTSEngine:
         self._speaker_name = speaker_name
         log.info(f"[TTS] Activated merged model: {merged_path}")
 
-        # Reload model if already loaded to use merged weights
-        if self._is_loaded:
-            self._is_loaded = False
-            self._warmed_up = False  # Need to re-warmup with new model
-            self._ensure_loaded()
+        # Reload model if already loaded to use merged weights. Under the
+        # load lock so concurrent generate_streaming() calls can't see a
+        # half-swapped state (was a documented race pre-Phase-2: two
+        # callers both observed is_loaded=False and both triggered loads,
+        # leaking model memory).
+        with self._load_lock:
+            if self._is_loaded:
+                self._is_loaded = False
+                self._warmed_up = False
+                self._ensure_loaded_locked()
 
     def deactivate_lora(self):
         """Deactivate merged model and use base VoiceDesign model."""
@@ -307,11 +331,14 @@ class FasterQwenTTSEngine:
 
         log.info(f"[TTS] Activated voice clone mode for {persona_id} with ref: {ref_audio_path}")
 
-        # Reload model if already loaded to use Base model for voice clone
-        if self._is_loaded:
-            self._is_loaded = False
-            self._warmed_up = False
-            self._ensure_loaded()
+        # Reload model if already loaded to use Base model for voice clone.
+        # Same locking as activate_version — concurrent callers see a coherent
+        # model swap rather than a half-loaded state.
+        with self._load_lock:
+            if self._is_loaded:
+                self._is_loaded = False
+                self._warmed_up = False
+                self._ensure_loaded_locked()
 
     async def generate_streaming(
         self,

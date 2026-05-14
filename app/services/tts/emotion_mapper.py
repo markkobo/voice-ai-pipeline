@@ -199,8 +199,15 @@ class EmotionParser:
 
     @property
     def is_ready(self) -> bool:
-        """True if emotion is locked and instruct is available."""
-        return self.is_emotion_locked and self.current_instruct is not None
+        """True once the emotion has been locked in.
+
+        Used to be `is_emotion_locked AND current_instruct is not None`,
+        but `current_instruct` is permanently None under Path B (text
+        enhancement replaced TTS instruct strings — see `get_tts_instruct`
+        and the EMOTION_TEXT_ENHANCEMENT map). So the only meaningful
+        readiness signal is whether we've parsed a `[E:...]` header.
+        """
+        return self.is_emotion_locked
 
     def update(self, text: str) -> Optional[tuple]:
         """
@@ -426,5 +433,5 @@ class EmotionMapper:
 
     @property
     def is_ready(self) -> bool:
-        """True if emotion is locked and instruct is available."""
-        return self._emotion_locked and self.current_instruct is not None
+        """Mirror of EmotionParser.is_ready — see comment there."""
+        return self._emotion_locked

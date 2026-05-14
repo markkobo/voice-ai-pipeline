@@ -1,87 +1,94 @@
 """
-Persona API endpoints.
+Personas REST API — routes only.
 
-GET/POST/PATCH/DELETE for persona definitions.
+Phase 1.3: every route uses Pydantic with `extra="forbid"`, delegates to
+PersonasService via Depends, and lets the app-wide DomainError handler map
+errors to HTTP. No more HTTPException raised in this module.
 """
+from __future__ import annotations
 
-import re
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+import logging
 from typing import Optional
 
-from app.services.personas import (
-    list_personas,
-    get_persona,
-    create_persona,
-    update_persona,
-    delete_persona,
-    is_fixed_persona,
-)
+from fastapi import APIRouter, Depends
+from pydantic import BaseModel, ConfigDict
 
+from app.api._dependencies import get_personas_service
+from app.services.personas import Persona, PersonasService
+
+log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/personas", tags=["personas"])
 
 
-class PersonaCreate(BaseModel):
+# ---------------------------------------------------------------------------
+# Pydantic request / response models
+# ---------------------------------------------------------------------------
+class PersonaCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     persona_id: str
     name: str
     is_family: bool = True
 
 
-class PersonaUpdate(BaseModel):
+class PersonaUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: Optional[str] = None
 
 
-@router.get("/")
-async def api_list_personas():
-    """List all personas."""
-    return {"personas": list_personas()}
+class PersonasListResponse(BaseModel):
+    personas: list[Persona]
 
 
-@router.get("/{persona_id}")
-async def api_get_persona(persona_id: str):
-    """Get a single persona."""
-    persona = get_persona(persona_id)
-    if not persona:
-        raise HTTPException(404, f"Persona not found: {persona_id}")
-    return persona
+class DeletePersonaResponse(BaseModel):
+    status: str = "deleted"
+    persona_id: str
 
 
-@router.post("/")
-async def api_create_persona(body: PersonaCreate):
-    """Create a dynamic (non-fixed) persona."""
-    # Validate ID format: lowercase letters, numbers, underscores
-    if not re.match(r'^[a-z][a-z0-9_]*$', body.persona_id):
-        raise HTTPException(400, "persona_id must be lowercase letters, numbers, underscores, starting with a letter")
-
-    if is_fixed_persona(body.persona_id):
-        raise HTTPException(400, f"Cannot create: '{body.persona_id}' is a fixed persona")
-
-    try:
-        persona = create_persona(body.persona_id, body.name, body.is_family)
-        return persona
-    except ValueError as e:
-        raise HTTPException(400, str(e))
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+@router.get("/", response_model=PersonasListResponse)
+async def api_list_personas(
+    service: PersonasService = Depends(get_personas_service),
+) -> PersonasListResponse:
+    return PersonasListResponse(personas=service.list_personas())
 
 
-@router.patch("/{persona_id}")
-async def api_update_persona(persona_id: str, body: PersonaUpdate):
-    """Update persona name."""
-    if is_fixed_persona(persona_id):
-        raise HTTPException(400, "Cannot rename fixed persona via this API")
-    try:
-        persona = update_persona(persona_id, name=body.name)
-    except ValueError as e:
-        raise HTTPException(404, str(e))
-    return persona
+@router.get("/{persona_id}", response_model=Persona)
+async def api_get_persona(
+    persona_id: str,
+    service: PersonasService = Depends(get_personas_service),
+) -> Persona:
+    return service.get(persona_id)
 
 
-@router.delete("/{persona_id}")
-async def api_delete_persona(persona_id: str):
-    """Delete a dynamic persona. Fixed personas cannot be deleted."""
-    if is_fixed_persona(persona_id):
-        raise HTTPException(400, f"Cannot delete fixed persona: '{persona_id}'")
-    try:
-        delete_persona(persona_id)
-    except ValueError as e:
-        raise HTTPException(404, str(e))
-    return {"status": "deleted", "persona_id": persona_id}
+@router.post("/", response_model=Persona)
+async def api_create_persona(
+    body: PersonaCreateRequest,
+    service: PersonasService = Depends(get_personas_service),
+) -> Persona:
+    return service.create(
+        persona_id=body.persona_id,
+        name=body.name,
+        is_family=body.is_family,
+    )
+
+
+@router.patch("/{persona_id}", response_model=Persona)
+async def api_update_persona(
+    persona_id: str,
+    body: PersonaUpdateRequest,
+    service: PersonasService = Depends(get_personas_service),
+) -> Persona:
+    return service.update(persona_id, name=body.name)
+
+
+@router.delete("/{persona_id}", response_model=DeletePersonaResponse)
+async def api_delete_persona(
+    persona_id: str,
+    service: PersonasService = Depends(get_personas_service),
+) -> DeletePersonaResponse:
+    service.delete(persona_id)
+    return DeletePersonaResponse(persona_id=persona_id)

@@ -1,0 +1,5 @@
+{
+  "persona_id": "invalid_missing_base",
+  "relationships": {"default": "test"},
+  "default_relationship": "default"
+}

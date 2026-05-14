@@ -37,6 +37,10 @@ class SessionState:
     # LLM task tracking
     llm_cancellation_event: Optional[asyncio.Event]
     llm_task: Optional[asyncio.Task]
+    # Sticky-cancel flag: a cancel that arrives BEFORE set_llm_task is called
+    # used to be a silent no-op. We now latch the intent here and the next
+    # set_llm_task call honors it.
+    llm_pending_cancel: bool
 
     # TTS task tracking (M1)
     tts_session_id: Optional[str]
@@ -72,6 +76,7 @@ class SessionState:
         # LLM
         self.llm_cancellation_event = None
         self.llm_task = None
+        self.llm_pending_cancel = False
 
         # TTS
         self.tts_session_id = None
@@ -337,13 +342,21 @@ class StateManager:
         """
         Cancel any ongoing LLM streaming task for a session (barge-in).
 
+        If the LLM task hasn't registered itself yet (cancel-during-startup
+        race), latches `llm_pending_cancel=True` so the very next
+        `set_llm_task` call cancels immediately. This fixes a documented
+        baseline failure where cancel-immediately-after-commit was a silent
+        no-op.
+
         Returns:
-            True if a task was cancelled, False otherwise
+            True if a task was cancelled OR the cancel intent was latched.
         """
         state = self._sessions.get(session_id)
         if not state:
             return False
 
+        # Latch the intent unconditionally — set_llm_task will honor it.
+        state.llm_pending_cancel = True
         was_cancelled = False
 
         if state.llm_cancellation_event is not None and not state.llm_cancellation_event.is_set():
@@ -354,7 +367,7 @@ class StateManager:
             state.llm_task.cancel()
             was_cancelled = True
 
-        return was_cancelled
+        return was_cancelled or state.llm_pending_cancel
 
     def set_llm_task(
         self,
@@ -362,17 +375,30 @@ class StateManager:
         task: asyncio.Task,
         cancellation_event: asyncio.Event,
     ) -> None:
-        """Register an active LLM streaming task for a session."""
+        """Register an active LLM streaming task for a session.
+
+        Honors any latched `llm_pending_cancel` — if a cancel arrived before
+        this call, fire it immediately so the LLM stream sees a set
+        cancellation_event on its first poll.
+        """
         state = self._sessions.get(session_id)
         if state:
             state.llm_task = task
             state.llm_cancellation_event = cancellation_event
+            if state.llm_pending_cancel:
+                cancellation_event.set()
+                state.llm_pending_cancel = False
 
     def clear_llm_task(self, session_id: str) -> None:
-        """Clear LLM task references after completion or cancellation."""
+        """Clear LLM task references after completion or cancellation.
+
+        Also clears any latched llm_pending_cancel — fresh utterances start
+        with no pending intent.
+        """
         state = self._sessions.get(session_id)
         if state:
             state.llm_task = None
+            state.llm_pending_cancel = False
             state.llm_cancellation_event = None
 
     # -------------------------------------------------------------------------

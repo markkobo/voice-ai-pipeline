@@ -30,7 +30,9 @@ class TestTrainingVersion:
         assert version.persona_id == "xiao_s"
         assert version.status == "training"
         assert version.num_recordings_used == 5
-        assert version.base_model == "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
+        # Default base_model was changed to the -Base variant in late 2026.
+        # Pinning the actual default here so this test catches future drift.
+        assert version.base_model == "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
         assert version.rank == 16
         assert version.learning_rate == 1e-4
         assert version.num_epochs == 10

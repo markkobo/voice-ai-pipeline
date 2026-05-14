@@ -1,94 +1,99 @@
 """
-Listener API endpoints.
+Listeners REST API — routes only.
 
-GET/POST/PATCH/DELETE for listener definitions.
+Phase 1.3: every route uses Pydantic with `extra="forbid"`, delegates to
+ListenersService via Depends, and lets the app-wide DomainError handler map
+errors to HTTP. No more HTTPException raised in this module.
 """
+from __future__ import annotations
 
-import re
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+import logging
 from typing import Optional
 
-from app.services.listeners import (
-    list_listeners,
-    get_listener,
-    create_listener,
-    update_listener,
-    delete_listener,
-)
+from fastapi import APIRouter, Depends
+from pydantic import BaseModel, ConfigDict
 
+from app.api._dependencies import get_listeners_service
+from app.services.listeners import Listener, ListenersService
+
+log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/listeners", tags=["listeners"])
 
-VALID_EMOTIONS = {"寵溺", "撒嬌", "幽默", "毒舌", "溫和", "開心", "認真", "默認"}
 
+# ---------------------------------------------------------------------------
+# Pydantic request / response models
+# ---------------------------------------------------------------------------
+class ListenerCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
-class ListenerCreate(BaseModel):
     listener_id: str
     name: str
     is_family: bool = False
     default_emotion: str = "溫和"
 
 
-class ListenerUpdate(BaseModel):
+class ListenerUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: Optional[str] = None
     default_emotion: Optional[str] = None
 
 
-@router.get("/")
-async def api_list_listeners():
-    """List all listeners."""
-    return {"listeners": list_listeners()}
+class ListenersListResponse(BaseModel):
+    listeners: list[Listener]
 
 
-@router.get("/{listener_id}")
-async def api_get_listener(listener_id: str):
-    """Get a single listener."""
-    listener = get_listener(listener_id)
-    if not listener:
-        raise HTTPException(404, f"Listener not found: {listener_id}")
-    return listener
+class DeleteListenerResponse(BaseModel):
+    status: str = "deleted"
+    listener_id: str
 
 
-@router.post("/")
-async def api_create_listener(body: ListenerCreate):
-    """Create a new listener."""
-    # Validate ID format
-    if not re.match(r'^[a-z][a-z0-9_]*$', body.listener_id):
-        raise HTTPException(400, "listener_id must be lowercase letters, numbers, underscores, starting with a letter")
-
-    if body.default_emotion not in VALID_EMOTIONS:
-        raise HTTPException(400, f"Invalid emotion: {body.default_emotion}. Valid: {VALID_EMOTIONS}")
-
-    try:
-        listener = create_listener(
-            body.listener_id,
-            body.name,
-            body.is_family,
-            body.default_emotion,
-        )
-        return listener
-    except ValueError as e:
-        raise HTTPException(400, str(e))
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+@router.get("/", response_model=ListenersListResponse)
+async def api_list_listeners(
+    service: ListenersService = Depends(get_listeners_service),
+) -> ListenersListResponse:
+    return ListenersListResponse(listeners=service.list_listeners())
 
 
-@router.patch("/{listener_id}")
-async def api_update_listener(listener_id: str, body: ListenerUpdate):
-    """Update listener name or default emotion."""
-    if body.default_emotion and body.default_emotion not in VALID_EMOTIONS:
-        raise HTTPException(400, f"Invalid emotion: {body.default_emotion}. Valid: {VALID_EMOTIONS}")
-
-    try:
-        listener = update_listener(listener_id, name=body.name, default_emotion=body.default_emotion)
-    except ValueError as e:
-        raise HTTPException(404, str(e))
-    return listener
+@router.get("/{listener_id}", response_model=Listener)
+async def api_get_listener(
+    listener_id: str,
+    service: ListenersService = Depends(get_listeners_service),
+) -> Listener:
+    return service.get(listener_id)
 
 
-@router.delete("/{listener_id}")
-async def api_delete_listener(listener_id: str):
-    """Delete a listener."""
-    try:
-        delete_listener(listener_id)
-    except ValueError as e:
-        raise HTTPException(404, str(e))
-    return {"status": "deleted", "listener_id": listener_id}
+@router.post("/", response_model=Listener)
+async def api_create_listener(
+    body: ListenerCreateRequest,
+    service: ListenersService = Depends(get_listeners_service),
+) -> Listener:
+    return service.create(
+        listener_id=body.listener_id,
+        name=body.name,
+        is_family=body.is_family,
+        default_emotion=body.default_emotion,
+    )
+
+
+@router.patch("/{listener_id}", response_model=Listener)
+async def api_update_listener(
+    listener_id: str,
+    body: ListenerUpdateRequest,
+    service: ListenersService = Depends(get_listeners_service),
+) -> Listener:
+    return service.update(
+        listener_id, name=body.name, default_emotion=body.default_emotion
+    )
+
+
+@router.delete("/{listener_id}", response_model=DeleteListenerResponse)
+async def api_delete_listener(
+    listener_id: str,
+    service: ListenersService = Depends(get_listeners_service),
+) -> DeleteListenerResponse:
+    service.delete(listener_id)
+    return DeleteListenerResponse(listener_id=listener_id)

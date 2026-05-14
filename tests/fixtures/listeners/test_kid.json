@@ -1,0 +1,6 @@
+{
+  "listener_id": "test_kid",
+  "name": "Test Kid",
+  "is_family": true,
+  "default_emotion": "寵溺"
+}
