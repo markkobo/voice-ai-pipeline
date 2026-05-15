@@ -102,9 +102,53 @@ UI_HTML = """
         .toast.success { background: #1a4a2e; color: #00ff88; border: 1px solid #00ff88; }
         .toast.error { background: #4a1a1a; color: #ff4444; border: 1px solid #ff4444; }
         .toast.info { background: #1a2a4a; color: #00ccff; border: 1px solid #00ccff; }
+
+        /* ---- system status bar (top of every page) ---- */
+        #sysStatusBar {
+            position: sticky; top: 0; z-index: 100;
+            background: #0b1220; border-bottom: 1px solid #1a2438;
+            font-size: 12px; padding: 6px 16px;
+            display: flex; gap: 18px; align-items: center;
+            color: #aab2c5;
+        }
+        #sysStatusBar .pill {
+            display: inline-flex; align-items: center; gap: 6px;
+            padding: 2px 8px; border-radius: 10px;
+            background: #182338; color: #c5cbdc;
+        }
+        #sysStatusBar .pill.ok    { background: #11331f; color: #6fe2a4; }
+        #sysStatusBar .pill.warn  { background: #3a2f10; color: #f4c66a; }
+        #sysStatusBar .pill.busy  { background: #2a1d3a; color: #c89efa; }
+        #sysStatusBar .vram-bar { width: 80px; height: 6px; background: #1f2a44; border-radius: 3px; overflow: hidden; }
+        #sysStatusBar .vram-fill { height: 100%; background: #6fe2a4; transition: width .3s, background-color .3s; }
+        #sysStatusBar .vram-fill.warn { background: #f4c66a; }
+        #sysStatusBar .vram-fill.high { background: #ff7a7a; }
+        #sysStatusBar .spinner { display: inline-block; width: 10px; height: 10px;
+            border: 2px solid #5b3aa3; border-top-color: transparent;
+            border-radius: 50%; animation: spin 1s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .gated[disabled] { opacity: 0.4; cursor: not-allowed; }
     </style>
 </head>
 <body>
+    <div id="sysStatusBar">
+        <span class="pill" id="sysVram" title="GPU VRAM">VRAM
+            <div class="vram-bar"><div class="vram-fill" id="sysVramFill" style="width:0%"></div></div>
+            <span id="sysVramText">— / —</span>
+        </span>
+        <span class="pill" id="sysVoice" title="Active TTS voice">🎙️ <span id="sysVoiceText">—</span></span>
+        <span class="pill" id="sysAsr">ASR: <span id="sysAsrText">—</span></span>
+        <span class="pill busy" id="sysTraining" style="display:none">
+            <span class="spinner"></span>
+            <span id="sysTrainingText">training…</span>
+        </span>
+        <span style="flex:1"></span>
+        <span class="pill" id="sysDisk">💾 <span id="sysDiskText">—</span> GB</span>
+        <span style="color:#445">·</span>
+        <a href="/ui" style="color:#7aa4ff">chat</a>
+        <a href="/ui/recordings" style="color:#7aa4ff">recordings</a>
+        <a href="/ui/training" style="color:#7aa4ff">training</a>
+    </div>
     <div id="toastContainer"></div>
     <div class="container">
         <div style="display: flex; justify-content: space-between; align-items: center;">
@@ -196,6 +240,73 @@ UI_HTML = """
     </div>
 
     <script>
+    // -------- system status poller (added Phase 2.x) --------
+    // Polls /api/system/status every 5s. Updates the top bar.
+    // Selective gating: when training.active=true, disables the mic
+    // button (chat needs GPU contention). Browse/CRUD stay enabled.
+    const SYS = { trainingActive: false, ttsReady: false, asrReady: false };
+    async function pollSystemStatus() {
+        try {
+            const res = await fetch('/api/system/status', { cache: 'no-store' });
+            if (!res.ok) return;
+            const s = await res.json();
+            SYS.trainingActive = !!(s.training && s.training.active);
+            SYS.ttsReady = !!(s.tts && s.tts.ready);
+            SYS.asrReady = !!s.asr_ready;
+
+            // VRAM bar
+            const vBar = document.getElementById('sysVramFill');
+            const vText = document.getElementById('sysVramText');
+            if (s.vram && s.vram.available) {
+                const pct = Math.round((s.vram.used_mb / s.vram.total_mb) * 100);
+                vBar.style.width = pct + '%';
+                vBar.classList.toggle('warn', pct >= 70 && pct < 88);
+                vBar.classList.toggle('high', pct >= 88);
+                vText.textContent = `${s.vram.used_mb} / ${s.vram.total_mb} MB`;
+            } else {
+                vText.textContent = 'no GPU';
+            }
+            // Voice pill
+            document.getElementById('sysVoiceText').textContent =
+                s.tts && s.tts.active_version ? s.tts.active_version.replace('xiao_s_', '') : '(base)';
+            // ASR pill
+            const asrEl = document.getElementById('sysAsr');
+            asrEl.classList.toggle('ok', !!s.asr_ready);
+            document.getElementById('sysAsrText').textContent = s.asr_ready ? 'ready' : 'loading';
+            // Disk pill
+            document.getElementById('sysDiskText').textContent = s.disk_free_gb;
+            // Training pill
+            const tEl = document.getElementById('sysTraining');
+            if (SYS.trainingActive) {
+                const t = s.training;
+                const pct = t.progress_pct != null ? t.progress_pct + '%' : '';
+                const ep  = (t.current_epoch != null && t.total_epochs != null)
+                    ? ` ${t.current_epoch}/${t.total_epochs}` : '';
+                document.getElementById('sysTrainingText').textContent =
+                    `training ${pct}${ep}`.trim();
+                tEl.style.display = '';
+            } else {
+                tEl.style.display = 'none';
+            }
+            applyGating();
+        } catch (e) { /* silent — next tick retries */ }
+    }
+    function applyGating() {
+        // Selective: disable GPU-contending controls when training is active.
+        // The chat mic needs ASR+TTS+LLM, all GPU-bound during training.
+        const rec = document.getElementById('recordBtn');
+        if (rec) {
+            const should = SYS.trainingActive || !SYS.ttsReady || !SYS.asrReady;
+            rec.disabled = should || rec.dataset.userDisabled === '1';
+            rec.classList.toggle('gated', should);
+            rec.title = SYS.trainingActive
+                ? '訓練進行中，無法對話 (training in progress)'
+                : (!SYS.ttsReady ? 'TTS engine loading…' : (!SYS.asrReady ? 'ASR engine loading…' : ''));
+        }
+    }
+    setInterval(pollSystemStatus, 5000);
+    pollSystemStatus();
+    // ---------------------------------------------------------
     // Global error handler to catch uncaught errors
     window.onerror = function(msg, url, line, col, error) {
         log('GLOBAL ERROR: ' + msg + ' at line ' + line + ' col ' + col);

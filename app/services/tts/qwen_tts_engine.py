@@ -607,6 +607,29 @@ class MockTTSEngine:
 
 _tts_engine: Optional[FasterQwenTTSEngine | MockTTSEngine] = None
 
+# Module-level lock that serializes concurrent generate_streaming() calls.
+# Without this two simultaneous WS clients (or a chat session + a preview)
+# corrupt FasterQwen3TTS's CUDA graphs (graph capture is single-tenant).
+# Lazy-init so we don't allocate an event-loop-bound primitive at import
+# time on a thread that may have no loop yet.
+import asyncio as _asyncio_for_lock
+
+_tts_generation_lock: Optional[_asyncio_for_lock.Lock] = None
+
+
+def get_tts_generation_lock() -> _asyncio_for_lock.Lock:
+    """Return the single asyncio.Lock that serializes TTS generation.
+
+    Callers use it as:
+        async with get_tts_generation_lock():
+            async for event in engine.generate_streaming(...):
+                ...
+    """
+    global _tts_generation_lock
+    if _tts_generation_lock is None:
+        _tts_generation_lock = _asyncio_for_lock.Lock()
+    return _tts_generation_lock
+
 
 def get_tts_engine(model_size: str = "1.7B") -> FasterQwenTTSEngine | MockTTSEngine:
     """Get or create the TTS engine singleton."""

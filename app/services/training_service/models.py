@@ -45,7 +45,11 @@ class ProgressStatus(str, Enum):
 # ---------------------------------------------------------------------------
 VALID_LORA_RANKS = {4, 8, 16, 32}
 MIN_EPOCHS = 1
-MAX_EPOCHS = 50
+# Upper bound bumped from 50 → 200 to support SFT runs, which routinely
+# need 100+ epochs for full-model fine-tuning to converge on a small
+# corpus. LoRA still typically uses 10-50; this cap doesn't force higher
+# values, it just allows them.
+MAX_EPOCHS = 200
 MIN_BATCH_SIZE = 1
 MAX_BATCH_SIZE = 32
 MIN_TRAINING_AUDIO_SECONDS = 10.0

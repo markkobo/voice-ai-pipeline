@@ -111,6 +111,17 @@ class PipelineMetrics(BaseModel):
     total_ms: Optional[int] = None
 
 
+class SegmentQualityFlags(BaseModel):
+    """Nested quality flags emitted by `pipeline.py` per speaker segment."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    has_overlap: Optional[bool] = None
+    low_energy: Optional[bool] = None
+    high_noise: Optional[bool] = None
+    too_short: Optional[bool] = None
+
+
 class SpeakerSegment(BaseModel):
     """
     A single speaker segment from diarization (RFC_M2 §speaker_segments +
@@ -118,9 +129,13 @@ class SpeakerSegment(BaseModel):
 
     persona_id/listener_id default to the recording-level value but can be
     overridden per segment when a recording contains multiple speakers.
+
+    `extra="ignore"` so legacy pipeline.py output that emits additional
+    keys (transcription metadata variants, etc.) doesn't break loading.
+    Known fields are still validated.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     speaker_id: str
     start_time: float
@@ -130,12 +145,17 @@ class SpeakerSegment(BaseModel):
     transcription: Optional[str] = None
     transcription_confidence: Optional[float] = None
 
-    # Quality flags (RFC_M2 quality_score 0-1 + flags).
+    # Quality scoring — both the legacy nested-dict form (`quality_flags`)
+    # and the flat per-segment metrics emitted by pipeline.py are accepted.
     quality_score: Optional[float] = None
+    quality_flags: Optional[SegmentQualityFlags] = None
     has_overlap: Optional[bool] = None
     low_energy: Optional[bool] = None
     high_noise: Optional[bool] = None
     too_short: Optional[bool] = None
+    snr_db: Optional[float] = None
+    clarity_score: Optional[float] = None
+    training_ready: Optional[bool] = None
 
     # Routing identity (set explicitly or inherited from the recording).
     persona_id: Optional[str] = None

@@ -162,9 +162,11 @@ class TestCreateTraining:
         assert "rank" in body["message"]
 
     def test_invalid_epochs_rejected(self, client, seeded_recording):
+        # MAX_EPOCHS was bumped 50→200 to allow SFT runs; pick something
+        # above the new cap.
         r = client.post(
             "/api/training/versions",
-            json=_create_payload(seeded_recording, num_epochs=100),
+            json=_create_payload(seeded_recording, num_epochs=500),
         )
         assert r.status_code == 422
         assert r.json()["error"] == "invalid_training_params"

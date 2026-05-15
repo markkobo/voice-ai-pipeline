@@ -699,16 +699,18 @@ async def websocket_endpoint(websocket: WebSocket):
                         log.info(f"[{session_id}] Explicit cancel")
 
                     elif msg_type == "control" and payload.get("action") == "start_speech":
-                        # Client is starting to speak — cancel any ongoing LLM (barge-in)
-                        # and reset audio buffer
-                        state_manager.cancel_llm_task(session_id)
-                        state_manager.cancel_tts_task(session_id)
+                        # Client clicked the mic — reset audio buffer + VAD for
+                        # the new utterance. Do NOT pre-emptively cancel LLM/TTS
+                        # here. The VAD barge-in path (state_manager.process_audio)
+                        # cancels when actual speech is detected, so a too-eager
+                        # re-tap of the mic doesn't kill the in-flight response
+                        # before the user has actually started speaking.
                         state = state_manager.get_session(session_id)
                         if state:
                             state.audio_buffer.clear()
                             if hasattr(state.vad, 'reset'):
                                 state.vad.reset()
-                        log.info(f"[{session_id}] start_speech: cancelled LLM, cleared buffer")
+                        log.info(f"[{session_id}] start_speech: cleared buffer (waiting for VAD to detect speech for barge-in)")
 
                 except json.JSONDecodeError:
                     log.warning(f"[{session_id}] Invalid JSON")

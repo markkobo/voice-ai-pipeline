@@ -917,3 +917,32 @@ required before training fires.
 - Legacy `VersionManager` in `app/services/training.py` still around for
   `app/main.py:startup_event` (auto-activate latest merged model);
   remove after migrating startup to TrainingService.
+
+### Follow-up — 2026-05-15 — first production SFT
+
+Trained `v2_20260514_152118_456516` end-to-end. Full notes in
+`tests/_phase2_followups.md`:
+
+- 30 epochs SFT on 65 min of xiao_s-confirmed audio (13 IG clips + 5
+  best podcasts, filtered by ECAPA-TDNN speaker similarity ≥ 0.85 to an
+  IG-built reference vector)
+- 5.4 h wall-clock on the A10G, peak VRAM ~9.6 GB
+- Final cross-entropy loss 9.6312 (best 9.6295 @ E15). Loss plateaued
+  fast; typical Qwen3-TTS codec-token CE doesn't drop much past the
+  persona-conditioning point.
+- Merged model 4.3 GB at
+  `data/models/merged_qwen3_tts_xiao_s_v2/model.safetensors`,
+  auto-activates on server startup.
+
+**`MAX_EPOCHS` bumped 50 → 200** in
+`app/services/training_service/models.py` so SFT runs can request
+100+ epochs (LoRA still typically 10–50). The
+`test_invalid_epochs_rejected` contract test asserts rejection at 500.
+
+**Two housekeeping bugs still open from the run** (cosmetic, model fine):
+- `TrainingResult.__init__()` rejects the `sft_path` kwarg the
+  post-success housekeeping tries to pass — left the version's status as
+  `training` in `index.json` until manually patched.
+- `_release_training_locks` imports
+  `set_tts_training_lock` / `set_asr_training_lock` which don't exist in
+  current engines — emits warning log only.

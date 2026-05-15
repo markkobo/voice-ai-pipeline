@@ -610,9 +610,52 @@ async def training_page():
             .version-actions { width: 100%; }
             .form-group select, .form-group input { min-width: 100%; }
         }
+
+        /* ---- system status bar (shared across UI pages) ---- */
+        #sysStatusBar {
+            position: sticky; top: 0; z-index: 100;
+            background: #0b1220; border-bottom: 1px solid #1a2438;
+            font-size: 12px; padding: 6px 16px;
+            display: flex; gap: 18px; align-items: center;
+            color: #aab2c5; font-family: monospace;
+        }
+        #sysStatusBar .pill {
+            display: inline-flex; align-items: center; gap: 6px;
+            padding: 2px 8px; border-radius: 10px;
+            background: #182338; color: #c5cbdc;
+        }
+        #sysStatusBar .pill.ok    { background: #11331f; color: #6fe2a4; }
+        #sysStatusBar .pill.warn  { background: #3a2f10; color: #f4c66a; }
+        #sysStatusBar .pill.busy  { background: #2a1d3a; color: #c89efa; }
+        #sysStatusBar .vram-bar { width: 80px; height: 6px; background: #1f2a44; border-radius: 3px; overflow: hidden; }
+        #sysStatusBar .vram-fill { height: 100%; background: #6fe2a4; transition: width .3s, background-color .3s; }
+        #sysStatusBar .vram-fill.warn { background: #f4c66a; }
+        #sysStatusBar .vram-fill.high { background: #ff7a7a; }
+        #sysStatusBar .spinner { display: inline-block; width: 10px; height: 10px;
+            border: 2px solid #5b3aa3; border-top-color: transparent;
+            border-radius: 50%; animation: spin 1s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .gated[disabled] { opacity: 0.4; cursor: not-allowed; }
     </style>
 </head>
 <body>
+    <div id="sysStatusBar">
+        <span class="pill" id="sysVram">VRAM
+            <div class="vram-bar"><div class="vram-fill" id="sysVramFill" style="width:0%"></div></div>
+            <span id="sysVramText">— / —</span>
+        </span>
+        <span class="pill">🎙️ <span id="sysVoiceText">—</span></span>
+        <span class="pill" id="sysAsr">ASR: <span id="sysAsrText">—</span></span>
+        <span class="pill busy" id="sysTraining" style="display:none">
+            <span class="spinner"></span><span id="sysTrainingText">training…</span>
+        </span>
+        <span style="flex:1"></span>
+        <span class="pill">💾 <span id="sysDiskText">—</span> GB</span>
+        <span style="color:#445">·</span>
+        <a href="/ui" style="color:#7aa4ff">chat</a>
+        <a href="/ui/recordings" style="color:#7aa4ff">recordings</a>
+        <a href="/ui/training" style="color:#7aa4ff">training</a>
+    </div>
     <!-- Toast container -->
     <div class="toast-container" id="toastContainer"></div>
 
@@ -746,6 +789,62 @@ async def training_page():
     </div>
 
     <script>
+        // ---- system status poller (shared) ----
+        const SYS = { trainingActive: false, ttsReady: false, asrReady: false };
+        async function pollSystemStatus() {
+            try {
+                const res = await fetch('/api/system/status', { cache: 'no-store' });
+                if (!res.ok) return;
+                const s = await res.json();
+                SYS.trainingActive = !!(s.training && s.training.active);
+                SYS.ttsReady = !!(s.tts && s.tts.ready);
+                SYS.asrReady = !!s.asr_ready;
+
+                const vBar  = document.getElementById('sysVramFill');
+                const vText = document.getElementById('sysVramText');
+                if (s.vram && s.vram.available) {
+                    const pct = Math.round((s.vram.used_mb / s.vram.total_mb) * 100);
+                    vBar.style.width = pct + '%';
+                    vBar.classList.toggle('warn', pct >= 70 && pct < 88);
+                    vBar.classList.toggle('high', pct >= 88);
+                    vText.textContent = `${s.vram.used_mb} / ${s.vram.total_mb} MB`;
+                } else { vText.textContent = 'no GPU'; }
+                document.getElementById('sysVoiceText').textContent =
+                    s.tts && s.tts.active_version ? s.tts.active_version.replace('xiao_s_', '') : '(base)';
+                document.getElementById('sysAsr').classList.toggle('ok', !!s.asr_ready);
+                document.getElementById('sysAsrText').textContent = s.asr_ready ? 'ready' : 'loading';
+                document.getElementById('sysDiskText').textContent = s.disk_free_gb;
+                const tEl = document.getElementById('sysTraining');
+                if (SYS.trainingActive) {
+                    const t = s.training;
+                    const pct = t.progress_pct != null ? t.progress_pct + '%' : '';
+                    const ep  = (t.current_epoch != null && t.total_epochs != null)
+                        ? ` ${t.current_epoch}/${t.total_epochs}` : '';
+                    document.getElementById('sysTrainingText').textContent =
+                        `training ${pct}${ep}`.trim();
+                    tEl.style.display = '';
+                    // Gate the GPU-contending controls on this page.
+                    const startBtn = document.getElementById('startTrainingBtn');
+                    if (startBtn) { startBtn.disabled = true; startBtn.classList.add('gated'); }
+                } else {
+                    tEl.style.display = 'none';
+                    const startBtn = document.getElementById('startTrainingBtn');
+                    if (startBtn) { startBtn.disabled = false; startBtn.classList.remove('gated'); }
+                }
+                document.body.classList.toggle('training-active', SYS.trainingActive);
+            } catch (e) { /* silent */ }
+        }
+        setInterval(pollSystemStatus, 5000);
+        pollSystemStatus();
+        function gateIfTraining(label) {
+            if (SYS.trainingActive) {
+                alert(`訓練進行中，無法執行「${label}」 (GPU is busy)`);
+                return true;
+            }
+            return false;
+        }
+        // ----------------------------------------
+
         // ==================== STATE ====================
         let allRecordings = [];
         let personas = [];
@@ -1198,6 +1297,7 @@ async def training_page():
 
         // ==================== START TRAINING ====================
         async function startTraining() {
+            if (gateIfTraining('開始訓練')) return;
             const personaId = personaSelect.value;
             const epochs = parseInt(document.getElementById('epochsSelect').value);
             const rank = parseInt(document.getElementById('rankSelect').value);
@@ -1496,6 +1596,7 @@ async def training_page():
 
         // ==================== VERSION ACTIONS ====================
         async function activateVersion(versionId) {
+            if (gateIfTraining('啟用模型')) return;
             try {
                 const response = await fetch(`/api/training/versions/${versionId}/activate`, { method: 'POST' });
                 if (!response.ok) throw new Error('Activation failed');
@@ -1541,6 +1642,7 @@ async def training_page():
         }
 
         async function previewVersion(versionId) {
+            if (gateIfTraining('預覽語音')) return;
             const previewText = document.getElementById('previewText').value.trim() || '你好，這是我的聲音測試。';
             log(`Generating preview for ${versionId}: "${previewText}"...`);
             try {

@@ -181,7 +181,15 @@ start_server() {
     export PYTHONUNBUFFERED=1
 
     cd /workspace/voice-ai-pipeline
-    nohup python3 -m app.main > "$LOG_FILE" 2>&1 &
+    # Prefer the venv's interpreter so deps installed there are seen.
+    # Falls back to system python3 only if the venv isn't present (e.g.
+    # inside a container that does global installs).
+    if [ -x "/workspace/voice-ai-pipeline/.venv/bin/python" ]; then
+        PY=/workspace/voice-ai-pipeline/.venv/bin/python
+    else
+        PY=python3
+    fi
+    nohup "$PY" -m app.main > "$LOG_FILE" 2>&1 &
     SERVER_PID=$!
     echo $SERVER_PID > "$PID_FILE"
 

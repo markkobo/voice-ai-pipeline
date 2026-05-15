@@ -34,8 +34,10 @@ class SileroVADConfig:
     # Minimum speech duration to register (seconds)
     min_speech_duration: float = 0.1
 
-    # Minimum silence duration after speech to confirm end (seconds)
-    min_silence_duration: float = 0.3
+    # Minimum silence duration after speech to confirm end (seconds).
+    # Bumped 0.3 → 0.7 — 300ms cut speech short during normal pauses /
+    # audible inhales. Use sensitivity="high" to drop back to 0.2.
+    min_silence_duration: float = 0.7
 
     # Window size for smoothing (number of frames)
     smoothing_window: int = 5
@@ -59,7 +61,11 @@ class SileroVAD:
         sample_rate: int = 24000,
         threshold: float = 0.5,
         min_speech_duration: float = 0.1,
-        min_silence_duration: float = 0.3,
+        # Bumped 0.3 → 0.7. The old 300ms cut speech short during normal
+        # inter-word pauses and audible inhales. 0.7s lets the speaker
+        # breathe without abandoning the utterance. The "high" preset
+        # below still overrides to 0.2 if a hair-trigger is wanted.
+        min_silence_duration: float = 0.7,
         sensitivity: str = "medium",
     ):
         """

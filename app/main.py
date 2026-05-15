@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import ws_asr, tts_stream, standalone_ui, recordings, recordings_ui, training, training_ui, personas, listeners
+from app.api import _system
 from app.api._errors import register_error_handlers
 # gradio_ui imported lazily below to handle missing gradio
 
@@ -49,6 +50,7 @@ app.include_router(training.router)
 app.include_router(training_ui.router)
 app.include_router(personas.router)
 app.include_router(listeners.router)
+app.include_router(_system.router)
 
 # Wire DomainError → HTTP handlers (single source of truth for error responses).
 register_error_handlers(app)

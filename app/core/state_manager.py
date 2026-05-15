@@ -82,6 +82,11 @@ class SessionState:
         self.tts_session_id = None
         self.tts_task = None
         self.tts_cancellation_event = None
+        self.tts_model: Optional[str] = None  # was missing from __init__ —
+        # caused AttributeError → WS disconnect right after asr_result.
+
+        # LLM model selection
+        self.llm_model: Optional[str] = None
 
         # VAD tracking
         self._vad_had_speech = False  # True if we detected speech in this utterance

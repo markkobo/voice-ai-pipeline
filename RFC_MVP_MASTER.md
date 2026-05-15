@@ -470,3 +470,18 @@ split into models / repository / service / API per module:
 - Subprocess-side training code coverage (training_job.py at 10%).
 - Multi-listener LoRA routing (RFC_M5 P-B path) — single-LoRA-per-persona
   works; per-listener adapters need the inference-time loader wiring.
+
+### Follow-up — 2026-05-15
+
+First successful production SFT (v2_20260514_152118_456516) + live-server
+hardening + system-status UI added. Full delta in
+`tests/_phase2_followups.md`. Headline:
+- SFT × 30 epochs on 65 min of xiao_s-confirmed audio, 5.4 h wall-clock,
+  4.3 GB merged model auto-activates at startup
+- Speaker labeling via ECAPA-TDNN embeddings + IG-clip reference vector
+- New `/api/system/status` endpoint + persistent top status bar
+  (VRAM / voice / ASR / training spinner / disk) on all 3 UI pages
+- Selective gating: GPU-contending UI actions disabled during training
+- Live-server bugs fixed: start_speech LLM cancel race, ASR 13s cold
+  start, SessionState.tts_model AttributeError, VAD breath-cutting,
+  preview endpoint missing tts_generation_lock

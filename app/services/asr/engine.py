@@ -66,6 +66,21 @@ class Qwen3ASR(BaseASR):
         )
         print("Qwen3-ASR model loaded successfully")
 
+        # Warmup pass — first real transcribe call triggers torch graph capture
+        # + kernel launches that take ~10-13s on the A10G. Doing it during
+        # startup means the user's first utterance doesn't pay that cost.
+        # 0.5 s of silence is enough to trigger the warmup; the result is
+        # discarded.
+        try:
+            silence = np.zeros(int(0.5 * self._sample_rate), dtype=np.float32)
+            print("Warming up Qwen3-ASR (first-call latency mitigation)...")
+            self._model.transcribe((silence, self._sample_rate))
+            print("Qwen3-ASR warmup complete")
+        except Exception as e:
+            # Warmup is best-effort. If it fails the model still works; the
+            # first real call just pays the cold-start cost.
+            print(f"Qwen3-ASR warmup skipped: {e}")
+
     async def recognize(self, audio_bytes: bytes) -> Dict[str, Any]:
         """
         Recognize speech using Qwen3-ASR.

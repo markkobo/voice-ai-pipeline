@@ -408,3 +408,33 @@ full delta.
 
 **Deferred:** Silero VAD upgrade; httpx-ws-based async integration tests
 for cancel timing (the TestClient sync model races at the cancel point).
+
+### Follow-up — 2026-05-15
+
+Live-server testing surfaced 5 streaming bugs (full detail in
+`tests/_phase2_followups.md`):
+
+1. `start_speech` cancelled in-flight LLM/TTS unconditionally — combined
+   with the sticky-cancel flag, re-tapping the mic killed responses before
+   they emitted a token. Fix: `start_speech` only resets buffer + VAD;
+   the existing VAD-barge-in path handles the actual cancel when speech
+   is detected.
+2. Qwen3-ASR cold-start ~13 s on first inference despite startup
+   preload. Fix: `load_model()` ends with a 0.5 s silence transcribe
+   pass to trigger graph capture during startup.
+3. `SessionState.tts_model` declared as a class type hint but never
+   initialized in `__init__` — first read raised `AttributeError`, generic
+   `except` closed the WS. Initialize `tts_model` and `llm_model`
+   explicitly.
+4. `min_silence_duration` 300 ms cut speech short on natural inhales;
+   bumped default to 700 ms in both `SileroVADConfig` and `SileroVAD`.
+   `sensitivity="high"` preset still drops to 200 ms.
+5. `get_tts_generation_lock()` was referenced by the preview endpoint but
+   missing from `qwen_tts_engine.py`. Added a module-level lazy-init
+   `asyncio.Lock`.
+
+Streaming-state UI: new persistent top bar on all three UI pages polls
+`GET /api/system/status` every 5 s, shows VRAM bar, voice badge,
+training spinner. Selective gating disables GPU-contending controls
+when training is active (chat mic, recordings parse/process, training
+start/activate/preview).
