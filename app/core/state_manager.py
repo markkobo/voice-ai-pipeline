@@ -137,7 +137,7 @@ class StateManager:
         """Remove a session after cancelling any active LLM + TTS tasks."""
         state = self._sessions.get(session_id)
         if state:
-            self.cancel_llm_task(session_id)
+            self.cancel_llm_task(session_id, origin="remove_session")
             self.cancel_tts_task(session_id)
         self._sessions.pop(session_id, None)
 
@@ -263,7 +263,7 @@ class StateManager:
         # SileroVAD returns is_commit=False during active speech
         if not is_commit and state._vad_had_speech and not state._vad_committed:
             log.info(f"[VAD] Barge-in detected (new speech in active utterance)")
-            self.cancel_llm_task(session_id)
+            self.cancel_llm_task(session_id, origin="vad_barge_in")
             self.cancel_tts_task(session_id)
 
         # End-of-speech: silence after sufficient speech → commit (auto-send)
@@ -343,7 +343,7 @@ class StateManager:
     # LLM Task Management
     # -------------------------------------------------------------------------
 
-    def cancel_llm_task(self, session_id: str) -> bool:
+    def cancel_llm_task(self, session_id: str, origin: str = "unknown") -> bool:
         """
         Cancel any ongoing LLM streaming task for a session (barge-in).
 
@@ -353,12 +353,22 @@ class StateManager:
         baseline failure where cancel-immediately-after-commit was a silent
         no-op.
 
+        `origin` is logged so the LLM-cancel mystery (open issue #1 in
+        _phase2_followups.md) is diagnosable from the server log alone.
+
         Returns:
             True if a task was cancelled OR the cancel intent was latched.
         """
         state = self._sessions.get(session_id)
         if not state:
             return False
+
+        had_task = state.llm_task is not None and not state.llm_task.done()
+        had_event = state.llm_cancellation_event is not None and not state.llm_cancellation_event.is_set()
+        log.warning(
+            f"[{session_id}] cancel_llm_task origin={origin} "
+            f"had_task={had_task} had_event={had_event}"
+        )
 
         # Latch the intent unconditionally — set_llm_task will honor it.
         state.llm_pending_cancel = True

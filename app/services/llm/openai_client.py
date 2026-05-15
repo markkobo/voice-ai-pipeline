@@ -18,7 +18,10 @@ from typing import AsyncIterator, Optional, Dict, Any, List
 import openai
 from openai import AsyncOpenAI
 
+from app.logging_config import get_logger
 from telemetry import metrics
+
+log = get_logger(__name__, component="llm")
 
 
 # Function schema for structured emotional response
@@ -148,6 +151,10 @@ class OpenAIClient:
             async for chunk in stream:
                 # Check cancellation
                 if cancellation_event is not None and cancellation_event.is_set():
+                    log.warning(
+                        f"LLM CANCELLED via event-poll after {time.perf_counter() - start_time:.2f}s, "
+                        f"tokens_so_far={len(content_buffer)}"
+                    )
                     yield LLMStreamResult(
                         event=LLMStreamEvent.CANCELLED,
                         content=content_buffer,
@@ -189,12 +196,17 @@ class OpenAIClient:
             )
 
         except asyncio.CancelledError:
+            log.warning(
+                f"LLM CANCELLED via CancelledError after {time.perf_counter() - start_time:.2f}s, "
+                f"tokens_so_far={len(content_buffer)}"
+            )
             yield LLMStreamResult(
                 event=LLMStreamEvent.CANCELLED,
                 content=content_buffer,
             )
             raise
         except Exception as e:
+            log.exception(f"LLM stream exception: {type(e).__name__}: {e}")
             metrics.llm_failures_total.labels(
                 component="llm",
                 model=self.model,

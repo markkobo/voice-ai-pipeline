@@ -704,6 +704,13 @@ async def training_page():
                 <div class="training-settings">
                     <div class="settings-grid">
                         <div class="form-group">
+                            <label>訓練類型</label>
+                            <select id="trainingTypeSelect" onchange="onTrainingTypeChange()">
+                                <option value="lora" selected>LoRA (快, 適配器)</option>
+                                <option value="sft">SFT (慢, 完整微調)</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
                             <label>Epochs</label>
                             <select id="epochsSelect">
                                 <option value="5">5</option>
@@ -711,9 +718,10 @@ async def training_page():
                                 <option value="20">20</option>
                                 <option value="30">30</option>
                                 <option value="50">50</option>
+                                <option value="100">100</option>
                             </select>
                         </div>
-                        <div class="form-group">
+                        <div class="form-group" id="rankGroup">
                             <label>LoRA Rank</label>
                             <select id="rankSelect">
                                 <option value="4">4</option>
@@ -1004,9 +1012,59 @@ async def training_page():
             });
         }
 
+        // Group the flat per-snippet speaker_segments[] into one row per
+        // unique speaker_id. Selection is already keyed by speaker_id, so the
+        // checkbox behavior is unchanged — this only collapses the visual
+        // list (1 podcast can have 50+ alternating snippets).
+        function groupSegmentsBySpeaker(segments) {
+            const groups = new Map();
+            for (const s of segments) {
+                let g = groups.get(s.speaker_id);
+                if (!g) {
+                    g = {
+                        speaker_id: s.speaker_id,
+                        segments: [],
+                        total_duration: 0,
+                        quality_scores: [],
+                        transcript_preview: '',
+                        quality_flags: { has_overlap: false, low_energy: false, high_noise: false, too_short: false },
+                        persona_id: s.persona_id,
+                        listener_id: s.listener_id,
+                        longest_segment: null,
+                    };
+                    groups.set(s.speaker_id, g);
+                }
+                g.segments.push(s);
+                const d = s.duration_seconds || 0;
+                g.total_duration += d;
+                if (s.quality_score !== null && s.quality_score !== undefined) {
+                    g.quality_scores.push(s.quality_score);
+                }
+                if (!g.transcript_preview && s.transcription?.text) {
+                    g.transcript_preview = s.transcription.text;
+                }
+                const qf = s.quality_flags || {};
+                if (qf.has_overlap) g.quality_flags.has_overlap = true;
+                if (qf.low_energy) g.quality_flags.low_energy = true;
+                if (qf.high_noise) g.quality_flags.high_noise = true;
+                if (qf.too_short) g.quality_flags.too_short = true;
+                if (!g.longest_segment || d > (g.longest_segment.duration_seconds || 0)) {
+                    g.longest_segment = s;
+                }
+            }
+            const out = Array.from(groups.values());
+            out.forEach(g => {
+                g.avg_quality = g.quality_scores.length
+                    ? g.quality_scores.reduce((a, b) => a + b, 0) / g.quality_scores.length
+                    : null;
+            });
+            return out.sort((a, b) => a.speaker_id.localeCompare(b.speaker_id));
+        }
+
         function renderRecordingFolder(r) {
-            const speakers = r.speaker_segments || [];
-            const hasSelected = speakers.some(s => selectedSegments.has(`${r.recording_id}_${s.speaker_id}`));
+            const segments = r.speaker_segments || [];
+            const speakerGroups = groupSegmentsBySpeaker(segments);
+            const hasSelected = speakerGroups.some(g => selectedSegments.has(`${r.recording_id}_${g.speaker_id}`));
             const listenerName = getListenerName(r.listener_id);
             const personaName = getPersonaName(r.persona_id);
             const durationText = r.duration_seconds ? r.duration_seconds.toFixed(1) + 's' : '-';
@@ -1023,24 +1081,29 @@ async def training_page():
                         <span class="recording-duration">${durationText}</span>
                     </div>
                     <div class="tree-segments" id="segments-${r.recording_id}">
-                        ${speakers.length === 0 ? '<div style="padding:8px;color:#666;font-size:0.85rem;">無片段</div>' : ''}
-                        ${speakers.map((s, i) => renderSegmentRow(r, s, i)).join('')}
+                        ${speakerGroups.length === 0 ? '<div style="padding:8px;color:#666;font-size:0.85rem;">無片段</div>' : ''}
+                        ${speakerGroups.map(g => renderSpeakerGroupRow(r, g)).join('')}
                     </div>
                 </div>
             `;
         }
 
-        function renderSegmentRow(r, segment, index) {
-            // Selection key uses speaker_id (for grouping), but playback uses unique segId with index
-            const selectionKey = `${r.recording_id}_${segment.speaker_id}`;
-            const segId = `${r.recording_id}_${segment.speaker_id}_${index}`;
+        function renderSpeakerGroupRow(r, group) {
+            const selectionKey = `${r.recording_id}_${group.speaker_id}`;
+            const segId = `${r.recording_id}_${group.speaker_id}`;
+            const safeSegId = segId.replace(/[^a-zA-Z0-9]/g, '_');
             const isSelected = selectedSegments.has(selectionKey);
-            const duration = segment.duration_seconds || 0;
-            const transcript = segment.transcription?.text || '';
-            const quality = segment.quality_score;
-            const qualityFlags = segment.quality_flags || {};
-            const personaId = segment.persona_id || '';
-            const listenerId = segment.listener_id || r.listener_id || '';
+            const duration = group.total_duration || 0;
+            const segCount = group.segments.length;
+            const transcript = group.transcript_preview || '';
+            const quality = group.avg_quality;
+            const qualityFlags = group.quality_flags || {};
+            const personaId = group.persona_id || '';
+            const listenerId = group.listener_id || r.listener_id || '';
+            // Play the longest snippet — its quality is most representative.
+            const playSeg = group.longest_segment || group.segments[0] || {};
+            const playStart = playSeg.start_time;
+            const playEnd = playSeg.end_time;
 
             // Quality badge with new classes
             const qualityBadgeClass = quality !== null && quality !== undefined
@@ -1062,16 +1125,19 @@ async def training_page():
             const flagsDisplay = flagsHtml.length > 0 ? `<div class="quality-flags">${flagsHtml.join('')}</div>` : '';
 
             const truncated = transcript.length > 50 ? transcript.substring(0, 50) + '...' : transcript;
+            const countBadge = segCount > 1
+                ? `<span class="quality-badge" style="background:#37475a;color:#bcd;">${segCount} 段</span>`
+                : '';
 
             return `
-                <div class="tree-segment" id="seg-${segId.replace(/[^a-zA-Z0-9]/g, '_')}">
+                <div class="tree-segment" id="seg-${safeSegId}">
                     <input type="checkbox" class="segment-checkbox"
-                        id="chk-${segId.replace(/[^a-zA-Z0-9]/g, '_')}"
+                        id="chk-${safeSegId}"
                         ${isSelected ? 'checked' : ''}
                         onchange="toggleSegment('${selectionKey}', this.checked)"
                         onclick="event.stopPropagation()">
                     <div class="segment-info">
-                        <span class="segment-speaker">${segment.speaker_id}</span>
+                        <span class="segment-speaker">${group.speaker_id}</span>
                         <div class="segment-meta">
                             人格: ${getPersonaName(personaId)} | 對: ${getListenerName(listenerId)}
                         </div>
@@ -1079,17 +1145,18 @@ async def training_page():
                         ${flagsDisplay}
                     </div>
                     <span class="segment-duration">${duration.toFixed(1)}s</span>
+                    ${countBadge}
                     ${qualityBadge}
                     <div class="segment-audio" onclick="event.stopPropagation()">
-                        <button class="audio-btn play" id="play-${segId.replace(/[^a-zA-Z0-9]/g, '_')}"
-                            onclick="playSegment('${r.recording_id}', '${segment.speaker_id}', ${segment.start_time}, ${segment.end_time}, '${segId.replace(/[^a-zA-Z0-9]/g, '_')}')">▶</button>
-                        <button class="audio-btn pause" id="pause-${segId.replace(/[^a-zA-Z0-9]/g, '_')}"
+                        <button class="audio-btn play" id="play-${safeSegId}"
+                            onclick="playSegment('${r.recording_id}', '${group.speaker_id}', ${playStart}, ${playEnd}, '${safeSegId}')">▶</button>
+                        <button class="audio-btn pause" id="pause-${safeSegId}"
                             onclick="pauseSegment()" style="display:none">⏸</button>
                         <button class="audio-btn" onclick="stopSegment()" style="background:#666">⏹</button>
-                        <div class="segment-progress" id="progress-${segId.replace(/[^a-zA-Z0-9]/g, '_')}">
-                            <div class="segment-progress-fill" id="progress-fill-${segId.replace(/[^a-zA-Z0-9]/g, '_')}"></div>
+                        <div class="segment-progress" id="progress-${safeSegId}">
+                            <div class="segment-progress-fill" id="progress-fill-${safeSegId}"></div>
                         </div>
-                        <span class="progress-time" id="time-${segId.replace(/[^a-zA-Z0-9]/g, '_')}">0:00 / ${formatTime(duration)}</span>
+                        <span class="progress-time" id="time-${safeSegId}">0:00 / ${formatTime(playSeg.duration_seconds || 0)}</span>
                     </div>
                 </div>
             `;
@@ -1120,10 +1187,10 @@ async def training_page():
             } else {
                 selectedSegments.delete(segId);
             }
-            // Update recording folder style - segId format: {recording_id}_{speaker_id}_{index}
-            const lastSep = segId.lastIndexOf('_');
-            const speakerId = segId.substring(0, lastSep);
-            const recId = speakerId.substring(0, speakerId.lastIndexOf('_'));
+            // segId format is {recording_id}_{speaker_id} where speaker_id is
+            // SPEAKER_NN — split on '_SPEAKER_' to recover recording_id.
+            const speakerIndex = segId.indexOf('_SPEAKER_');
+            const recId = speakerIndex !== -1 ? segId.substring(0, speakerIndex) : segId;
             const el = document.getElementById(`rec-${recId}`);
             if (el) {
                 const hasSelected = Array.from(selectedSegments).some(s => s.startsWith(recId + '_'));
@@ -1249,21 +1316,24 @@ async def training_page():
                     log(`Recording not found: ${recId}`, 'warning', 'TRAINING');
                     return;
                 }
-                const segment = rec.speaker_segments?.find(s => s.speaker_id === actualSpeakerId);
-                if (!segment) {
-                    log(`Segment not found: ${actualSpeakerId} in ${recId}`, 'warning', 'TRAINING');
+                // Sum all segments for this speaker (recordings often have many
+                // alternating segments per speaker — collapse to one preview row
+                // matching the grouped tree view).
+                const matching = (rec.speaker_segments || []).filter(s => s.speaker_id === actualSpeakerId);
+                if (matching.length === 0) {
+                    log(`No segments for ${actualSpeakerId} in ${recId}`, 'warning', 'TRAINING');
                     return;
                 }
-
-                const duration = segment.duration_seconds || 0;
+                const duration = matching.reduce((acc, s) => acc + (s.duration_seconds || 0), 0);
                 totalDuration += duration;
                 items.push({
                     recName: rec.folder_name || recId,
                     speakerId: actualSpeakerId,
                     duration,
+                    segCount: matching.length,
                     segId
                 });
-                log(`Preview: ${recId}/${actualSpeakerId} = ${duration}s`, 'info', 'TRAINING');
+                log(`Preview: ${recId}/${actualSpeakerId} = ${duration.toFixed(1)}s (${matching.length} 段)`, 'info', 'TRAINING');
             });
 
             const personaName = getPersonaName(personaId);
@@ -1276,7 +1346,7 @@ async def training_page():
                 <div style="font-size: 0.9rem; margin-bottom: 10px;">將訓練「${personaName}」:</div>
                 ${items.map(item => `
                     <div class="preview-item">
-                        <span>• ${item.recName} - ${item.speakerId} (${item.duration.toFixed(1)}s)</span>
+                        <span>• ${item.recName} - ${item.speakerId} (${item.duration.toFixed(1)}s${item.segCount > 1 ? `, ${item.segCount} 段` : ''})</span>
                     </div>
                 `).join('')}
                 <div style="border-top: 1px solid #333; margin-top: 8px; padding-top: 8px;">
@@ -1295,10 +1365,18 @@ async def training_page():
             startBtn.disabled = totalDuration < 10;
         }
 
+        // Hide/show LoRA-rank field based on selected training type.
+        function onTrainingTypeChange() {
+            const ttype = document.getElementById('trainingTypeSelect').value;
+            const rankGroup = document.getElementById('rankGroup');
+            if (rankGroup) rankGroup.style.display = (ttype === 'lora') ? '' : 'none';
+        }
+
         // ==================== START TRAINING ====================
         async function startTraining() {
             if (gateIfTraining('開始訓練')) return;
             const personaId = personaSelect.value;
+            const trainingType = document.getElementById('trainingTypeSelect').value;
             const epochs = parseInt(document.getElementById('epochsSelect').value);
             const rank = parseInt(document.getElementById('rankSelect').value);
             const batchSize = parseInt(document.getElementById('batchSizeSelect').value);
@@ -1309,7 +1387,9 @@ async def training_page():
                 return;
             }
 
-            // Calculate total duration
+            // Calculate total duration — sum ALL segments for each selected
+            // (recording, speaker) pair, since one speaker often has many
+            // alternating snippets in a podcast.
             let totalDuration = 0;
             segmentIds.forEach(segId => {
                 // segId format: {recording_id}_{speaker_id}
@@ -1318,8 +1398,8 @@ async def training_page():
                 const recId = segId.substring(0, speakerIndex);
                 const actualSpeakerId = segId.substring(speakerIndex + 1);
                 const rec = allRecordings.find(r => r.recording_id === recId);
-                const segment = rec?.speaker_segments?.find(s => s.speaker_id === actualSpeakerId);
-                if (segment) totalDuration += segment.duration_seconds || 0;
+                const matching = (rec?.speaker_segments || []).filter(s => s.speaker_id === actualSpeakerId);
+                totalDuration += matching.reduce((acc, s) => acc + (s.duration_seconds || 0), 0);
             });
 
             if (totalDuration < 10) {
@@ -1341,6 +1421,7 @@ async def training_page():
                     rank,
                     num_epochs: epochs,
                     batch_size: batchSize,
+                    training_type: trainingType,
                 };
                 console.log('DEBUG payload:', JSON.stringify(payload));
 

@@ -60,6 +60,13 @@ from telemetry import metrics, rag_retrieval_seconds
 
 log = get_logger(__name__, component="ws")
 
+# Strong refs to fire-and-forget LLM tasks. Without this set, Python's GC
+# can drop the task between create_task() and the task body's first
+# `state_manager.set_llm_task()` call — the symptom is a mysterious
+# CancelledError ~3s into the stream with no logs. Tasks remove themselves
+# from the set on completion.
+_llm_task_refs: set[asyncio.Task] = set()
+
 
 async def _stream_tts_sentence(
     websocket: WebSocket,
@@ -680,8 +687,10 @@ async def websocket_endpoint(websocket: WebSocket):
                             index_name="default",
                         ).observe(rag_elapsed)
 
-                        # Start LLM streaming in background task (cancellable on barge-in)
-                        asyncio.create_task(
+                        # Start LLM streaming in background task (cancellable on barge-in).
+                        # Hold a strong ref so Python's GC can't drop the task
+                        # before run_llm_stream registers it with state_manager.
+                        _llm_bg_task = asyncio.create_task(
                             run_llm_stream(
                                 websocket=websocket,
                                 session_id=session_id,
@@ -692,10 +701,12 @@ async def websocket_endpoint(websocket: WebSocket):
                                 tts_model=tts_model,
                             )
                         )
+                        _llm_task_refs.add(_llm_bg_task)
+                        _llm_bg_task.add_done_callback(_llm_task_refs.discard)
 
                     elif msg_type == "control" and payload.get("action") == "cancel":
                         # Explicit cancel from client
-                        state_manager.cancel_llm_task(session_id)
+                        state_manager.cancel_llm_task(session_id, origin="ws_explicit_cancel")
                         log.info(f"[{session_id}] Explicit cancel")
 
                     elif msg_type == "control" and payload.get("action") == "start_speech":
