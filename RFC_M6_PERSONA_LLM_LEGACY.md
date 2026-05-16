@@ -60,9 +60,31 @@ before we have organic per-elder data.
 | Persona-LoRA | Cadence, idioms, "voice" | Full SFT | Destroys instruction-following at small corpus sizes (≤10k turns) |
 | RAG | Specific stories, opinions | Bake into LoRA | LoRA can't memorize specifics; RAG is editable post-train |
 | BGE-M3 | Embedding | OpenAI text-embedding-3 | Worse Chinese; can't run local |
+| LanceDB | Vector store | FAISS / Mongo Atlas / Qdrant | FAISS lacks durability + filtering; Mongo Atlas needs cloud or mongot-licensing footgun; Qdrant adds a daemon (we'll graduate to it if multi-client); LanceDB is embedded, durable, Apache 2.0 |
 | Anthropic chunking | Chunk strategy | Sliding window | ~49% fewer top-20 misses per Anthropic's published benchmark |
 
 ## 3. Roadmap
+
+### Phase 0-pre — Dev-UI refactor to Jinja2 + static JS (one-time cost)
+
+Status as of 2026-05-16: `standalone_ui.py` / `recordings_ui.py` /
+`training_ui.py` carry 1000-2000-line Python triple-quoted strings of
+HTML+JS+CSS. No IDE highlighting on the inner content, escape footguns
+(SyntaxWarnings on `\s` and `\[` show up on every test run), no
+find-in-file across the boundary.
+
+Decision (locked 2026-05-16): migrate to Jinja2 templates + static JS
+files. Each `*_ui.py` shrinks to a ~20-line route returning
+`TemplateResponse(...)`. HTML/JS/CSS get real IDE support.
+
+Slices, each its own commit:
+- Pilot: `standalone_ui.py` (smallest, most-edited)
+- Then: `recordings_ui.py`
+- Then: `training_ui.py`
+
+Out of scope: build step (no TypeScript/Vite), framework migration (no
+React/Svelte/HTMX). The dev UI's interactivity (AudioWorklet, WS binary
+streaming, polling) maps poorly to server-rendered partials.
 
 ### Phase 0 — Corpus ingestion (blocks everything)
 
@@ -97,7 +119,7 @@ data/personas/<persona_id>/
 | `.docx` | python-docx |
 | audio | reuse existing pipeline.py: denoise → diarize → ASR → speaker-filter (keep persona-side only via ECAPA-TDNN similarity to seed voice clips) |
 | video | ffmpeg → audio path; OCR on text overlays if present |
-| chat exports | parser per platform (Line export ZIP, WeChat backup, WhatsApp .txt) |
+| chat exports | parser per platform: WhatsApp .txt, Line .txt (incl. ZIP w/ media), WeChat CSV+HTML (no native export — third-party tools required, documented in UI) |
 
 **UI (extend dev UI, not the family UI):**
 
@@ -121,8 +143,16 @@ data/personas/<persona_id>/
 - Build dual-index RAG:
   - Style index: verbatim quips/zingers from transcripts/books
   - Stance index: LLM-extracted (topic, stance, evidence, source) tuples
-  - BGE-M3 hybrid, FAISS-flat in-RAM
-  - Anthropic contextual prefix per chunk
+  - BGE-M3 hybrid (dense + sparse via the model's native multi-vector
+    output) for Traditional Chinese-native retrieval
+  - **LanceDB as the vector store** (locked 2026-05-16) — embedded
+    (no separate process), Parquet-backed durability, HNSW + IVF,
+    Apache 2.0. Replaces the earlier FAISS-flat plan because FAISS has
+    no durable storage and no metadata filtering. LanceDB hits both
+    while staying single-binary. Qdrant is the upgrade path if we
+    later need a multi-client query server.
+  - Anthropic contextual prefix per chunk (~49% fewer top-20 misses
+    per Anthropic's published benchmark)
 - **LLM: OpenAI API** (gpt-4o-mini, acceptable since 小S is public)
 - Demoable end-to-end: family member talks to "小S", responses pull from corpus.
 
@@ -145,12 +175,63 @@ data/personas/<persona_id>/
 - DPO on (in-character, off-character) pairs harvested from self-critic
 - Per-persona LoRA file, activated alongside TTS LoRA at session start
 
-### Phase 4 — Legacy product polish
+### Phase 4 — Legacy product (family UI + Memory Sessions)
 
-- Family-facing UI (separate from dev UI) — mobile-friendly, no debug
-- Auto-importers: Line/WeChat/WhatsApp export parsers, photo→letter OCR
-- Listener memory (per-family-member conversation persistence)
-- Optional: birthday/holiday speak-in-their-voice reminder
+The shipped product has **two distinct UIs** — the dev UI we have today
+keeps growing; the family-facing UI is a separate surface designed for
+non-technical use. Built via **Claude Design** (claude.ai/design,
+Anthropic Labs, included in Pro/Max/Team plans):
+
+1. User opens claude.ai/design, points it at the voice-ai-pipeline repo
+2. Claude Design reads the codebase + existing UI files, builds a design
+   system that auto-applies colors/typography/components for consistency
+3. Iterative design on the family UI (mobile-first, conversation-focused)
+4. Hand-off via Claude Design's "send to Claude Code" → Claude Code
+   session integrates the export as `app/api/family_ui.py`, wires it to
+   existing WebSocket endpoints
+
+The family UI has two modes per user role:
+
+**Mode A — Elder self-recording / self-uploading (driven by Memory Sessions):**
+
+This is the killer feature. Instead of asking the elder to dump random
+files, the appliance actively prompts them against detected **manifest
+coverage gaps**. "We have 23k chars about Alice but only 1.8k about Bob.
+Tell me a story about Bob — anything that comes to mind." Mic on,
+transcript captured + tagged listener_tag=bob, status=ingested.
+
+Schema work:
+- Extend `CorpusManifest` with `by_listener_tag: dict[str, int]` and
+  later `by_topic: dict[str, int]` once a topic extractor is built.
+- New `GuidedPrompt` model: `{prompt_id, template, target_listener,
+  target_topic, language, sensitivity_tags}`.
+- New `MemorySession` storing per-prompt response audio + transcript.
+
+Prompt design rules (locked 2026-05-16 discussion):
+- Story-shaped ("Tell me about a time when..."), not introspective
+  ("How did you feel when..."). Latter pattern feels intrusive in
+  Taiwanese / HK family contexts.
+- Open-ended; never put words in the elder's mouth.
+- Weekly digest cadence (not daily nag).
+- Voice-with-auto-ASR is the default; typing is fallback.
+- Family members can write custom prompts ("Mom, tell me about my 8th
+  birthday") that are queued for the elder.
+
+**Mode B — Family member conversation interface:**
+
+Mobile-friendly chat with the elder's voice/persona. Shows manifest
+status as a passive sidebar ("Alice coverage 87%, Bob 32%") so family
+can encourage Mom to do a Memory Session on the weaker areas.
+
+**Other Phase 4 work:**
+
+- Auto-importers: WhatsApp .txt / Line .txt / WeChat CSV+HTML parsers
+  surfaced through the corpus upload flow.
+- Photo→letter OCR for handwritten correspondence (Tesseract chi_tra
+  baseline; ABBYY-class commercial OCR fallback).
+- Listener memory: per-family-member conversation persistence so the
+  appliance can callback ("remember when little Mei was 5?").
+- Optional: birthday/holiday "speak-in-their-voice" reminder bot.
 
 ## 4. Open decisions
 
@@ -282,14 +363,40 @@ defensible.
   Phase 1 (anchor reinjection).
 - **SillyTavern character-card format** — adopt for persona JSON schema.
   Phase 1.
+- **LanceDB** (lancedb.com, Apache 2.0) — embedded vector store, Parquet-
+  backed durability, HNSW + IVF. Phase 2 vector backend.
+- **Claude Design** (anthropic.com/news/claude-design-anthropic-labs,
+  research preview Nov 2025) — codebase-aware UI generation, exports to
+  standalone HTML or hands off to Claude Code. Phase 4 family UI.
+- **HereAfter AI / StoryFile** — prior art for guided-interview
+  ingestion. Their failure mode (interview is the *only* mode) informs
+  our "guided prompts as supplement to free-form upload" design.
 
 ## 10. Status as of 2026-05-16
 
-- Phase 0 spec written (this doc); implementation not started.
+- **Phase 0 slice 1 — shipped** (commit `a0e7b8e`). Per-persona corpus
+  storage + `/api/corpus/*` endpoints + 14 contract tests; 295/1/0 suite.
+- **Phase 0-pre — in progress**: dev-UI Jinja2 migration. Pilot on
+  `standalone_ui.py` first.
+- **Phase 0 slice 2 — next**: ingestion engine (PDF/EPUB/.txt/.md +
+  audio→ASR→speaker-filter + chat exports). On hold until dev-UI
+  migration lands so we don't compound complexity.
 - 小S TTS LoRA `v2_20260514_152118_456516` is the active voice model.
 - Stub `rag_retrieval_seconds` metric exists in `ws_asr.py:683` but no
   retriever wired.
-- `data/personas/personas.json` exists with minimal shape; needs to grow
-  into the layout in §3 Phase 0.
-- Awaiting decisions on privacy ratchet, listener taxonomy.
+- `data/personas/personas.json` exists with minimal shape; coexists
+  with the new `data/personas/<persona_id>/corpus/` layout.
+- Awaiting decisions on privacy ratchet (open #1), listener taxonomy
+  (open #4).
+
+### Decisions made in 2026-05-16 conversations (delta from §4)
+
+| Topic | Decision |
+|---|---|
+| Vector store | LanceDB (was FAISS-flat) |
+| Chat exports | WhatsApp .txt + Line .txt + WeChat CSV/HTML in slice 2 |
+| Family UI tool | Claude Design (claude.ai/design) with Claude Code hand-off |
+| Dev UI ergonomics | Migrate to Jinja2 + static JS (one-time refactor) |
+| Memory Sessions | First-class Phase 4 feature, not nice-to-have; manifest gap-driven prompts; story-shaped not introspective |
+| Family UI scope | Two modes: Mode A elder self-recording driven by Memory Sessions; Mode B family-member conversation |
 
