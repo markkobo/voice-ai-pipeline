@@ -58,3 +58,22 @@ class TestRecordingsUI:
         r = client.get("/static/js/recordings.js")
         assert r.status_code == 200
         assert len(r.text) > 100
+
+
+class TestTrainingUI:
+    def test_ui_returns_html(self, client):
+        r = client.get("/ui/training")
+        assert r.status_code == 200
+        assert "<!DOCTYPE html>" in r.text
+        assert "/static/css/training.css" in r.text
+        assert "/static/js/training.js" in r.text
+
+    def test_static_css_served(self, client):
+        r = client.get("/static/css/training.css")
+        assert r.status_code == 200
+        assert len(r.text) > 100
+
+    def test_static_js_served(self, client):
+        r = client.get("/static/js/training.js")
+        assert r.status_code == 200
+        assert len(r.text) > 100

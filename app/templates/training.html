@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>訓練管理 - Voice AI</title>
+    <link rel="stylesheet" href="/static/css/training.css">
+
+</head>
+<body>
+    <div id="sysStatusBar">
+        <span class="pill" id="sysVram">VRAM
+            <div class="vram-bar"><div class="vram-fill" id="sysVramFill" style="width:0%"></div></div>
+            <span id="sysVramText">— / —</span>
+        </span>
+        <span class="pill">🎙️ <span id="sysVoiceText">—</span></span>
+        <span class="pill" id="sysAsr">ASR: <span id="sysAsrText">—</span></span>
+        <span class="pill busy" id="sysTraining" style="display:none">
+            <span class="spinner"></span><span id="sysTrainingText">training…</span>
+        </span>
+        <span style="flex:1"></span>
+        <span class="pill">💾 <span id="sysDiskText">—</span> GB</span>
+        <span style="color:#445">·</span>
+        <a href="/ui" style="color:#7aa4ff">chat</a>
+        <a href="/ui/recordings" style="color:#7aa4ff">recordings</a>
+        <a href="/ui/training" style="color:#7aa4ff">training</a>
+    </div>
+    <!-- Toast container -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <div class="container">
+        <div class="header">
+            <a href="/ui" class="back-btn">跳轉到對話</a>
+            <h1>訓練管理</h1>
+            <a href="/ui/recordings" class="back-btn">錄音管理</a>
+        </div>
+
+        <div class="tabs">
+            <button class="tab active" onclick="switchTab('training')">訓練</button>
+            <button class="tab" onclick="switchTab('versions')">版本</button>
+        </div>
+
+        <!-- Training Tab -->
+        <div id="training-tab">
+            <!-- Persona Selection -->
+            <div class="section">
+                <div class="section-title">選擇人格</div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>人格 (Persona)</label>
+                        <select id="personaSelect"></select>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Recordings Selection with Tree View -->
+            <div class="section">
+                <div class="section-title">選擇片段</div>
+                <div class="filter-bar">
+                    <select id="listenerFilter">
+                        <option value="">全部聆聽者</option>
+                    </select>
+                    <span id="recordingsCount" class="recordings-count"></span>
+                </div>
+                <div id="treeView">
+                    <div class="empty-state">載入中...</div>
+                </div>
+            </div>
+
+            <!-- Training Settings -->
+            <div class="section">
+                <div class="section-title">訓練設定</div>
+                <div class="training-settings">
+                    <div class="settings-grid">
+                        <div class="form-group">
+                            <label>訓練類型</label>
+                            <select id="trainingTypeSelect" onchange="onTrainingTypeChange()">
+                                <option value="lora" selected>LoRA (快, 適配器)</option>
+                                <option value="sft">SFT (慢, 完整微調)</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Epochs</label>
+                            <select id="epochsSelect">
+                                <option value="5">5</option>
+                                <option value="10" selected>10</option>
+                                <option value="20">20</option>
+                                <option value="30">30</option>
+                                <option value="50">50</option>
+                                <option value="100">100</option>
+                            </select>
+                        </div>
+                        <div class="form-group" id="rankGroup">
+                            <label>LoRA Rank</label>
+                            <select id="rankSelect">
+                                <option value="4">4</option>
+                                <option value="8">8</option>
+                                <option value="16" selected>16</option>
+                                <option value="32">32</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Batch Size</label>
+                            <select id="batchSizeSelect">
+                                <option value="1">1</option>
+                                <option value="2">2</option>
+                                <option value="4" selected>4</option>
+                                <option value="8">8</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Training Preview -->
+                <div class="training-preview" id="trainingPreview">
+                    <h3 style="font-size: 1rem; margin-bottom: 10px; color: #00ccff;">訓練預覽</h3>
+                    <div id="previewList">
+                        <div class="empty-state">選擇片段以查看預覽</div>
+                    </div>
+                </div>
+
+                <!-- Progress -->
+                <div class="progress-section" id="progressSection">
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="progressFill" style="width: 0%">0%</div>
+                    </div>
+                    <div class="progress-stats">
+                        <div class="stat-item">
+                            <div class="stat-label">Epoch</div>
+                            <div class="stat-value" id="statEpoch">0/0</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-label">Loss</div>
+                            <div class="stat-value" id="statLoss">-</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-label">預計剩餘</div>
+                            <div class="stat-value" id="statETA">-</div>
+                        </div>
+                    </div>
+                </div>
+
+                <button class="btn-primary" id="startTrainingBtn" onclick="startTraining()">
+                    開始訓練
+                </button>
+            </div>
+        </div>
+
+        <!-- Versions Tab -->
+        <div id="versions-tab" style="display: none;">
+            <div class="section">
+                <div class="section-title">版本列表</div>
+                <div style="margin-bottom: 12px;">
+                    <label style="font-size: 0.85rem; color: #888; display: block; margin-bottom: 6px;">測試文字 (預覽時朗讀)</label>
+                    <input type="text" id="previewText" value="你好，這是我的聲音測試。"
+                        style="width: 100%; padding: 10px 14px; background: #1a1a2e; color: #fff; border: 1px solid #333; border-radius: 8px; font-size: 14px;">
+                </div>
+                <div id="versionsList">載入中...</div>
+            </div>
+        </div>
+
+        <!-- Debug Panel -->
+        <div class="debug-panel" id="debugPanel">
+            <div id="debugLogs"></div>
+        </div>
+    </div>
+
+    <script src="/static/js/training.js" defer></script>
+
+</body>
+</html>
