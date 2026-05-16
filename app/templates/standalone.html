@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice AI — 小S</title>
+    <link rel="stylesheet" href="/static/css/standalone.css">
+
+</head>
+<body>
+    <div id="sysStatusBar">
+        <span class="pill" id="sysVram" title="GPU VRAM">VRAM
+            <div class="vram-bar"><div class="vram-fill" id="sysVramFill" style="width:0%"></div></div>
+            <span id="sysVramText">— / —</span>
+        </span>
+        <span class="pill" id="sysVoice" title="Active TTS voice">🎙️ <span id="sysVoiceText">—</span></span>
+        <span class="pill" id="sysAsr">ASR: <span id="sysAsrText">—</span></span>
+        <span class="pill busy" id="sysTraining" style="display:none">
+            <span class="spinner"></span>
+            <span id="sysTrainingText">training…</span>
+        </span>
+        <span style="flex:1"></span>
+        <span class="pill" id="sysDisk">💾 <span id="sysDiskText">—</span> GB</span>
+        <span style="color:#445">·</span>
+        <a href="/ui" style="color:#7aa4ff">chat</a>
+        <a href="/ui/recordings" style="color:#7aa4ff">recordings</a>
+        <a href="/ui/training" style="color:#7aa4ff">training</a>
+    </div>
+    <div id="toastContainer"></div>
+    <div class="container">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div>
+                <h1>Voice AI — 小S <span id="uiVersion" style="font-size:12px;color:#888">[v26]</span></h1>
+                <p class="subtitle">選擇對象，開始對話</p>
+            </div>
+            <button onclick="clearConversation()" style="background:#555;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:13px;">🗑 清除對話</button>
+        </div>
+        <div id="status" class="status disconnected">Disconnected</div>
+
+        <div class="config-row">
+            <div class="config-item">
+                <label>對象 (Listener)</label>
+                <select id="listener">
+                    <option value="child">小孩</option>
+                    <option value="mom">媽媽</option>
+                    <option value="friend">朋友</option>
+                    <option value="default" selected>一般</option>
+                </select>
+            </div>
+            <div class="config-item">
+                <label>人格 (Persona)</label>
+                <select id="persona">
+                    <option value="xiao_s" selected>小S</option>
+                    <option value="caregiver">照護者</option>
+                    <option value="elder_gentle">長輩-溫柔</option>
+                    <option value="elder_playful">長輩-活潑</option>
+                </select>
+            </div>
+            <div class="config-item">
+                <label>VAD 靈敏度</label>
+                <select id="vad" onchange="onVadChange()">
+                    <option value="low">低</option>
+                    <option value="medium" selected>中</option>
+                    <option value="high">高</option>
+                </select>
+            </div>
+            <div class="config-item">
+                <label>TTS 模型</label>
+                <select id="tts_model" onchange="onTtsModelChange()">
+                    <option value="0.6B">0.6B (快速)</option>
+                    <option value="1.7B" selected>1.7B (高品質)</option>
+                </select>
+            </div>
+        </div>
+        <div id="ttsModelHint" style="font-size: 0.8rem; color: #666; margin-bottom: 12px; display: none;">
+            ✓ 已切換為 <span id="ttsModelHintValue"></span>，下次對話時生效
+        </div>
+
+        <!-- Active version indicator -->
+        <div id="versionIndicator" style="background: #1a1a2e; border-radius: 8px; padding: 8px 14px; margin-bottom: 12px; font-size: 0.85rem; display: flex; align-items: center; gap: 8px;">
+            <span style="color: #888;">🎙️ 聲音版本:</span>
+            <select id="versionSelect" onchange="onVersionChange()" style="background: #1a1a2e; color: #00ccff; border: 1px solid #333; border-radius: 4px; padding: 4px 8px; font-size: 0.85rem; max-width: 220px;">
+                <option value="">系統預設</option>
+            </select>
+            <span id="versionInfo" style="color: #666; font-size: 0.75rem;"></span>
+            <button onclick="loadVersions()" style="background: #333; color: #aaa; border: none; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 0.75rem; margin-left: auto;">🔄</button>
+        </div>
+
+        <div class="controls">
+            <button id="startStopBtn" class="primary" onclick="toggleConversation()">🎤 開始對話</button>
+            <button id="recordBtn" class="primary" disabled onclick="toggleRecording()">🎤 開始錄音</button>
+            <button id="commitBtn" disabled>✋ 強制送出</button>
+            <button id="cancelBtn" disabled>⏹ 取消</button>
+        </div>
+
+        <div class="conversation" id="conversation">
+            <div class="placeholder">開始說話吧...</div>
+        </div>
+
+        <!-- Thinking indicator (hidden by default) -->
+        <div id="thinkingIndicator" style="display: none; margin-bottom: 16px;">
+            <div class="thinking">
+                <span>AI 思考中</span>
+                <div class="thinking-dot"></div>
+                <div class="thinking-dot"></div>
+                <div class="thinking-dot"></div>
+            </div>
+        </div>
+
+        <div class="debug-toggle" onclick="toggleDebug()">📋 Debug Panel (點擊展開)</div>
+        <div id="debug" class="debug">
+            <div id="debugContent"></div>
+        </div>
+        <div class="keyboard-hint">
+            快捷鍵: <kbd>Space</kbd> 說話/停止 &nbsp;|&nbsp; <kbd>Esc</kbd> 取消 &nbsp;|&nbsp; <kbd>Ctrl+K</kbd> 清除對話
+        </div>
+    </div>
+
+    <script src="/static/js/standalone.js" defer></script>
+
+</body>
+</html>

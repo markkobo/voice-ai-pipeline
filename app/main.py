@@ -10,12 +10,25 @@ logger = setup_json_logging()
 logger.info("Starting Voice AI Pipeline")
 
 # Now import the rest
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 
 from app.api import ws_asr, tts_stream, standalone_ui, recordings, recordings_ui, training, training_ui, personas, listeners
 from app.api import _system, corpus
 from app.api._errors import register_error_handlers
+
+# Jinja2 + StaticFiles wiring (RFC_M6 Phase 0-pre — dev-UI refactor).
+# `auto_reload=True` so HTML edits show up without a server restart in dev.
+# Jinja2's bytecode cache handles invalidation by mtime when auto_reload
+# is on — don't replace `env.cache`, that breaks the cache's `.get(key)`
+# protocol.
+_app_root = Path(__file__).resolve().parent
+templates = Jinja2Templates(directory=str(_app_root / "templates"))
+templates.env.auto_reload = True
 # gradio_ui imported lazily below to handle missing gradio
 
 # Import telemetry collector
@@ -39,6 +52,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Mount static assets (RFC_M6 Phase 0-pre). All dev-UI CSS + JS lives at
+# `app/static/`; access via `/static/...`.
+app.mount(
+    "/static",
+    StaticFiles(directory=str(_app_root / "static")),
+    name="static",
+)
+
+# Expose templates so the *_ui.py modules can resolve them via app.state.
+app.state.templates = templates
 
 # Include routers
 app.include_router(ws_asr.router)
