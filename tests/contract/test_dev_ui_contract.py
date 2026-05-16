@@ -39,3 +39,22 @@ class TestStandaloneUI:
         assert len(r.text) > 100
         # Sentinel — the WebSocket connection function name.
         assert "function connect" in r.text or "connect()" in r.text
+
+
+class TestRecordingsUI:
+    def test_ui_returns_html(self, client):
+        r = client.get("/ui/recordings")
+        assert r.status_code == 200
+        assert "<!DOCTYPE html>" in r.text
+        assert "/static/css/recordings.css" in r.text
+        assert "/static/js/recordings.js" in r.text
+
+    def test_static_css_served(self, client):
+        r = client.get("/static/css/recordings.css")
+        assert r.status_code == 200
+        assert len(r.text) > 100
+
+    def test_static_js_served(self, client):
+        r = client.get("/static/js/recordings.js")
+        assert r.status_code == 200
+        assert len(r.text) > 100

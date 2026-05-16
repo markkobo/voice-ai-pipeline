@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>錄音管理 - Voice AI</title>
+    <link rel="stylesheet" href="/static/css/recordings.css">
+
+</head>
+<body>
+    <div id="sysStatusBar">
+        <span class="pill" id="sysVram">VRAM
+            <div class="vram-bar"><div class="vram-fill" id="sysVramFill" style="width:0%"></div></div>
+            <span id="sysVramText">— / —</span>
+        </span>
+        <span class="pill">🎙️ <span id="sysVoiceText">—</span></span>
+        <span class="pill" id="sysAsr">ASR: <span id="sysAsrText">—</span></span>
+        <span class="pill busy" id="sysTraining" style="display:none">
+            <span class="spinner"></span><span id="sysTrainingText">training…</span>
+        </span>
+        <span style="flex:1"></span>
+        <span class="pill">💾 <span id="sysDiskText">—</span> GB</span>
+        <span style="color:#445">·</span>
+        <a href="/ui" style="color:#7aa4ff">chat</a>
+        <a href="/ui/recordings" style="color:#7aa4ff">recordings</a>
+        <a href="/ui/training" style="color:#7aa4ff">training</a>
+    </div>
+    <!-- Toast notifications container -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- Modal for adding persona/listener -->
+    <div class="modal-overlay" id="addModal">
+        <div class="modal-content">
+            <h3 id="modalTitle">新增</h3>
+            <input type="text" id="modalInput" placeholder="名稱">
+            <div class="modal-actions">
+                <button class="action-btn" style="background:#666" onclick="closeModal()">取消</button>
+                <button class="action-btn play" onclick="confirmModal()">確認</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="header">
+            <a href="/ui" class="back-btn">← 返回對話</a>
+            <h1>錄音管理</h1>
+            <div class="header-actions">
+                <button class="action-btn" id="backupBtn" onclick="triggerBackup()" style="background:#2a7;">📤 備份到R2</button>
+                <a href="/ui/training" class="back-btn">跳轉到訓練 →</a>
+                <div class="version-selector">
+                    <span>版本:</span>
+                    <select id="versionSelect">
+                        <option value="default">系統預設</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <!-- WebRTC Recording Section -->
+        <div class="recording-section">
+            <div class="section-title">🎤 錄音 (WebRTC)</div>
+
+            <div class="recorder" id="recorder">
+                <!-- dB Meter -->
+                <div class="db-meter">
+                    <div class="db-meter-fill" id="dbMeterFill"></div>
+                </div>
+                <div class="db-info">
+                    <span id="dbLevel">-∞ dB</span>
+                    <span id="qualityIndicator">等待錄音...</span>
+                </div>
+
+                <!-- Metadata selectors -->
+                <div class="metadata-selectors">
+                    <div class="selector-group">
+                        <label>👤 聆聽者</label>
+                        <select id="listenerSelect"></select>
+                    </div>
+                    <div class="selector-group">
+                        <label>🎭 人格</label>
+                        <select id="personaSelect"></select>
+                    </div>
+                </div>
+
+                <!-- Controls -->
+                <div class="recorder-controls">
+                    <button class="rec-btn" id="recBtn">
+                        <span id="recIcon">●</span>
+                        <span id="recText">開始錄音</span>
+                    </button>
+                    <button class="stop-btn" id="stopBtn">■ 停止</button>
+                    <span class="duration" id="duration">00:00</span>
+                </div>
+            </div>
+
+            <!-- File Upload -->
+            <div class="upload-area" id="uploadArea">
+                <input type="file" id="fileInput" accept=".wav,.mp3,.m4a,.webm" multiple>
+                <div class="upload-icon">📁</div>
+                <div class="upload-text">
+                    拖放檔案到此處 或 <strong>選擇檔案</strong><br>
+                    <small>支援: WAV, MP3, M4A, WebM (最大 50MB)</small>
+                </div>
+            </div>
+        </div>
+
+        <!-- Debug Panel -->
+        <div class="debug-panel" id="debugPanel">
+            <div class="debug-panel-header">
+                <span>📋 Debug Panel</span>
+                <button class="debug-toggle" id="debugToggle">折疊</button>
+            </div>
+            <div id="debugLogs"></div>
+        </div>
+
+        <!-- Recordings List with Tree View -->
+        <div class="recording-section">
+            <div class="section-title">📚 錄音列表</div>
+
+            <!-- Filter bar -->
+            <div class="filter-bar">
+                <input type="text" id="searchInput" placeholder="搜尋錄音..." oninput="filterAndRender()">
+                <select id="listenerFilter" onchange="filterAndRender()">
+                    <option value="">全部聆聽者</option>
+                </select>
+            </div>
+
+            <!-- Tree view container -->
+            <div class="tree-view" id="treeView">
+                <div class="empty-state">載入中...</div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/recordings.js" defer></script>
+
+</body>
+</html>
