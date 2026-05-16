@@ -220,6 +220,18 @@ class CorpusEmptyError(DomainError):
     error_code = "corpus_empty"
 
 
+class CorpusIngestionUnsupportedError(DomainError):
+    """Extractor for the item's format isn't implemented yet."""
+    status_code = 415
+    error_code = "ingestion_unsupported_format"
+
+
+class CorpusIngestionFailedError(DomainError):
+    """Extractor ran but produced no usable text, or crashed."""
+    status_code = 422
+    error_code = "ingestion_failed"
+
+
 # ---------------------------------------------------------------------------
 # Generic input errors (rare — prefer specific subclasses).
 # ---------------------------------------------------------------------------

@@ -21,9 +21,11 @@ from typing import Optional
 from fastapi import APIRouter, Depends, File, Form, UploadFile
 from pydantic import BaseModel, ConfigDict
 
-from app.api._dependencies import get_corpus_service
+from app.api._dependencies import get_corpus_service, get_ingestion_service
 from app.api._errors import (
     CorpusEmptyError,
+    CorpusIngestionFailedError,
+    CorpusIngestionUnsupportedError,
     CorpusItemNotFoundError,
     CorpusTooLargeError,
     UnsupportedCorpusFormatError,
@@ -33,6 +35,9 @@ from app.services.corpus import (
     CorpusItemKind,
     CorpusManifest,
     CorpusService,
+    ExtractionFailedError,
+    IngestionService,
+    UnsupportedIngestionFormatError,
 )
 from app.services.corpus.repository import CorpusItemNotFound
 from app.services.corpus.service import (
@@ -174,3 +179,46 @@ async def api_delete_corpus_item(
             details={"persona_id": persona_id, "item_id": item_id},
         ) from e
     return DeleteResponse(item_id=item_id)
+
+
+@router.post(
+    "/{persona_id}/items/{item_id}/ingest", response_model=CorpusItem
+)
+async def api_ingest_corpus_item(
+    persona_id: str,
+    item_id: str,
+    ingestion: IngestionService = Depends(get_ingestion_service),
+) -> CorpusItem:
+    """Run the extractor on a previously-uploaded item.
+
+    Idempotent — re-ingesting overwrites extracted.txt + chunks.jsonl.
+    Returns the updated CorpusItem with extracted_chars + chunk_count
+    + status=ingested (or status=failed if extraction failed; the item's
+    `error` field carries the reason in that case).
+
+    Slice 2A supports `.txt`/`.md` only. PDF/EPUB/DOCX/audio/video and
+    chat-export parsers land in later slices (RFC_M6 §3 Phase 0).
+    """
+    try:
+        return ingestion.ingest(persona_id, item_id)
+    except CorpusItemNotFound as e:
+        raise CorpusItemNotFoundError(
+            f"Corpus item {item_id!r} not found for persona {persona_id!r}",
+            details={"persona_id": persona_id, "item_id": item_id},
+        ) from e
+    except UnsupportedIngestionFormatError as e:
+        raise CorpusIngestionUnsupportedError(
+            f"No extractor available for {str(e)!r}; "
+            "supported in slice 2A: .txt, .md",
+            details={
+                "persona_id": persona_id,
+                "item_id": item_id,
+                "extension": str(e),
+                "supported": sorted(ingestion.supported_extensions()),
+            },
+        ) from e
+    except ExtractionFailedError as e:
+        raise CorpusIngestionFailedError(
+            str(e),
+            details={"persona_id": persona_id, "item_id": item_id},
+        ) from e

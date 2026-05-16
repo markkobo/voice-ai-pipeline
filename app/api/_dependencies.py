@@ -17,7 +17,11 @@ from typing import Optional
 
 from fastapi import Request
 
-from app.services.corpus import CorpusService, JsonCorpusRepository
+from app.services.corpus import (
+    CorpusService,
+    IngestionService,
+    JsonCorpusRepository,
+)
 from app.services.listeners import JsonListenerRepository, ListenersService
 from app.services.personas import JsonPersonaRepository, PersonasService
 from app.services.recordings.repository import JsonRecordingsRepository, RecordingsRepository
@@ -198,6 +202,22 @@ def get_corpus_service(request: Request) -> CorpusService:
     return _get_or_create_corpus_service(request.app.state)
 
 
+def _get_or_create_ingestion_service(app_state) -> IngestionService:
+    existing: Optional[IngestionService] = getattr(app_state, "_ingestion_service", None)
+    if existing is not None:
+        return existing
+    # Share the same repository as CorpusService — both write to the
+    # same files. Atomic-rename + flock in the repo keeps them safe.
+    corpus_svc = _get_or_create_corpus_service(app_state)
+    service = IngestionService(repository=corpus_svc.repository)
+    app_state._ingestion_service = service
+    return service
+
+
+def get_ingestion_service(request: Request) -> IngestionService:
+    return _get_or_create_ingestion_service(request.app.state)
+
+
 # ---------------------------------------------------------------------------
 # Test helpers — let pytest construct an in-test service without going through
 # the request lifecycle.
@@ -260,3 +280,12 @@ def make_listeners_service_for_testing(data_root: Path) -> ListenersService:
 
 def make_corpus_service_for_testing(data_root: Path) -> CorpusService:
     return CorpusService(JsonCorpusRepository(data_root / "personas"))
+
+
+def make_ingestion_service_for_testing(
+    data_root: Path,
+    corpus_service: Optional[CorpusService] = None,
+) -> IngestionService:
+    if corpus_service is None:
+        corpus_service = make_corpus_service_for_testing(data_root)
+    return IngestionService(repository=corpus_service.repository)
