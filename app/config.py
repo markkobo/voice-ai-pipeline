@@ -87,6 +87,16 @@ def voice_profiles_dir() -> Path:
 
 
 @lru_cache(maxsize=1)
+def personas_dir() -> Path:
+    """Per-persona artifact root.
+
+    Holds per-persona corpus (RFC_M6 Phase 0) and future per-persona LoRA
+    adapters. Lives at {data_root}/personas/<persona_id>/...
+    """
+    return data_root() / "personas"
+
+
+@lru_cache(maxsize=1)
 def log_dir() -> Path:
     """Application log directory.
 
@@ -107,5 +117,6 @@ def log_dir() -> Path:
 def reset_caches() -> None:
     """Clear all cached resolutions. Tests call this after monkeypatching env."""
     for fn in (data_root, models_dir, recordings_dir, raw_dir,
-               denoised_dir, enhanced_dir, voice_profiles_dir, log_dir):
+               denoised_dir, enhanced_dir, voice_profiles_dir,
+               personas_dir, log_dir):
         fn.cache_clear()

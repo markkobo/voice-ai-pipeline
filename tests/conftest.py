@@ -135,10 +135,12 @@ def isolated_data(tmp_path, monkeypatch, app) -> Path:
     # Inject fresh services into the FastAPI app via dependency_overrides so
     # the cached singletons on app.state can't leak across tests.
     from app.api._dependencies import (
+        get_corpus_service,
         get_listeners_service,
         get_personas_service,
         get_recordings_service,
         get_training_service,
+        make_corpus_service_for_testing,
         make_listeners_service_for_testing,
         make_personas_service_for_testing,
         make_recordings_service_for_testing,
@@ -151,10 +153,12 @@ def isolated_data(tmp_path, monkeypatch, app) -> Path:
     test_training_service = make_training_service_for_testing(
         data_root, recordings_service=test_recordings_service
     )
+    test_corpus_service = make_corpus_service_for_testing(data_root)
     app.dependency_overrides[get_personas_service] = lambda: test_personas_service
     app.dependency_overrides[get_listeners_service] = lambda: test_listeners_service
     app.dependency_overrides[get_recordings_service] = lambda: test_recordings_service
     app.dependency_overrides[get_training_service] = lambda: test_training_service
+    app.dependency_overrides[get_corpus_service] = lambda: test_corpus_service
 
     # Also reset the legacy module-level singletons so the back-compat
     # function-style API (`list_personas()` etc.) sees the per-test data
@@ -174,6 +178,7 @@ def isolated_data(tmp_path, monkeypatch, app) -> Path:
         "_training_service",
         "_personas_service",
         "_listeners_service",
+        "_corpus_service",
     ):
         if hasattr(app.state, attr):
             delattr(app.state, attr)
@@ -184,6 +189,7 @@ def isolated_data(tmp_path, monkeypatch, app) -> Path:
     app.dependency_overrides.pop(get_listeners_service, None)
     app.dependency_overrides.pop(get_recordings_service, None)
     app.dependency_overrides.pop(get_training_service, None)
+    app.dependency_overrides.pop(get_corpus_service, None)
     _r_p()
     _r_l()
 

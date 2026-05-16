@@ -198,6 +198,29 @@ class DuplicateIdError(DomainError):
 
 
 # ---------------------------------------------------------------------------
+# Corpus-related domain errors (RFC_M6 Phase 0).
+# ---------------------------------------------------------------------------
+class CorpusItemNotFoundError(DomainError):
+    status_code = 404
+    error_code = "corpus_item_not_found"
+
+
+class UnsupportedCorpusFormatError(DomainError):
+    status_code = 415
+    error_code = "unsupported_corpus_format"
+
+
+class CorpusTooLargeError(DomainError):
+    status_code = 413
+    error_code = "corpus_too_large"
+
+
+class CorpusEmptyError(DomainError):
+    status_code = 422
+    error_code = "corpus_empty"
+
+
+# ---------------------------------------------------------------------------
 # Generic input errors (rare — prefer specific subclasses).
 # ---------------------------------------------------------------------------
 class ValidationError(DomainError):

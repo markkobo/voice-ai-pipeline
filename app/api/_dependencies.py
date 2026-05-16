@@ -17,6 +17,7 @@ from typing import Optional
 
 from fastapi import Request
 
+from app.services.corpus import CorpusService, JsonCorpusRepository
 from app.services.listeners import JsonListenerRepository, ListenersService
 from app.services.personas import JsonPersonaRepository, PersonasService
 from app.services.recordings.repository import JsonRecordingsRepository, RecordingsRepository
@@ -180,6 +181,24 @@ def get_listeners_service(request: Request) -> ListenersService:
 
 
 # ---------------------------------------------------------------------------
+# Corpus service singleton (RFC_M6 Phase 0).
+# ---------------------------------------------------------------------------
+def _get_or_create_corpus_service(app_state) -> CorpusService:
+    existing: Optional[CorpusService] = getattr(app_state, "_corpus_service", None)
+    if existing is not None:
+        return existing
+    from app import config as _cfg
+    repo = JsonCorpusRepository(_cfg.personas_dir())
+    service = CorpusService(repository=repo)
+    app_state._corpus_service = service
+    return service
+
+
+def get_corpus_service(request: Request) -> CorpusService:
+    return _get_or_create_corpus_service(request.app.state)
+
+
+# ---------------------------------------------------------------------------
 # Test helpers — let pytest construct an in-test service without going through
 # the request lifecycle.
 # ---------------------------------------------------------------------------
@@ -237,3 +256,7 @@ def make_personas_service_for_testing(data_root: Path) -> PersonasService:
 
 def make_listeners_service_for_testing(data_root: Path) -> ListenersService:
     return ListenersService(JsonListenerRepository(data_root))
+
+
+def make_corpus_service_for_testing(data_root: Path) -> CorpusService:
+    return CorpusService(JsonCorpusRepository(data_root / "personas"))
