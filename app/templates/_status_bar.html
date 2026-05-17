@@ -1,0 +1,27 @@
+{# System status bar — shared across /ui, /ui/recordings, /ui/training.
+   Pair with `_status_bar.css` (loaded once per page) and `_status_bar.js`
+   which polls /api/system/status every 5s and exposes the global SYS
+   object + gateIfTraining() helper.
+
+   Per RFC_M6 Phase 0-pre review #28: this partial replaces the prior
+   3× duplicated markup, which had already drifted (recordings.html was
+   missing title= attrs and `id="sysVoice"` / `id="sysDisk"` that the
+   shared JS expected). #}
+<div id="sysStatusBar">
+    <span class="pill" id="sysVram" title="GPU VRAM">VRAM
+        <div class="vram-bar"><div class="vram-fill" id="sysVramFill" style="width:0%"></div></div>
+        <span id="sysVramText">— / —</span>
+    </span>
+    <span class="pill" id="sysVoice" title="Active TTS voice">🎙️ <span id="sysVoiceText">—</span></span>
+    <span class="pill" id="sysAsr">ASR: <span id="sysAsrText">—</span></span>
+    <span class="pill busy" id="sysTraining" style="display:none">
+        <span class="spinner"></span>
+        <span id="sysTrainingText">training…</span>
+    </span>
+    <span style="flex:1"></span>
+    <span class="pill" id="sysDisk">💾 <span id="sysDiskText">—</span> GB</span>
+    <span style="color:#445">·</span>
+    <a href="/ui" style="color:#7aa4ff">chat</a>
+    <a href="/ui/recordings" style="color:#7aa4ff">recordings</a>
+    <a href="/ui/training" style="color:#7aa4ff">training</a>
+</div>

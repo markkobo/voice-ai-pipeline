@@ -4,27 +4,13 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>錄音管理 - Voice AI</title>
+    <link rel="stylesheet" href="/static/css/_status_bar.css">
     <link rel="stylesheet" href="/static/css/recordings.css">
+    <script src="/static/js/_status_bar.js" defer></script>
 
 </head>
 <body>
-    <div id="sysStatusBar">
-        <span class="pill" id="sysVram">VRAM
-            <div class="vram-bar"><div class="vram-fill" id="sysVramFill" style="width:0%"></div></div>
-            <span id="sysVramText">— / —</span>
-        </span>
-        <span class="pill">🎙️ <span id="sysVoiceText">—</span></span>
-        <span class="pill" id="sysAsr">ASR: <span id="sysAsrText">—</span></span>
-        <span class="pill busy" id="sysTraining" style="display:none">
-            <span class="spinner"></span><span id="sysTrainingText">training…</span>
-        </span>
-        <span style="flex:1"></span>
-        <span class="pill">💾 <span id="sysDiskText">—</span> GB</span>
-        <span style="color:#445">·</span>
-        <a href="/ui" style="color:#7aa4ff">chat</a>
-        <a href="/ui/recordings" style="color:#7aa4ff">recordings</a>
-        <a href="/ui/training" style="color:#7aa4ff">training</a>
-    </div>
+    {% include "_status_bar.html" %}
     <!-- Toast notifications container -->
     <div class="toast-container" id="toastContainer"></div>
 

@@ -1,0 +1,30 @@
+/* System status bar — shared across all dev UI pages.
+   Loaded via <link rel="stylesheet" href="/static/css/_status_bar.css">
+   in each page's <head>. RFC_M6 Phase 0-pre review #28. */
+
+#sysStatusBar {
+    position: sticky; top: 0; z-index: 100;
+    background: #0b1220; border-bottom: 1px solid #1a2438;
+    font-size: 12px; padding: 6px 16px;
+    display: flex; gap: 18px; align-items: center;
+    color: #aab2c5;
+}
+#sysStatusBar .pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 2px 8px; border-radius: 10px;
+    background: #182338; color: #c5cbdc;
+}
+#sysStatusBar .pill.ok    { background: #11331f; color: #6fe2a4; }
+#sysStatusBar .pill.warn  { background: #3a2f10; color: #f4c66a; }
+#sysStatusBar .pill.busy  { background: #2a1d3a; color: #c89efa; }
+#sysStatusBar .vram-bar { width: 80px; height: 6px; background: #1f2a44; border-radius: 3px; overflow: hidden; }
+#sysStatusBar .vram-fill { height: 100%; background: #6fe2a4; transition: width .3s, background-color .3s; }
+#sysStatusBar .vram-fill.warn { background: #f4c66a; }
+#sysStatusBar .vram-fill.high { background: #ff7a7a; }
+#sysStatusBar .spinner {
+    display: inline-block; width: 10px; height: 10px;
+    border: 2px solid #5b3aa3; border-top-color: transparent;
+    border-radius: 50%; animation: spin 1s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.gated[disabled] { opacity: 0.4; cursor: not-allowed; }

@@ -1,69 +1,18 @@
-// -------- system status poller (added Phase 2.x) --------
-    // Polls /api/system/status every 5s. Updates the top bar.
-    // Selective gating: when training.active=true, disables the mic
-    // button (chat needs GPU contention). Browse/CRUD stay enabled.
-    const SYS = { trainingActive: false, ttsReady: false, asrReady: false };
-    async function pollSystemStatus() {
-        try {
-            const res = await fetch('/api/system/status', { cache: 'no-store' });
-            if (!res.ok) return;
-            const s = await res.json();
-            SYS.trainingActive = !!(s.training && s.training.active);
-            SYS.ttsReady = !!(s.tts && s.tts.ready);
-            SYS.asrReady = !!s.asr_ready;
-
-            // VRAM bar
-            const vBar = document.getElementById('sysVramFill');
-            const vText = document.getElementById('sysVramText');
-            if (s.vram && s.vram.available) {
-                const pct = Math.round((s.vram.used_mb / s.vram.total_mb) * 100);
-                vBar.style.width = pct + '%';
-                vBar.classList.toggle('warn', pct >= 70 && pct < 88);
-                vBar.classList.toggle('high', pct >= 88);
-                vText.textContent = `${s.vram.used_mb} / ${s.vram.total_mb} MB`;
-            } else {
-                vText.textContent = 'no GPU';
-            }
-            // Voice pill
-            document.getElementById('sysVoiceText').textContent =
-                s.tts && s.tts.active_version ? s.tts.active_version.replace('xiao_s_', '') : '(base)';
-            // ASR pill
-            const asrEl = document.getElementById('sysAsr');
-            asrEl.classList.toggle('ok', !!s.asr_ready);
-            document.getElementById('sysAsrText').textContent = s.asr_ready ? 'ready' : 'loading';
-            // Disk pill
-            document.getElementById('sysDiskText').textContent = s.disk_free_gb;
-            // Training pill
-            const tEl = document.getElementById('sysTraining');
-            if (SYS.trainingActive) {
-                const t = s.training;
-                const pct = t.progress_pct != null ? t.progress_pct + '%' : '';
-                const ep  = (t.current_epoch != null && t.total_epochs != null)
-                    ? ` ${t.current_epoch}/${t.total_epochs}` : '';
-                document.getElementById('sysTrainingText').textContent =
-                    `training ${pct}${ep}`.trim();
-                tEl.style.display = '';
-            } else {
-                tEl.style.display = 'none';
-            }
-            applyGating();
-        } catch (e) { /* silent — next tick retries */ }
-    }
-    function applyGating() {
-        // Selective: disable GPU-contending controls when training is active.
-        // The chat mic needs ASR+TTS+LLM, all GPU-bound during training.
+// System status poller moved to _status_bar.js (RFC_M6 Phase 0-pre
+    // review #28). This page registers a SYS_ON_UPDATE hook for the
+    // chat-specific mic-button gating: disable record when training is
+    // running OR TTS/ASR aren't ready.
+    window.SYS_ON_UPDATE = window.SYS_ON_UPDATE || [];
+    window.SYS_ON_UPDATE.push(function () {
         const rec = document.getElementById('recordBtn');
-        if (rec) {
-            const should = SYS.trainingActive || !SYS.ttsReady || !SYS.asrReady;
-            rec.disabled = should || rec.dataset.userDisabled === '1';
-            rec.classList.toggle('gated', should);
-            rec.title = SYS.trainingActive
-                ? '訓練進行中，無法對話 (training in progress)'
-                : (!SYS.ttsReady ? 'TTS engine loading…' : (!SYS.asrReady ? 'ASR engine loading…' : ''));
-        }
-    }
-    setInterval(pollSystemStatus, 5000);
-    pollSystemStatus();
+        if (!rec) return;
+        const should = window.SYS.trainingActive || !window.SYS.ttsReady || !window.SYS.asrReady;
+        rec.disabled = should || rec.dataset.userDisabled === '1';
+        rec.classList.toggle('gated', should);
+        rec.title = window.SYS.trainingActive
+            ? '訓練進行中，無法對話 (training in progress)'
+            : (!window.SYS.ttsReady ? 'TTS engine loading…' : (!window.SYS.asrReady ? 'ASR engine loading…' : ''));
+    });
     // ---------------------------------------------------------
     // Global error handler to catch uncaught errors
     window.onerror = function(msg, url, line, col, error) {

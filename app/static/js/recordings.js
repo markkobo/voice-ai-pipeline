@@ -1,52 +1,6 @@
-// ---- system status poller (shared) ----
-        const SYS = { trainingActive: false, ttsReady: false, asrReady: false };
-        async function pollSystemStatus() {
-            try {
-                const res = await fetch('/api/system/status', { cache: 'no-store' });
-                if (!res.ok) return;
-                const s = await res.json();
-                SYS.trainingActive = !!(s.training && s.training.active);
-                SYS.ttsReady = !!(s.tts && s.tts.ready);
-                SYS.asrReady = !!s.asr_ready;
-
-                const vBar  = document.getElementById('sysVramFill');
-                const vText = document.getElementById('sysVramText');
-                if (s.vram && s.vram.available) {
-                    const pct = Math.round((s.vram.used_mb / s.vram.total_mb) * 100);
-                    vBar.style.width = pct + '%';
-                    vBar.classList.toggle('warn', pct >= 70 && pct < 88);
-                    vBar.classList.toggle('high', pct >= 88);
-                    vText.textContent = `${s.vram.used_mb} / ${s.vram.total_mb} MB`;
-                } else { vText.textContent = 'no GPU'; }
-                document.getElementById('sysVoiceText').textContent =
-                    s.tts && s.tts.active_version ? s.tts.active_version.replace('xiao_s_', '') : '(base)';
-                document.getElementById('sysAsr').classList.toggle('ok', !!s.asr_ready);
-                document.getElementById('sysAsrText').textContent = s.asr_ready ? 'ready' : 'loading';
-                document.getElementById('sysDiskText').textContent = s.disk_free_gb;
-                const tEl = document.getElementById('sysTraining');
-                if (SYS.trainingActive) {
-                    const t = s.training;
-                    const pct = t.progress_pct != null ? t.progress_pct + '%' : '';
-                    const ep  = (t.current_epoch != null && t.total_epochs != null)
-                        ? ` ${t.current_epoch}/${t.total_epochs}` : '';
-                    document.getElementById('sysTrainingText').textContent =
-                        `training ${pct}${ep}`.trim();
-                    tEl.style.display = '';
-                } else { tEl.style.display = 'none'; }
-                document.body.classList.toggle('training-active', SYS.trainingActive);
-            } catch (e) { /* silent */ }
-        }
-        setInterval(pollSystemStatus, 5000);
-        pollSystemStatus();
-        // Block GPU-contending actions during training (selective gating).
-        // CRUD reads + metadata edits stay enabled.
-        function gateIfTraining(label) {
-            if (SYS.trainingActive) {
-                alert(`訓練進行中，無法執行「${label}」 (GPU is busy)`);
-                return true;
-            }
-            return false;
-        }
+// System status poller + gateIfTraining moved to _status_bar.js
+        // (RFC_M6 Phase 0-pre review #28). This file no longer needs its
+        // own copy; SYS / gateIfTraining are on window.
         // ----------------------------------------
 
         // ==================== STATE ====================
