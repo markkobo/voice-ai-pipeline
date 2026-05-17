@@ -34,6 +34,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from .chat_parsers import (
+    detect_chat_format,
+    messages_to_text,
+    parse_line,
+    parse_whatsapp,
+    parse_wechat_csv,
+)
 from .chunker import ChunkSpan, chunk_text
 from .models import CorpusItem, CorpusItemKind, CorpusItemStatus
 from .repository import CorpusItemNotFound, JsonCorpusRepository
@@ -93,10 +100,71 @@ def _extract_plaintext(path: Path) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
-# Extension → callable(path: Path) -> str
+def _extract_conversation(path: Path) -> str:
+    """Conversation extractor — sniffs the chat-export format and routes.
+
+    Supported sources (slice 2B):
+      - WhatsApp .txt
+      - Line .txt
+      - WeChat CSV (any of the common third-party-tool schemas)
+
+    Falls back to plaintext for ambiguous .txt: still useful because a
+    free-form chat dump is just a transcript.
+    """
+    ext = path.suffix.lower()
+
+    if ext == ".csv":
+        # CSV path is unambiguously WeChat for now.
+        raw = _extract_plaintext(path)
+        msgs = parse_wechat_csv(raw)
+        if not msgs:
+            raise ExtractionFailedError(
+                "WeChat CSV parser produced no messages — check column headers"
+            )
+        return messages_to_text(msgs)
+
+    if ext == ".txt":
+        raw = _extract_plaintext(path)
+        fmt = detect_chat_format(raw)
+        if fmt == "whatsapp":
+            msgs = parse_whatsapp(raw)
+        elif fmt == "line":
+            msgs = parse_line(raw)
+        elif fmt == "wechat":
+            # Sometimes WeChat dumps come labeled .txt — try CSV first.
+            msgs = parse_wechat_csv(raw) or parse_whatsapp(raw)
+        else:
+            # Unknown shape — treat as freeform conversation transcript.
+            log.info("Chat-export format not detected for %s; using plaintext fallback", path.name)
+            return raw
+        if not msgs:
+            raise ExtractionFailedError(
+                f"Chat parser ({fmt}) ran but produced no messages"
+            )
+        return messages_to_text(msgs)
+
+    if ext == ".json":
+        # JSON shapes are too varied to auto-parse — leave for a later
+        # platform-specific extractor. Reject explicitly so the failure
+        # message is actionable.
+        raise ExtractionFailedError(
+            ".json chat exports need a platform-specific parser; not yet implemented"
+        )
+
+    raise ExtractionFailedError(f"No conversation extractor for {ext}")
+
+
+# (kind, ext) → callable(path: Path) -> str
+# Kind-aware so chat-exports (which share extensions with plain text)
+# route to the right parser via `kind=conversation`.
 _EXTRACTORS = {
-    ".txt": _extract_plaintext,
-    ".md": _extract_plaintext,
+    (CorpusItemKind.text, ".txt"): _extract_plaintext,
+    (CorpusItemKind.text, ".md"): _extract_plaintext,
+    (CorpusItemKind.transcript, ".txt"): _extract_plaintext,
+    (CorpusItemKind.transcript, ".md"): _extract_plaintext,
+    (CorpusItemKind.conversation, ".txt"): _extract_conversation,
+    (CorpusItemKind.conversation, ".csv"): _extract_conversation,
+    (CorpusItemKind.conversation, ".json"): _extract_conversation,
 }
 
 
@@ -118,7 +186,16 @@ class IngestionService:
         self.overlap_chars = overlap_chars
 
     def supported_extensions(self) -> set[str]:
-        return set(_EXTRACTORS.keys())
+        """Flat set of supported extensions across all kinds.
+
+        Used by the API error envelope as a hint to callers. Kind-aware
+        dispatch (e.g. `.txt` routes differently for text vs conversation)
+        is handled inside `ingest()`.
+        """
+        return {ext for (_kind, ext) in _EXTRACTORS.keys()}
+
+    def supported_for_kind(self, kind: CorpusItemKind) -> set[str]:
+        return {ext for (k, ext) in _EXTRACTORS.keys() if k == kind}
 
     def ingest(self, persona_id: str, item_id: str) -> CorpusItem:
         """
@@ -133,19 +210,20 @@ class IngestionService:
         original_path = self._find_original(item)
         ext = original_path.suffix.lower()
 
-        if ext not in _EXTRACTORS:
+        key = (item.kind, ext)
+        if key not in _EXTRACTORS:
             # Mark failed so the manifest reflects reality, but raise
             # so the API can return 4xx.
             self._mark_failed(
                 persona_id, item_id,
-                f"Unsupported extension {ext!r}; supported: "
-                f"{sorted(_EXTRACTORS)}",
+                f"Unsupported (kind={item.kind.value}, ext={ext!r}); supported for kind: "
+                f"{sorted(self.supported_for_kind(item.kind))}",
             )
-            raise UnsupportedIngestionFormatError(ext)
+            raise UnsupportedIngestionFormatError(f"{item.kind.value}/{ext}")
 
         # Run the extractor.
         try:
-            text = _EXTRACTORS[ext](original_path)
+            text = _EXTRACTORS[key](original_path)
         except ExtractionFailedError as e:
             self._mark_failed(persona_id, item_id, str(e))
             raise

@@ -5,6 +5,14 @@ Implements RFC_M6 §3 Phase 0: storage layout + repository + service.
 Heavy ingestion (PDF/EPUB/audio→text extraction, chunking, embedding) is
 deferred to a follow-up slice. This module owns "raw bytes on disk" today.
 """
+from .chat_parsers import (
+    ChatMessage,
+    detect_chat_format,
+    messages_to_text,
+    parse_line,
+    parse_whatsapp,
+    parse_wechat_csv,
+)
 from .chunker import ChunkSpan, chunk_text
 from .ingestion import (
     ExtractionFailedError,
@@ -26,6 +34,7 @@ from .repository import (
 from .service import CorpusService
 
 __all__ = [
+    "ChatMessage",
     "ChunkSpan",
     "chunk_text",
     "CorpusItem",
@@ -33,11 +42,16 @@ __all__ = [
     "CorpusItemStatus",
     "CorpusManifest",
     "CorpusService",
+    "detect_chat_format",
     "ExtractionFailedError",
     "IngestionError",
     "IngestionService",
     "JsonCorpusRepository",
     "CorpusItemNotFound",
     "CorruptCorpusMetadata",
+    "messages_to_text",
+    "parse_line",
+    "parse_whatsapp",
+    "parse_wechat_csv",
     "UnsupportedIngestionFormatError",
 ]

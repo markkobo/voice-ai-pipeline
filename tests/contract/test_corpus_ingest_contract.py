@@ -145,14 +145,14 @@ class TestIngestErrors:
         assert body["error"] == "corpus_item_not_found"
 
     def test_ingest_unsupported_format_415(self, client):
-        # Upload a .csv via the "conversation" kind (CSV is allowed for
-        # that kind today). Ingestion for it isn't implemented yet, so
-        # slice 2A should reject with 415.
+        # .pdf upload under kind=text is accepted at upload (whitelisted
+        # in ALLOWED_EXTENSIONS_BY_KIND) but slice 2A/2B don't have a
+        # PDF extractor yet → ingestion returns 415.
         up = _upload(
             client,
-            kind="conversation",
-            content=b"sender,msg\nalice,hi\n",
-            filename="chat.csv",
+            kind="text",
+            content=b"%PDF-1.4 fake bytes\n",
+            filename="book.pdf",
         )
         assert up.status_code == 200
         item_id = up.json()["item_id"]
@@ -163,6 +163,110 @@ class TestIngestErrors:
         assert body["error"] == "ingestion_unsupported_format"
         assert ".txt" in body["details"]["supported"]
         assert ".md" in body["details"]["supported"]
+
+
+# ---------------------------------------------------------------------------
+# Chat-export ingestion (slice 2B)
+# ---------------------------------------------------------------------------
+class TestIngestChatExports:
+    def test_whatsapp_txt_routes_through_chat_parser(self, client, isolated_data):
+        body = (
+            "12/03/24, 14:32 - John: Hello\n"
+            "12/03/24, 14:33 - Mary: Hi back\n"
+        ).encode("utf-8")
+        up = _upload(
+            client, kind="conversation",
+            content=body, filename="chat.txt",
+        )
+        item_id = up.json()["item_id"]
+        r = client.post(f"/api/corpus/{PERSONA_ID}/items/{item_id}/ingest")
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "ingested"
+
+        # The extracted text should be canonical-format chat lines, not
+        # the raw WhatsApp dump.
+        extracted = (
+            isolated_data / "personas" / PERSONA_ID / "corpus"
+            / "conversation" / item_id / "extracted.txt"
+        ).read_text("utf-8")
+        assert "John: Hello" in extracted
+        assert "Mary: Hi back" in extracted
+
+    def test_line_txt_routes_through_chat_parser(self, client, isolated_data):
+        body = (
+            "[LINE] 聊天記錄\n"
+            "\n"
+            "2024/03/05（二）\n"
+            "08:30\t媽\t早安\n"
+            "08:32\t我\t早\n"
+        ).encode("utf-8")
+        up = _upload(
+            client, kind="conversation",
+            content=body, filename="line.txt",
+        )
+        item_id = up.json()["item_id"]
+        r = client.post(f"/api/corpus/{PERSONA_ID}/items/{item_id}/ingest")
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "ingested"
+        extracted = (
+            isolated_data / "personas" / PERSONA_ID / "corpus"
+            / "conversation" / item_id / "extracted.txt"
+        ).read_text("utf-8")
+        assert "媽: 早安" in extracted
+        assert "我: 早" in extracted
+
+    def test_wechat_csv_routes_through_chat_parser(self, client, isolated_data):
+        body = (
+            "StrTime,IsSender,Message,Type\n"
+            "2024-03-05 08:30:00,0,早安,text\n"
+            "2024-03-05 08:32:00,1,早,text\n"
+        ).encode("utf-8")
+        up = _upload(
+            client, kind="conversation",
+            content=body, filename="wechat.csv",
+        )
+        # CSV doesn't pass the conversation upload allowlist? It does
+        # (.csv ∈ ALLOWED_EXTENSIONS_BY_KIND[conversation]).
+        assert up.status_code == 200, up.text
+        item_id = up.json()["item_id"]
+        r = client.post(f"/api/corpus/{PERSONA_ID}/items/{item_id}/ingest")
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "ingested"
+        extracted = (
+            isolated_data / "personas" / PERSONA_ID / "corpus"
+            / "conversation" / item_id / "extracted.txt"
+        ).read_text("utf-8")
+        assert "them: 早安" in extracted
+        assert "me: 早" in extracted
+
+    def test_freeform_txt_under_conversation_falls_back_to_plaintext(
+        self, client, isolated_data,
+    ):
+        # No detectable chat format → ingestion falls back to plaintext.
+        # Useful for freeform "tell me about Bob" voice memos exported as
+        # text.
+        body = ("這是一段自由格式的回憶，沒有特定聊天格式。" * 30).encode("utf-8")
+        up = _upload(
+            client, kind="conversation",
+            content=body, filename="memo.txt",
+        )
+        item_id = up.json()["item_id"]
+        r = client.post(f"/api/corpus/{PERSONA_ID}/items/{item_id}/ingest")
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "ingested"
+
+    def test_text_kind_no_longer_accepts_csv_unsupported(self, client):
+        # Slice 2A wired only .txt/.md for kind=text. Confirm .csv under
+        # the text kind still 415s after slice 2B (.csv is conversation-
+        # only).
+        up = _upload(
+            client, kind="conversation",
+            content=b"time,sender,message\n2024,me,hi\n",
+            filename="x.csv",
+        )
+        item_id = up.json()["item_id"]
+        r = client.post(f"/api/corpus/{PERSONA_ID}/items/{item_id}/ingest")
+        assert r.status_code == 200  # csv IS supported for conversation now
 
 
 # ---------------------------------------------------------------------------
