@@ -55,6 +55,16 @@ class CorpusItem(BaseModel):
     binary won't crash `list()` against forward-written metadata.json.
     API response shapes (UploadResponse, ListResponse, etc.) keep
     `extra="forbid"` because they're a public contract.
+
+    LIMITATION (review #7 of c7ee1f4): `extra="ignore"` covers new
+    FIELDS only — it does NOT cover new ENUM VALUES. If a future slice
+    adds e.g. CorpusItemStatus.needs_review and the old binary parses
+    JSON containing that value, Pydantic raises ValidationError; the
+    repository's `_read_metadata_locked` catches it as
+    CorruptCorpusMetadata, and `list()` logs + skips the item silently.
+    Net effect on rollback: items with unknown statuses are invisible
+    (not crashed). For full forward-enum-compat, future slices must
+    either bump a schema-version field or stay additive-only.
     """
     model_config = ConfigDict(extra="ignore")
 

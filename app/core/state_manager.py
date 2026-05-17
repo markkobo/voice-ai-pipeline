@@ -261,13 +261,39 @@ class StateManager:
         # Accumulate audio
         state.audio_buffer.extend(audio_chunk)
 
-        # Track speech state
+        # Track speech state. Edge-triggered: `_vad_had_speech` flips False→True
+        # on the FIRST speech frame of this utterance; we use that edge to
+        # decide whether this chunk is a barge-in candidate. Previously the
+        # barge-in branch was level-triggered (fired on every speech frame
+        # of the utterance) which spammed `cancel_llm_task` and latched
+        # `pending_cancel` repeatedly — see open issue #1 in
+        # tests/_phase2_followups.md §5: "LLM cancelled 3s into stream with
+        # empty partial_text". A later barge-in stamp landing at the new
+        # utterance's seq (via late-arriving PCM frames after
+        # `begin_utterance`) would fire the cancellation_event on the
+        # fresh LLM task, killing it before any token streamed.
+        speech_started_this_chunk = (not is_commit) and (not state._vad_had_speech)
         if not is_commit:
             state._vad_had_speech = True
 
-        # Barge-in: user starts speaking in an active (not-yet-committed) utterance
-        # SileroVAD returns is_commit=False during active speech
-        if not is_commit and state._vad_had_speech and not state._vad_committed:
+        # Barge-in: user starts speaking WHILE an LLM/TTS response is in
+        # flight. Three guards (see open issue #1):
+        #   1. Edge-triggered: only on transition silence→speech
+        #      (`speech_started_this_chunk`). No more level-trigger spam.
+        #   2. There must be an actual in-flight LLM task to barge in on
+        #      (`state.llm_task is not None`). Without this, the very first
+        #      utterance of a session — where no LLM has ever run — latches
+        #      a stale `pending_cancel` that the next utterance picks up.
+        #   3. Not already committed for this utterance (prevents firing
+        #      after VAD already saw end-of-speech).
+        llm_is_active = (
+            state.llm_task is not None and not state.llm_task.done()
+        )
+        if (
+            speech_started_this_chunk
+            and llm_is_active
+            and not state._vad_committed
+        ):
             log.info(f"[VAD] Barge-in detected (new speech in active utterance)")
             self.cancel_llm_task(session_id, origin="vad_barge_in")
             self.cancel_tts_task(session_id)

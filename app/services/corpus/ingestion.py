@@ -71,6 +71,15 @@ class ExtractionFailedError(IngestionError):
     """Decoder ran but produced no usable text."""
 
 
+class IngestionAlreadyRunningError(IngestionError):
+    """Another ingest is already running for this item.
+
+    Raised when a second /ingest call lands on an item whose current
+    status is already `ingesting` (review #9 of c7ee1f4). Maps to 409
+    at the API.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Format detection — registry mapping extension → extractor callable.
 # ---------------------------------------------------------------------------
@@ -315,32 +324,31 @@ class IngestionService:
             extractors = default_extractors()
         self._extractors = extractors
 
+    # Common extensions to probe when answering "what do you support?"
+    # — brute-force but cheap. Concrete extractors declare support via
+    # `Extractor.supports`; this set is just the probe surface. When
+    # slice 2C/2D add new formats, extend this list.
+    _COMMON_PROBE_EXTS = frozenset({
+        ".txt", ".md", ".csv", ".json", ".pdf", ".epub", ".docx",
+        ".mp3", ".wav", ".m4a", ".mp4",
+    })
+
     def supported_extensions(self) -> set[str]:
         """Flat set of supported extensions across all kinds.
 
         Used by the API error envelope as a hint to callers. Kind-aware
         dispatch is handled inside `ingest()`.
         """
-        # Probe every extractor across every kind / common-ext combo.
-        # Kept brute-force-but-cheap since the lists are O(10).
-        common_exts = {
-            ".txt", ".md", ".csv", ".json", ".pdf", ".epub", ".docx",
-            ".mp3", ".wav", ".m4a", ".mp4",
-        }
         out: set[str] = set()
         for kind in CorpusItemKind:
-            for ext in common_exts:
+            for ext in self._COMMON_PROBE_EXTS:
                 if self._find_extractor(kind, ext) is not None:
                     out.add(ext)
         return out
 
     def supported_for_kind(self, kind: CorpusItemKind) -> set[str]:
-        common_exts = {
-            ".txt", ".md", ".csv", ".json", ".pdf", ".epub", ".docx",
-            ".mp3", ".wav", ".m4a", ".mp4",
-        }
         return {
-            ext for ext in common_exts
+            ext for ext in self._COMMON_PROBE_EXTS
             if self._find_extractor(kind, ext) is not None
         }
 
@@ -357,24 +365,58 @@ class IngestionService:
 
         Run at server startup so crashed/killed-mid-ingest items don't
         stay stuck forever (task 62C). Synchronous ingest today means
-        an item in `ingesting` state at startup definitely means the
-        process died before completing.
+        an item in `ingesting` state at startup means the process died
+        before completing.
+
+        Tolerates a concurrent delete between list() and update() —
+        a CorpusItemNotFound from update() just means the user removed
+        the item while we were iterating; carry on (review #2 of
+        c7ee1f4).
 
         Returns the number of items reset.
         """
         count = 0
         for item in self.repository.list(persona_id):
-            if item.status == CorpusItemStatus.ingesting:
-                def _flip(it: CorpusItem, _id=item.item_id) -> None:
-                    it.status = CorpusItemStatus.failed
-                    it.error = "interrupted (server restarted mid-ingest)"
+            if item.status != CorpusItemStatus.ingesting:
+                continue
+
+            def _flip(it: CorpusItem) -> None:
+                it.status = CorpusItemStatus.failed
+                it.error = "interrupted (server restarted mid-ingest)"
+
+            try:
                 self.repository.update(persona_id, item.item_id, _flip)
-                count += 1
-                log.warning(
-                    "Reset stranded ingesting item: persona=%s item=%s",
-                    persona_id, item.item_id,
-                )
+            except CorpusItemNotFound:
+                # Concurrent delete won the race — skip.
+                continue
+            count += 1
+            log.warning(
+                "Reset stranded ingesting item: persona=%s item=%s",
+                persona_id, item.item_id,
+            )
         return count
+
+    def sweep_stranded_all(self, personas_root: Path) -> int:
+        """Convenience: sweep every persona directory under personas_root.
+
+        Used by the FastAPI startup hook so we don't need a separate
+        persona-enumeration service. Returns the total count reset
+        across all personas.
+        """
+        if not personas_root.exists():
+            return 0
+        total = 0
+        for child in personas_root.iterdir():
+            if not child.is_dir() or child.name.startswith("."):
+                continue
+            try:
+                total += self.sweep_stranded(child.name)
+            except Exception as e:
+                log.exception(
+                    "sweep_stranded failed for persona %s: %s",
+                    child.name, e,
+                )
+        return total
 
     def ingest(self, persona_id: str, item_id: str) -> CorpusItem:
         """
@@ -394,14 +436,19 @@ class IngestionService:
 
         item = self.repository.get(persona_id, item_id)
 
-        # Flip to `ingesting` so a crash mid-ingest leaves the item in
-        # a recoverable state (task 62C / review #4 of 8161535). The
-        # startup-sweep in IngestionService.sweep_stranded() resets
-        # any items stuck in `ingesting` to `failed("interrupted")`.
+        # Flip to `ingesting` atomically, refusing if another /ingest
+        # is already running (review #9 of c7ee1f4 — re-ingest race).
+        # repository.update runs under exclusive lock, so this
+        # check-and-set is atomic vs another concurrent ingest() call.
         def _start(it: CorpusItem) -> None:
+            if it.status == CorpusItemStatus.ingesting:
+                raise IngestionAlreadyRunningError(
+                    f"Item {item_id!r} is already ingesting; refuse to "
+                    "start a second concurrent run."
+                )
             it.status = CorpusItemStatus.ingesting
             it.error = None
-        self.repository.update(persona_id, item_id, _start)
+        item = self.repository.update(persona_id, item_id, _start)
 
         original_path = self._find_original(item)
         ext = original_path.suffix.lower()
@@ -500,6 +547,16 @@ class IngestionService:
         and atomically replaces — last writer wins on the final file but
         readers never see a partial JSONL.
         """
+        # Chunker fingerprint: version + params. Downstream vector
+        # indexes compare both — bumping target_chars without bumping
+        # CHUNKER_VERSION used to silently invalidate cached embeddings
+        # (review #6 of c7ee1f4).
+        chunker_fingerprint = {
+            "version": CHUNKER_VERSION,
+            "target_chars": self.target_chunk_chars,
+            "overlap_chars": self.overlap_chars,
+        }
+
         lines: list[str] = []
         for idx, span in enumerate(spans):
             record = {
@@ -513,12 +570,17 @@ class IngestionService:
                 "item_id": item.item_id,
                 "kind": item.kind.value,
                 "listener_tag": item.listener_tag,
-                "persona_speaker_alias": item.persona_speaker_alias,
+                # Renamed from persona_speaker_alias (review #5 of
+                # c7ee1f4): the prior name implied "this chunk was
+                # spoken by the persona," but chat-export chunks span
+                # multiple senders. The field is really "the persona's
+                # alias in the parent item." Per-chunk speaker resolution
+                # would require chunk-from-messages, deferred.
+                "persona_alias_in_item": item.persona_speaker_alias,
                 "source": item.source,
-                # Chunker-algorithm version stamp (task 62B / review #5).
-                # Downstream vector indexes detect a mismatch and
-                # re-embed when the chunker is re-tuned.
+                # Algorithm + parameter stamp.
                 "chunker_version": CHUNKER_VERSION,
+                "chunker_params": chunker_fingerprint,
             }
             lines.append(json.dumps(record, ensure_ascii=False))
         _atomic_write_text(chunks_path, "\n".join(lines) + ("\n" if lines else ""))

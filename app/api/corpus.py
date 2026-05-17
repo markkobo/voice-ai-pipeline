@@ -25,6 +25,7 @@ from app.api._dependencies import get_corpus_service, get_ingestion_service
 from app.api._errors import (
     CorpusEmptyError,
     CorpusIngestionFailedError,
+    CorpusIngestionInProgressError,
     CorpusIngestionUnsupportedError,
     CorpusItemNotFoundError,
     CorpusTooLargeError,
@@ -40,6 +41,7 @@ from app.services.corpus import (
     IngestionService,
     UnsupportedIngestionFormatError,
 )
+from app.services.corpus.ingestion import IngestionAlreadyRunningError
 from app.services.corpus.repository import CorpusItemNotFound
 from app.services.corpus.service import (
     CorpusEmptyError as SvcCorpusEmptyError,
@@ -237,6 +239,11 @@ async def api_ingest_corpus_item(
     except CorpusItemNotFound as e:
         raise CorpusItemNotFoundError(
             f"Corpus item {item_id!r} not found for persona {persona_id!r}",
+            details={"persona_id": persona_id, "item_id": item_id},
+        ) from e
+    except IngestionAlreadyRunningError as e:
+        raise CorpusIngestionInProgressError(
+            str(e),
             details={"persona_id": persona_id, "item_id": item_id},
         ) from e
     except UnsupportedIngestionFormatError as e:

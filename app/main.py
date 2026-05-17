@@ -171,6 +171,19 @@ async def startup_event():
     # Also preload and warmup TTS
     await preload_tts()
 
+    # Reset any corpus items left in `ingesting` state from a previous
+    # crash to `failed` so they don't stay stuck (RFC_M6 Phase 0 task 62C
+    # / review #8 of c7ee1f4).
+    try:
+        from app.api._dependencies import _get_or_create_ingestion_service
+        from app import config as _cfg
+        svc = _get_or_create_ingestion_service(app.state)
+        n = svc.sweep_stranded_all(_cfg.personas_dir())
+        if n:
+            logger.warning(f"Reset {n} stranded ingesting items on startup")
+    except Exception as e:
+        logger.exception(f"Corpus sweep_stranded_all failed: {e}")
+
 
 if __name__ == "__main__":
     import uvicorn

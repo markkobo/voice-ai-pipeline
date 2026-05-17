@@ -110,9 +110,13 @@ class TestChunkerVersionStamp:
             assert isinstance(rec["chunker_version"], int)
             assert rec["chunker_version"] >= 1
 
-    def test_chunks_carry_persona_speaker_alias_when_set(
+    def test_chunks_carry_persona_alias_in_item_when_set(
         self, client, isolated_data: Path,
     ):
+        # Field renamed from persona_speaker_alias → persona_alias_in_item
+        # in chunk records per review #5 of c7ee1f4: chat-export chunks
+        # span multiple senders, so the field names the persona's alias
+        # in the parent item, not per-chunk speaker.
         body = ("和小孩聊天的內容。" * 80).encode("utf-8")
         r = _upload(
             client,
@@ -132,4 +136,27 @@ class TestChunkerVersionStamp:
             json.loads(line)
             for line in chunks_path.read_text("utf-8").splitlines() if line.strip()
         ]
-        assert all(r["persona_speaker_alias"] == "媽" for r in records)
+        assert all(r["persona_alias_in_item"] == "媽" for r in records)
+
+    def test_chunks_carry_chunker_params(self, client, isolated_data: Path):
+        # Review #6 of c7ee1f4: chunker_version alone wasn't enough —
+        # downstream vector indexes also need (target_chars, overlap_chars)
+        # to detect re-tuning that doesn't bump the version constant.
+        body = ("片段內容。" * 100).encode("utf-8")
+        r = _upload(client, content=body)
+        item_id = r.json()["item_id"]
+        client.post(f"/api/corpus/{PERSONA_ID}/items/{item_id}/ingest")
+
+        chunks_path = (
+            isolated_data / "personas" / PERSONA_ID / "corpus"
+            / "text" / item_id / "chunks.jsonl"
+        )
+        records = [
+            json.loads(line)
+            for line in chunks_path.read_text("utf-8").splitlines() if line.strip()
+        ]
+        for rec in records:
+            assert "chunker_params" in rec
+            assert rec["chunker_params"]["version"] >= 1
+            assert rec["chunker_params"]["target_chars"] > 0
+            assert rec["chunker_params"]["overlap_chars"] >= 0

@@ -32,6 +32,7 @@ from .models import (
 )
 from .repository import (
     CorpusItemNotFound,
+    CorruptCorpusMetadata,
     JsonCorpusRepository,
 )
 
@@ -141,61 +142,70 @@ class CorpusService:
         # Compute first so the dedup short-circuit doesn't write to disk.
         content_sha256 = hashlib.sha256(file_bytes).hexdigest()
 
-        # Search existing items for the same (persona, kind, sha256).
-        # O(N) over persona's items — fine until manifests hit 1k items
-        # (then a denormalized index is the right move, see task #62
-        # followup doc).
-        existing = self._find_by_hash(persona_id, kind, content_sha256)
-        if existing is not None:
-            log.info(
-                "Corpus upload dedup-hit: persona=%s kind=%s sha=%s "
-                "existing=%s",
-                persona_id, kind.value, content_sha256[:12], existing.item_id,
+        # Take a per-persona UPLOAD lock across the dedup scan + save
+        # (review #3 of c7ee1f4 — TOCTOU race). MUST be a different
+        # sentinel from the index.json lock — `repository.save` already
+        # acquires the index lock internally; locking it here too would
+        # deadlock the second uploader's fd against the first's fd on
+        # the same file (POSIX flock is per-fd, not recursive across fds
+        # in the same process).
+        # _exclusive_lock builds `<path>.lock` internally, so pass a
+        # sentinel basename — the actual on-disk file is `_upload.lock`.
+        upload_sentinel = self.repository.corpus_root(persona_id) / "_upload"
+        upload_sentinel.parent.mkdir(parents=True, exist_ok=True)
+        with self.repository._exclusive_lock(upload_sentinel):
+            existing = self._find_by_hash(persona_id, kind, content_sha256)
+            if existing is not None:
+                log.info(
+                    "Corpus upload dedup-hit: persona=%s kind=%s sha=%s "
+                    "existing=%s",
+                    persona_id, kind.value, content_sha256[:12], existing.item_id,
+                )
+                return existing
+
+            item_id = str(uuid.uuid4())
+            now = datetime.now(timezone.utc)
+            sanitized_filename = _UNSAFE_FILENAME_CHARS.sub("_", filename)
+            item = CorpusItem(
+                item_id=item_id,
+                persona_id=persona_id,
+                kind=kind,
+                filename=sanitized_filename,
+                mime_type=mime_type,
+                size_bytes=len(file_bytes),
+                content_sha256=content_sha256,
+                status=CorpusItemStatus.uploaded,
+                source=source,
+                source_date=source_date,
+                listener_tag=listener_tag,
+                persona_speaker_alias=persona_speaker_alias,
+                notes=notes,
+                created_at=now,
+                updated_at=now,
             )
-            return existing
 
-        item_id = str(uuid.uuid4())
-        now = datetime.now(timezone.utc)
-        sanitized_filename = _UNSAFE_FILENAME_CHARS.sub("_", filename)
-        item = CorpusItem(
-            item_id=item_id,
-            persona_id=persona_id,
-            kind=kind,
-            filename=sanitized_filename,
-            mime_type=mime_type,
-            size_bytes=len(file_bytes),
-            content_sha256=content_sha256,
-            status=CorpusItemStatus.uploaded,
-            source=source,
-            source_date=source_date,
-            listener_tag=listener_tag,
-            persona_speaker_alias=persona_speaker_alias,
-            notes=notes,
-            created_at=now,
-            updated_at=now,
-        )
+            # Write the original bytes BEFORE saving metadata so a crash
+            # mid-upload doesn't leave a dangling index entry. If
+            # metadata save then fails (disk full, JSON encode error),
+            # rmtree the item dir so the bytes aren't orphaned (review
+            # #13).
+            item_dir = self.repository.item_dir_for_kind(persona_id, kind.value, item_id)
+            item_dir.mkdir(parents=True, exist_ok=True)
+            original_path = item_dir / f"{self.ORIGINAL_PREFIX}{ext}"
+            original_path.write_bytes(file_bytes)
 
-        # Write the original bytes BEFORE saving metadata so a crash
-        # mid-upload doesn't leave a dangling index entry. If metadata
-        # save then fails (disk full, JSON encode error), rmtree the item
-        # dir so the original bytes aren't orphaned on disk (review #13).
-        item_dir = self.repository.item_dir_for_kind(persona_id, kind.value, item_id)
-        item_dir.mkdir(parents=True, exist_ok=True)
-        original_path = item_dir / f"{self.ORIGINAL_PREFIX}{ext}"
-        original_path.write_bytes(file_bytes)
+            try:
+                self.repository.save(item)
+            except Exception:
+                import shutil
+                shutil.rmtree(item_dir, ignore_errors=True)
+                raise
 
-        try:
-            self.repository.save(item)
-        except Exception:
-            import shutil
-            shutil.rmtree(item_dir, ignore_errors=True)
-            raise
-
-        log.info(
-            "Corpus upload: persona=%s kind=%s item=%s filename=%s bytes=%d",
-            persona_id, kind.value, item_id, sanitized_filename, len(file_bytes),
-        )
-        return item
+            log.info(
+                "Corpus upload: persona=%s kind=%s item=%s filename=%s bytes=%d",
+                persona_id, kind.value, item_id, sanitized_filename, len(file_bytes),
+            )
+            return item
 
     # ------------------------------------------------------------------
     # Read
@@ -261,11 +271,16 @@ class CorpusService:
         kind: CorpusItemKind,
         content_sha256: str,
     ) -> Optional[CorpusItem]:
-        """O(N) scan for an existing item matching (persona, kind, hash).
+        """O(N) scan for an existing NON-FAILED item matching
+        (persona, kind, hash).
 
         Used by `upload` to short-circuit duplicate uploads. Returns the
-        existing CorpusItem (not the new one we'd have created). N today
-        is the number of items in this persona's corpus.
+        existing CorpusItem (not the new one we'd have created).
+
+        Failed items are deliberately NOT matched (review #1 of c7ee1f4):
+        re-uploading the same bytes after a failed ingest should produce
+        a NEW item (the user is retrying), not silently return the
+        broken one and pretend the upload succeeded.
         """
         try:
             existing = self.repository.list(persona_id)
@@ -275,6 +290,7 @@ class CorpusService:
             if (
                 item.kind == kind
                 and item.content_sha256 == content_sha256
+                and item.status != CorpusItemStatus.failed
             ):
                 return item
         return None

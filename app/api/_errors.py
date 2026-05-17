@@ -239,6 +239,13 @@ class InvalidCorpusIdError(DomainError):
     error_code = "invalid_corpus_id"
 
 
+class CorpusIngestionInProgressError(DomainError):
+    """Another /ingest call is already running for this item.
+    Review #9 of c7ee1f4."""
+    status_code = 409
+    error_code = "ingestion_in_progress"
+
+
 # ---------------------------------------------------------------------------
 # Generic input errors (rare — prefer specific subclasses).
 # ---------------------------------------------------------------------------
