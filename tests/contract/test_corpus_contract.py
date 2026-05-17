@@ -165,11 +165,20 @@ class TestCorpusListGetDelete:
             assert item.persona_id == PERSONA_ID
 
     def test_get_404_for_missing_item(self, client):
-        r = client.get(f"/api/corpus/{PERSONA_ID}/items/no-such-id")
+        # Well-formed UUID that simply doesn't exist → 404.
+        missing = "00000000-0000-4000-8000-000000000000"
+        r = client.get(f"/api/corpus/{PERSONA_ID}/items/{missing}")
         assert r.status_code == 404
         body = r.json()
         assert body["error"] == "corpus_item_not_found"
-        assert body["details"]["item_id"] == "no-such-id"
+        assert body["details"]["item_id"] == missing
+
+    def test_get_400_for_malformed_item_id(self, client):
+        # After review #11 fix: malformed item_id is 400, not 404 — it's
+        # caught by the ID-format validator before any disk lookup.
+        r = client.get(f"/api/corpus/{PERSONA_ID}/items/no-such-id")
+        assert r.status_code == 400
+        assert r.json()["error"] == "invalid_corpus_id"
 
     def test_delete_removes_item(self, client):
         up = _upload(client)
@@ -184,9 +193,64 @@ class TestCorpusListGetDelete:
         assert g.status_code == 404
 
     def test_delete_404_for_missing_item(self, client):
-        r = client.delete(f"/api/corpus/{PERSONA_ID}/items/no-such-id")
+        missing = "00000000-0000-4000-8000-000000000000"
+        r = client.delete(f"/api/corpus/{PERSONA_ID}/items/{missing}")
         assert r.status_code == 404
         assert r.json()["error"] == "corpus_item_not_found"
+
+
+# ---------------------------------------------------------------------------
+# Security: cross-persona path traversal (review #11)
+# ---------------------------------------------------------------------------
+class TestCorpusIdValidation:
+    """Lock the persona_id / item_id validator added per review #11.
+
+    Every shape of malformed ID — empty, path-traversal, NUL bytes,
+    uppercase, leading digit — must be rejected with 400, not silently
+    accepted into a directory traversal.
+    """
+
+    BAD_PERSONA_IDS = [
+        "",                  # empty
+        "/",                 # root
+        "..",                # parent
+        "../other",          # traversal
+        "/etc/passwd",       # absolute
+        "foo/../bar",        # mid-traversal
+        "Foo",               # uppercase
+        "1foo",              # leading digit
+        "foo bar",           # whitespace
+        "foo\x00bar",        # NUL byte
+    ]
+
+    @pytest.mark.parametrize("bad_pid", BAD_PERSONA_IDS)
+    def test_upload_rejects_bad_persona_id(self, client, bad_pid):
+        # NUL/whitespace/`/` would fail FastAPI's Form decoder before
+        # hitting our validator — accept either rejection path (400 or
+        # 422) — the contract is "the upload doesn't succeed."
+        r = _upload(client, persona_id=bad_pid, content=b"hi", filename="x.txt")
+        assert r.status_code in (400, 422), (
+            f"persona_id={bad_pid!r} should have been rejected but got "
+            f"{r.status_code}: {r.text}"
+        )
+
+    @pytest.mark.parametrize("bad_pid", ["..", "../other", "foo bar", "1foo", "Foo"])
+    def test_list_rejects_bad_persona_id(self, client, bad_pid):
+        r = client.get(f"/api/corpus/{bad_pid}")
+        # Some traversal shapes can't even reach the route because of
+        # FastAPI path-segment escaping; we accept any 4xx that isn't 200.
+        assert 400 <= r.status_code < 500
+        assert r.status_code != 200
+
+    def test_manifest_rejects_bad_persona_id(self, client):
+        r = client.get(f"/api/corpus/..%2F..%2Fother/manifest")
+        assert r.status_code in (400, 404)
+
+    def test_delete_rejects_bad_item_id(self, client):
+        r = client.delete(f"/api/corpus/{PERSONA_ID}/items/../etc/passwd")
+        # FastAPI may 404 (route mismatch) or our validator may 400.
+        # Either way it must not delete anything.
+        assert r.status_code in (400, 404, 405)
 
 
 # ---------------------------------------------------------------------------

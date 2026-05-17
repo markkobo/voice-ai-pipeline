@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +34,20 @@ from .repository import (
     JsonCorpusRepository,
 )
 
+
+# Persona/item id format — same as personas service. Locks down path
+# segments so `persona_id="../other"` / `"/"` / `""` / `"foo\x00bar"`
+# can't traverse the corpus tree. Server-generated UUIDs match this
+# pattern by construction; we still validate item_id on lookup paths
+# so client-supplied IDs in GET/DELETE/INGEST can't escape.
+_PERSONA_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
+_ITEM_ID_PATTERN = re.compile(r"^[a-f0-9-]{8,64}$")  # uuid4 form
+
+# Filename sanitization (review #16). Strip control chars + path
+# separators + NUL bytes before persisting. We keep the raw filename
+# field but make it safe for log lines and JSON consumers.
+_UNSAFE_FILENAME_CHARS = re.compile(r"[\x00-\x1f\x7f/\\]")
+
 log = logging.getLogger(__name__)
 
 
@@ -53,6 +68,11 @@ class CorpusTooLargeError(CorpusUploadError):
 
 class CorpusEmptyError(CorpusUploadError):
     """Upload is zero bytes."""
+
+
+class InvalidCorpusIdError(CorpusUploadError):
+    """persona_id or item_id failed the regex check — likely path-traversal
+    attempt or empty string. Maps to 400."""
 
 
 # ---------------------------------------------------------------------------
@@ -88,11 +108,15 @@ class CorpusService:
     ) -> CorpusItem:
         """Persist a new corpus item from raw upload bytes.
 
-        Validates extension/size/non-empty. Returns the new CorpusItem in
-        `uploaded` state — ingestion is a separate later step.
+        Validates persona_id format (security — review #11), extension,
+        size, non-empty. Returns the new CorpusItem in `uploaded` state —
+        ingestion is a separate later step.
+
+        Orphan-cleanup on save-failure (review #13): if metadata write
+        crashes after the original bytes have been written, we rmtree the
+        item dir so disk doesn't drift.
         """
-        if not persona_id:
-            raise CorpusUploadError("persona_id is required")
+        _validate_persona_id(persona_id)
 
         if not file_bytes:
             raise CorpusEmptyError("Empty upload")
@@ -113,11 +137,12 @@ class CorpusService:
 
         item_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc)
+        sanitized_filename = _UNSAFE_FILENAME_CHARS.sub("_", filename)
         item = CorpusItem(
             item_id=item_id,
             persona_id=persona_id,
             kind=kind,
-            filename=filename,
+            filename=sanitized_filename,
             mime_type=mime_type,
             size_bytes=len(file_bytes),
             status=CorpusItemStatus.uploaded,
@@ -130,16 +155,24 @@ class CorpusService:
         )
 
         # Write the original bytes BEFORE saving metadata so a crash
-        # mid-upload doesn't leave a dangling index entry.
+        # mid-upload doesn't leave a dangling index entry. If metadata
+        # save then fails (disk full, JSON encode error), rmtree the item
+        # dir so the original bytes aren't orphaned on disk (review #13).
         item_dir = self.repository.item_dir_for_kind(persona_id, kind.value, item_id)
         item_dir.mkdir(parents=True, exist_ok=True)
         original_path = item_dir / f"{self.ORIGINAL_PREFIX}{ext}"
         original_path.write_bytes(file_bytes)
 
-        self.repository.save(item)
+        try:
+            self.repository.save(item)
+        except Exception:
+            import shutil
+            shutil.rmtree(item_dir, ignore_errors=True)
+            raise
+
         log.info(
             "Corpus upload: persona=%s kind=%s item=%s filename=%s bytes=%d",
-            persona_id, kind.value, item_id, filename, len(file_bytes),
+            persona_id, kind.value, item_id, sanitized_filename, len(file_bytes),
         )
         return item
 
@@ -147,18 +180,24 @@ class CorpusService:
     # Read
     # ------------------------------------------------------------------
     def list(self, persona_id: str) -> list[CorpusItem]:
+        _validate_persona_id(persona_id)
         return self.repository.list(persona_id)
 
     def get(self, persona_id: str, item_id: str) -> CorpusItem:
+        _validate_persona_id(persona_id)
+        _validate_item_id(item_id)
         return self.repository.get(persona_id, item_id)
 
     def delete(self, persona_id: str, item_id: str) -> None:
+        _validate_persona_id(persona_id)
+        _validate_item_id(item_id)
         self.repository.delete(persona_id, item_id)
 
     # ------------------------------------------------------------------
     # Manifest — rolled-up view for the UI and downstream consumers.
     # ------------------------------------------------------------------
     def compute_manifest(self, persona_id: str) -> CorpusManifest:
+        _validate_persona_id(persona_id)
         items = self.repository.list(persona_id)
 
         by_kind: dict[str, int] = {k.value: 0 for k in CorpusItemKind}
@@ -194,3 +233,24 @@ class CorpusService:
     def _extension(filename: str) -> str:
         _, ext = os.path.splitext(filename)
         return ext.lower()
+
+
+# ---------------------------------------------------------------------------
+# ID validators — module-level so repository helpers and tests can call them
+# (review #11 — cross-persona path traversal). Cheap, runs on every
+# read/write path that takes a persona_id from the API.
+# ---------------------------------------------------------------------------
+def _validate_persona_id(persona_id: str) -> None:
+    if not persona_id or not _PERSONA_ID_PATTERN.match(persona_id):
+        raise InvalidCorpusIdError(
+            f"Invalid persona_id {persona_id!r}: must match "
+            f"{_PERSONA_ID_PATTERN.pattern!r}"
+        )
+
+
+def _validate_item_id(item_id: str) -> None:
+    if not item_id or not _ITEM_ID_PATTERN.match(item_id):
+        raise InvalidCorpusIdError(
+            f"Invalid item_id {item_id!r}: must match "
+            f"{_ITEM_ID_PATTERN.pattern!r}"
+        )

@@ -311,6 +311,7 @@ async def run_llm_stream(
     listener_id: Optional[str],
     llm_model: Optional[str],
     tts_model: str = "1.7B",
+    utterance_seq: int = 0,
 ) -> None:
     """
     Run LLM streaming and parse emotion tags.
@@ -321,10 +322,15 @@ async def run_llm_stream(
     client = get_llm_client()
     cancellation_event = asyncio.Event()
 
-    # Register task in state manager for cancellation
+    # Register task in state manager for cancellation. Pass the seq so
+    # the latched-cancel check honors only cancels stamped for this
+    # utterance (review #21).
     task = asyncio.current_task()
     if task:
-        state_manager.set_llm_task(session_id, task, cancellation_event)
+        state_manager.set_llm_task(
+            session_id, task, cancellation_event,
+            utterance_seq=utterance_seq,
+        )
 
     # Get persona-aware system prompt
     system_prompt = prompt_manager.get_prompt(
@@ -687,9 +693,14 @@ async def websocket_endpoint(websocket: WebSocket):
                             index_name="default",
                         ).observe(rag_elapsed)
 
+                        # Bump utterance seq BEFORE create_task so a cancel
+                        # arriving immediately afterward stamps the right
+                        # seq (review #21 stale-cancel-race fix).
+                        utterance_seq = state_manager.begin_utterance(session_id)
+
                         # Start LLM streaming in background task (cancellable on barge-in).
-                        # Hold a strong ref so Python's GC can't drop the task
-                        # before run_llm_stream registers it with state_manager.
+                        # Hold a strong ref so the task isn't dropped before
+                        # run_llm_stream registers it with state_manager.
                         _llm_bg_task = asyncio.create_task(
                             run_llm_stream(
                                 websocket=websocket,
@@ -699,6 +710,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                 listener_id=listener_id,
                                 llm_model=llm_model,
                                 tts_model=tts_model,
+                                utterance_seq=utterance_seq,
                             )
                         )
                         _llm_task_refs.add(_llm_bg_task)
@@ -759,7 +771,10 @@ async def websocket_endpoint(websocket: WebSocket):
                     await safe_send_text(websocket, vad_result)
 
     except WebSocketDisconnect:
+        # Cancel the in-flight LLM with a distinct origin so the diagnostic
+        # log doesn't blame the disconnect on `remove_session` (review #22).
         log.info(f"[{session_id}] Client disconnected")
+        state_manager.cancel_llm_task(session_id, origin="ws_disconnect")
     except Exception as e:
         log.exception(f"[{session_id}] Error: {e}")
         metrics.errors_total.labels(

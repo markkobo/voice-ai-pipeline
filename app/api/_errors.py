@@ -232,6 +232,13 @@ class CorpusIngestionFailedError(DomainError):
     error_code = "ingestion_failed"
 
 
+class InvalidCorpusIdError(DomainError):
+    """persona_id or item_id failed the format check — likely path
+    traversal attempt or empty string. RFC_M6 Phase 0 review #11."""
+    status_code = 400
+    error_code = "invalid_corpus_id"
+
+
 # ---------------------------------------------------------------------------
 # Generic input errors (rare — prefer specific subclasses).
 # ---------------------------------------------------------------------------

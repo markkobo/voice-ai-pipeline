@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -70,34 +71,140 @@ EXTRACTED_FILENAME = "extracted.txt"
 CHUNKS_FILENAME = "chunks.jsonl"
 
 
-def _extract_plaintext(path: Path) -> str:
-    """Read a UTF-8 text file. Tolerate BOM and CRLF."""
-    raw = path.read_bytes()
-    # Strip UTF-8 BOM if present so it doesn't leak into chunks.
-    if raw.startswith(b"\xef\xbb\xbf"):
-        raw = raw[3:]
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Write text atomically via tempfile + os.replace (review #6).
+
+    Same pattern as JsonCorpusRepository._atomic_write_json. Same-directory
+    tempfile ensures os.replace is atomic on POSIX.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_str = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    tmp = Path(tmp_str)
     try:
-        text = raw.decode("utf-8")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        if tmp.exists():
+            tmp.unlink()
+        raise
+
+
+def _extract_plaintext(path: Path) -> str:
+    """Read a text file with codec auto-detection.
+
+    Strategy (review #1 — Big5 silent-mis-decode disaster):
+
+    1. UTF-8 BOM → utf-8-sig
+    2. UTF-16 BE/LE BOM → utf-16-{be,le} (review #10)
+    3. utf-8 strict
+    4. **big5 before gb18030** — gb18030 is permissive enough to accept
+       Big5 byte sequences and decode them to mojibake without raising.
+       Try the stricter codec first.
+    5. gb18030
+    6. utf-16 (without BOM, both endians) with sanity check
+
+    Each non-UTF-8 candidate is sanity-checked: if the decoded text has
+    too many U+FFFD replacement chars OR is dominated by non-CJK garbage
+    in private-use blocks (the Big5-as-gb18030 mojibake signature), it
+    fails over to the next codec.
+    """
+    raw = path.read_bytes()
+
+    # BOM-based fast paths.
+    if raw.startswith(b"\xef\xbb\xbf"):
+        return _normalize_newlines(raw[3:].decode("utf-8"))
+    if raw.startswith(b"\xff\xfe"):
+        return _normalize_newlines(raw[2:].decode("utf-16-le"))
+    if raw.startswith(b"\xfe\xff"):
+        return _normalize_newlines(raw[2:].decode("utf-16-be"))
+
+    # Strict UTF-8 first — covers the dominant case.
+    try:
+        return _normalize_newlines(raw.decode("utf-8"))
     except UnicodeDecodeError:
-        # Try GB18030 (Simplified Chinese) and Big5 (Traditional) — both
-        # common for Chinese-language plaintext from non-UTF-8 sources.
-        for enc in ("gb18030", "big5", "utf-16"):
-            try:
-                text = raw.decode(enc)
-                log.info("Decoded %s as %s", path.name, enc)
-                break
-            except UnicodeDecodeError:
-                continue
+        pass
+
+    # Candidate codecs in priority order. big5 strict comes BEFORE
+    # gb18030 — gb18030's permissive coverage causes silent mojibake on
+    # Big5 input (review #1). For each candidate that decodes without
+    # raising, sanity-check the output and accept only if it looks like
+    # real text.
+    for enc in ("big5", "gb18030", "utf-16-le", "utf-16-be"):
+        try:
+            text = raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+        if _looks_like_real_text(text):
+            log.info("Decoded %s as %s", path.name, enc)
+            return _normalize_newlines(text)
         else:
-            raise ExtractionFailedError(
-                f"Could not decode {path.name} as any of "
-                "utf-8/gb18030/big5/utf-16"
+            log.debug(
+                "Decode %s as %s produced mojibake-shaped output, "
+                "trying next codec", path.name, enc,
             )
 
-    # Normalize line endings to \n. Leave the rest of the text alone so
-    # chunker can use paragraph boundaries (\n\n) and Chinese punctuation
-    # without us second-guessing the source.
-    return text.replace("\r\n", "\n").replace("\r", "\n")
+    raise ExtractionFailedError(
+        f"Could not decode {path.name} as any of "
+        "utf-8/big5/gb18030/utf-16; file may be binary or corrupt"
+    )
+
+
+def _normalize_newlines(text: str) -> str:
+    """Normalize CR/LF/CRLF + line/paragraph separators to \n.
+
+      LINE SEPARATOR and   PARAGRAPH SEPARATOR are produced
+    by some Word→.txt and Mac exports; the chunker's paragraph regex
+    won't see them otherwise (review #13).
+    """
+    return (
+        text
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace(" ", "\n")
+        .replace(" ", "\n\n")
+        .replace("\x00", "")  # strip embedded NULs (review #12)
+    )
+
+
+def _looks_like_real_text(text: str) -> bool:
+    """Cheap sanity check on a decoded string.
+
+    Designed to catch the Big5-as-gb18030 mojibake case (review #1).
+    Returns False when:
+      - more than 0.5% of chars are U+FFFD replacement chars
+      - more than 30% of non-ASCII chars fall in CJK Compatibility
+        Ideographs / Private Use Areas (the gb18030 mojibake signature)
+      - empty after stripping
+    """
+    if not text or not text.strip():
+        return False
+    sample = text[:8000]  # cheap — only look at the head
+    n = len(sample)
+    if n == 0:
+        return True
+
+    replacement_chars = sample.count("�")
+    if replacement_chars > n * 0.005:
+        return False
+
+    # Count chars in suspicious Unicode blocks. Big5-decoded-as-gb18030
+    # tends to land disproportionately in Private Use Area (U+E000..F8FF)
+    # and CJK Compatibility (U+F900..FAFF).
+    suspicious = sum(
+        1 for c in sample if 0xE000 <= ord(c) <= 0xFAFF
+    )
+    non_ascii = sum(1 for c in sample if ord(c) > 0x7F)
+    if non_ascii > 50 and suspicious > non_ascii * 0.30:
+        return False
+
+    return True
 
 
 def _extract_conversation(path: Path) -> str:
@@ -210,6 +317,13 @@ class IngestionService:
         and re-counts chars/chunks. That's intentional so the user can
         re-run after a chunker tweak without deleting first.
         """
+        # Validate IDs early — repository.get will resolve paths from
+        # these values; an unvalidated `persona_id="../other"` would
+        # bypass the corpus tree (review #11).
+        from .service import _validate_item_id, _validate_persona_id
+        _validate_persona_id(persona_id)
+        _validate_item_id(item_id)
+
         item = self.repository.get(persona_id, item_id)
         original_path = self._find_original(item)
         ext = original_path.suffix.lower()
@@ -240,17 +354,18 @@ class IngestionService:
             raise ExtractionFailedError("Extracted text is empty")
 
         # Write extracted.txt + chunks.jsonl atomically alongside metadata.
+        # tempfile+os.replace pair avoids torn writes when two concurrent
+        # /ingest calls race on the same item (review #6).
         item_dir = self.repository.item_dir_for_kind(
             persona_id, item.kind.value, item_id,
         )
-        (item_dir / EXTRACTED_FILENAME).write_text(text, encoding="utf-8")
-
         chunks = chunk_text(
             text,
             target_chars=self.target_chunk_chars,
             overlap_chars=self.overlap_chars,
         )
-        self._write_chunks(item_dir / CHUNKS_FILENAME, chunks, item)
+        _atomic_write_text(item_dir / EXTRACTED_FILENAME, text)
+        self._write_chunks_atomic(item_dir / CHUNKS_FILENAME, chunks, item)
 
         # Flip status + counts.
         def _flip(it: CorpusItem) -> None:
@@ -272,45 +387,52 @@ class IngestionService:
     def _find_original(self, item: CorpusItem) -> Path:
         """Locate original.<ext> within the item dir.
 
-        We stored it as `original.<ext>` at upload time (see
-        CorpusService.upload). Use the recorded filename to recover the
-        extension — it could differ from the on-disk ext if the upload
-        was renamed, but that doesn't happen today.
+        Uses the extension recorded in `item.filename` rather than
+        glob-matching `original.*` (review #3 — glob could match
+        `.lock` sentinel files, `.bak` files from manual recovery, or
+        future siblings).
         """
         item_dir = self.repository.item_dir_for_kind(
             item.persona_id, item.kind.value, item.item_id,
         )
-        # Match anything beginning with "original.".
-        for child in item_dir.iterdir():
-            if child.is_file() and child.name.startswith("original."):
-                return child
+        _, ext = os.path.splitext(item.filename)
+        expected = item_dir / f"original{ext.lower()}"
+        if expected.is_file():
+            return expected
         raise ExtractionFailedError(
-            f"No original.* file in {item_dir}"
+            f"No {expected.name} file in {item_dir}"
         )
 
-    def _write_chunks(
+    def _write_chunks_atomic(
         self,
         chunks_path: Path,
         spans: list[ChunkSpan],
         item: CorpusItem,
     ) -> None:
-        """Write chunks as JSONL — one record per line."""
-        with open(chunks_path, "w", encoding="utf-8") as f:
-            for idx, span in enumerate(spans):
-                record = {
-                    "chunk_index": idx,
-                    "char_offset": span.char_offset,
-                    "char_count": span.char_count,
-                    "text": span.text,
-                    # Pass-through metadata from the item — useful for
-                    # filtering at retrieval time.
-                    "persona_id": item.persona_id,
-                    "item_id": item.item_id,
-                    "kind": item.kind.value,
-                    "listener_tag": item.listener_tag,
-                    "source": item.source,
-                }
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        """Write chunks as JSONL via tempfile + os.replace.
+
+        Two concurrent /ingest calls on the same item used to interleave
+        writes (review #6). Now each writer constructs its own tempfile
+        and atomically replaces — last writer wins on the final file but
+        readers never see a partial JSONL.
+        """
+        lines: list[str] = []
+        for idx, span in enumerate(spans):
+            record = {
+                "chunk_index": idx,
+                "char_offset": span.char_offset,
+                "char_count": span.char_count,
+                "text": span.text,
+                # Pass-through metadata from the item — useful for
+                # filtering at retrieval time.
+                "persona_id": item.persona_id,
+                "item_id": item.item_id,
+                "kind": item.kind.value,
+                "listener_tag": item.listener_tag,
+                "source": item.source,
+            }
+            lines.append(json.dumps(record, ensure_ascii=False))
+        _atomic_write_text(chunks_path, "\n".join(lines) + ("\n" if lines else ""))
 
     def _mark_failed(
         self, persona_id: str, item_id: str, reason: str,

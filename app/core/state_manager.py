@@ -77,6 +77,12 @@ class SessionState:
         self.llm_cancellation_event = None
         self.llm_task = None
         self.llm_pending_cancel = False
+        # Utterance sequence stamping for stale-cancel-race fix
+        # (review #21 of commit 6c9a87a). Each begin_utterance increments
+        # the seq; cancel_llm_task stamps the latch with the current seq;
+        # set_llm_task only honors the latch if the seqs match.
+        self.llm_utterance_seq: int = 0
+        self.llm_pending_cancel_seq: Optional[int] = None
 
         # TTS
         self.tts_session_id = None
@@ -347,11 +353,12 @@ class StateManager:
         """
         Cancel any ongoing LLM streaming task for a session (barge-in).
 
-        If the LLM task hasn't registered itself yet (cancel-during-startup
-        race), latches `llm_pending_cancel=True` so the very next
-        `set_llm_task` call cancels immediately. This fixes a documented
-        baseline failure where cancel-immediately-after-commit was a silent
-        no-op.
+        Latches the cancel intent stamped with the CURRENT utterance seq
+        (review #21 of commit 6c9a87a — stale-cancel race fix). A cancel
+        that arrives between utterance N completing and utterance N+1's
+        `set_llm_task` registration used to silently kill N+1; the
+        sequence stamp ensures the latch is honored only for the
+        utterance it was meant for.
 
         `origin` is logged so the LLM-cancel mystery (open issue #1 in
         _phase2_followups.md) is diagnosable from the server log alone.
@@ -367,11 +374,15 @@ class StateManager:
         had_event = state.llm_cancellation_event is not None and not state.llm_cancellation_event.is_set()
         log.warning(
             f"[{session_id}] cancel_llm_task origin={origin} "
-            f"had_task={had_task} had_event={had_event}"
+            f"had_task={had_task} had_event={had_event} "
+            f"current_seq={state.llm_utterance_seq}"
         )
 
-        # Latch the intent unconditionally — set_llm_task will honor it.
+        # Latch the intent stamped with the current seq. set_llm_task
+        # increments to the next seq before checking — so a cancel for
+        # seq=N never fires on seq=N+1.
         state.llm_pending_cancel = True
+        state.llm_pending_cancel_seq = state.llm_utterance_seq
         was_cancelled = False
 
         if state.llm_cancellation_event is not None and not state.llm_cancellation_event.is_set():
@@ -384,25 +395,58 @@ class StateManager:
 
         return was_cancelled or state.llm_pending_cancel
 
+    def begin_utterance(self, session_id: str) -> int:
+        """Increment the utterance seq before kicking off a new LLM task.
+
+        Called from ws_asr.py:commit_utterance immediately before
+        `asyncio.create_task(run_llm_stream(...))`. Returns the new seq
+        so the caller can hand it to set_llm_task.
+        """
+        state = self._sessions.get(session_id)
+        if not state:
+            return 0
+        state.llm_utterance_seq += 1
+        return state.llm_utterance_seq
+
     def set_llm_task(
         self,
         session_id: str,
         task: asyncio.Task,
         cancellation_event: asyncio.Event,
+        utterance_seq: Optional[int] = None,
     ) -> None:
         """Register an active LLM streaming task for a session.
 
-        Honors any latched `llm_pending_cancel` — if a cancel arrived before
-        this call, fire it immediately so the LLM stream sees a set
-        cancellation_event on its first poll.
+        Honors a latched `llm_pending_cancel` ONLY if it was stamped for
+        the current utterance seq (review #21). A stale cancel from a
+        prior utterance is discarded silently here.
         """
         state = self._sessions.get(session_id)
-        if state:
-            state.llm_task = task
-            state.llm_cancellation_event = cancellation_event
-            if state.llm_pending_cancel:
+        if not state:
+            return
+        state.llm_task = task
+        state.llm_cancellation_event = cancellation_event
+
+        if state.llm_pending_cancel:
+            # The seq comparison: the latch is for `llm_pending_cancel_seq`;
+            # we honor it iff it matches the seq this set_llm_task is for.
+            # If utterance_seq isn't passed (legacy callers), fall back to
+            # the current state seq — which preserves the old behavior.
+            target = utterance_seq if utterance_seq is not None else state.llm_utterance_seq
+            if state.llm_pending_cancel_seq == target:
                 cancellation_event.set()
-                state.llm_pending_cancel = False
+                log.info(
+                    f"[{session_id}] set_llm_task fired latched cancel "
+                    f"for seq={target}"
+                )
+            else:
+                log.info(
+                    f"[{session_id}] discarding stale latched cancel "
+                    f"(latched_for_seq={state.llm_pending_cancel_seq}, "
+                    f"current_seq={target})"
+                )
+            state.llm_pending_cancel = False
+            state.llm_pending_cancel_seq = None
 
     def clear_llm_task(self, session_id: str) -> None:
         """Clear LLM task references after completion or cancellation.
@@ -414,6 +458,7 @@ class StateManager:
         if state:
             state.llm_task = None
             state.llm_pending_cancel = False
+            state.llm_pending_cancel_seq = None
             state.llm_cancellation_event = None
 
     # -------------------------------------------------------------------------

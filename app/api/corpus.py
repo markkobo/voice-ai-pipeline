@@ -28,6 +28,7 @@ from app.api._errors import (
     CorpusIngestionUnsupportedError,
     CorpusItemNotFoundError,
     CorpusTooLargeError,
+    InvalidCorpusIdError,
     UnsupportedCorpusFormatError,
 )
 from app.services.corpus import (
@@ -43,6 +44,7 @@ from app.services.corpus.repository import CorpusItemNotFound
 from app.services.corpus.service import (
     CorpusEmptyError as SvcCorpusEmptyError,
     CorpusTooLargeError as SvcCorpusTooLargeError,
+    InvalidCorpusIdError as SvcInvalidCorpusIdError,
     UnsupportedCorpusFormatError as SvcUnsupportedCorpusFormatError,
 )
 
@@ -105,6 +107,10 @@ async def api_upload_corpus(
             listener_tag=listener_tag,
             notes=notes,
         )
+    except SvcInvalidCorpusIdError as e:
+        raise InvalidCorpusIdError(
+            str(e), details={"persona_id": persona_id},
+        ) from e
     except SvcCorpusEmptyError as e:
         raise CorpusEmptyError(str(e)) from e
     except SvcCorpusTooLargeError as e:
@@ -132,7 +138,12 @@ async def api_list_corpus(
     persona_id: str,
     service: CorpusService = Depends(get_corpus_service),
 ) -> ListResponse:
-    items = service.list(persona_id)
+    try:
+        items = service.list(persona_id)
+    except SvcInvalidCorpusIdError as e:
+        raise InvalidCorpusIdError(
+            str(e), details={"persona_id": persona_id},
+        ) from e
     return ListResponse(
         persona_id=persona_id,
         items=items,
@@ -145,7 +156,12 @@ async def api_get_manifest(
     persona_id: str,
     service: CorpusService = Depends(get_corpus_service),
 ) -> CorpusManifest:
-    return service.compute_manifest(persona_id)
+    try:
+        return service.compute_manifest(persona_id)
+    except SvcInvalidCorpusIdError as e:
+        raise InvalidCorpusIdError(
+            str(e), details={"persona_id": persona_id},
+        ) from e
 
 
 @router.get("/{persona_id}/items/{item_id}", response_model=CorpusItem)
@@ -156,6 +172,11 @@ async def api_get_corpus_item(
 ) -> CorpusItem:
     try:
         return service.get(persona_id, item_id)
+    except SvcInvalidCorpusIdError as e:
+        raise InvalidCorpusIdError(
+            str(e),
+            details={"persona_id": persona_id, "item_id": item_id},
+        ) from e
     except CorpusItemNotFound as e:
         raise CorpusItemNotFoundError(
             f"Corpus item {item_id!r} not found for persona {persona_id!r}",
@@ -173,6 +194,11 @@ async def api_delete_corpus_item(
 ) -> DeleteResponse:
     try:
         service.delete(persona_id, item_id)
+    except SvcInvalidCorpusIdError as e:
+        raise InvalidCorpusIdError(
+            str(e),
+            details={"persona_id": persona_id, "item_id": item_id},
+        ) from e
     except CorpusItemNotFound as e:
         raise CorpusItemNotFoundError(
             f"Corpus item {item_id!r} not found for persona {persona_id!r}",
@@ -201,6 +227,11 @@ async def api_ingest_corpus_item(
     """
     try:
         return ingestion.ingest(persona_id, item_id)
+    except SvcInvalidCorpusIdError as e:
+        raise InvalidCorpusIdError(
+            str(e),
+            details={"persona_id": persona_id, "item_id": item_id},
+        ) from e
     except CorpusItemNotFound as e:
         raise CorpusItemNotFoundError(
             f"Corpus item {item_id!r} not found for persona {persona_id!r}",

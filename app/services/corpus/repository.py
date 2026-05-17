@@ -151,13 +151,25 @@ class JsonCorpusRepository:
         self._index_set(item.persona_id, item.item_id, rel)
 
     def delete(self, persona_id: str, item_id: str) -> None:
+        """Delete an item — race-safe vs a concurrent `update` on the
+        same item (review #12).
+
+        Strategy: hold the item's exclusive metadata lock across
+        rmtree + index-remove. A concurrent `update` blocks on the lock,
+        then sees the metadata file missing (FileNotFoundError) and
+        bails with CorpusItemNotFound — vs the prior failure where it
+        could resurrect a deleted item dir via mkdir(parents=True).
+        """
         rel = self._lookup_rel(persona_id, item_id)
         if rel is None:
             raise CorpusItemNotFound(item_id)
         item_path = self.corpus_root(persona_id) / rel
-        if item_path.exists():
-            shutil.rmtree(item_path)
-        self._index_remove(persona_id, item_id)
+        meta_path = item_path / self.METADATA_FILENAME
+
+        with self._exclusive_lock(meta_path):
+            if item_path.exists():
+                shutil.rmtree(item_path)
+            self._index_remove(persona_id, item_id)
 
     def update(
         self,
@@ -170,6 +182,13 @@ class JsonCorpusRepository:
             raise CorpusItemNotFound(item_id)
         meta_path = self.corpus_root(persona_id) / rel / self.METADATA_FILENAME
         with self._exclusive_lock(meta_path):
+            # Re-check inside the lock — a concurrent delete may have
+            # rmtree'd the dir between our index lookup and our lock
+            # acquisition (review #12). Without this re-check, the
+            # subsequent _atomic_write_json would mkdir(parents=True)
+            # and resurrect a deleted item dir.
+            if not meta_path.exists():
+                raise CorpusItemNotFound(item_id)
             item = self._read_metadata_locked(meta_path)
             mutator(item)
             item.updated_at = datetime.now(timezone.utc)

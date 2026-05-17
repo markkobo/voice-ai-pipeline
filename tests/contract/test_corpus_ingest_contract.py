@@ -139,10 +139,19 @@ class TestIngestPlainText:
 # ---------------------------------------------------------------------------
 class TestIngestErrors:
     def test_ingest_unknown_item_404(self, client):
-        r = client.post(f"/api/corpus/{PERSONA_ID}/items/no-such-id/ingest")
+        # Well-formed UUID that doesn't exist → 404.
+        missing = "00000000-0000-4000-8000-000000000000"
+        r = client.post(f"/api/corpus/{PERSONA_ID}/items/{missing}/ingest")
         assert r.status_code == 404
         body = r.json()
         assert body["error"] == "corpus_item_not_found"
+
+    def test_ingest_malformed_item_id_400(self, client):
+        # After review #11 fix: malformed item_id is 400 (validator),
+        # not 404 (would have required a disk lookup).
+        r = client.post(f"/api/corpus/{PERSONA_ID}/items/no-such-id/ingest")
+        assert r.status_code == 400
+        assert r.json()["error"] == "invalid_corpus_id"
 
     def test_upload_rejects_unsupported_until_slice_2c(self, client):
         # Slice 2B fix to review #3: ALLOWED_EXTENSIONS_BY_KIND now
