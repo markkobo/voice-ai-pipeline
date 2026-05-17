@@ -22,6 +22,15 @@ import re
 from dataclasses import dataclass
 
 
+# Bump when the chunking algorithm changes in a way that invalidates
+# previously-produced chunk indices (e.g. boundary preferences shift,
+# target_chars default changes, runt-folding rules change).
+# Task 62B / review #5 of 8161535 — downstream vector indexes can use
+# this to detect "the chunks I have in LanceDB were built under v=1 but
+# the corpus now reports v=2 → re-embed needed."
+CHUNKER_VERSION = 1
+
+
 # Sentence-boundary regex: Chinese full stops + English period/?/! + closing
 # quotes. Matches the same pattern used in app/api/ws_asr.py SENTENCE_SPLIT_RE
 # so chunks fall on TTS-friendly boundaries.

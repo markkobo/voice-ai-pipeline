@@ -9,6 +9,7 @@ breaking the UI / RFC contract.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
@@ -104,6 +105,7 @@ class CorpusService:
         source: Optional[str] = None,
         source_date: Optional[datetime] = None,
         listener_tag: Optional[str] = None,
+        persona_speaker_alias: Optional[str] = None,
         notes: Optional[str] = None,
     ) -> CorpusItem:
         """Persist a new corpus item from raw upload bytes.
@@ -135,6 +137,23 @@ class CorpusService:
                 f"Allowed: {sorted(allowed)}"
             )
 
+        # Content hash for upload-time dedup (task 62B / review #18).
+        # Compute first so the dedup short-circuit doesn't write to disk.
+        content_sha256 = hashlib.sha256(file_bytes).hexdigest()
+
+        # Search existing items for the same (persona, kind, sha256).
+        # O(N) over persona's items — fine until manifests hit 1k items
+        # (then a denormalized index is the right move, see task #62
+        # followup doc).
+        existing = self._find_by_hash(persona_id, kind, content_sha256)
+        if existing is not None:
+            log.info(
+                "Corpus upload dedup-hit: persona=%s kind=%s sha=%s "
+                "existing=%s",
+                persona_id, kind.value, content_sha256[:12], existing.item_id,
+            )
+            return existing
+
         item_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc)
         sanitized_filename = _UNSAFE_FILENAME_CHARS.sub("_", filename)
@@ -145,10 +164,12 @@ class CorpusService:
             filename=sanitized_filename,
             mime_type=mime_type,
             size_bytes=len(file_bytes),
+            content_sha256=content_sha256,
             status=CorpusItemStatus.uploaded,
             source=source,
             source_date=source_date,
             listener_tag=listener_tag,
+            persona_speaker_alias=persona_speaker_alias,
             notes=notes,
             created_at=now,
             updated_at=now,
@@ -233,6 +254,30 @@ class CorpusService:
     def _extension(filename: str) -> str:
         _, ext = os.path.splitext(filename)
         return ext.lower()
+
+    def _find_by_hash(
+        self,
+        persona_id: str,
+        kind: CorpusItemKind,
+        content_sha256: str,
+    ) -> Optional[CorpusItem]:
+        """O(N) scan for an existing item matching (persona, kind, hash).
+
+        Used by `upload` to short-circuit duplicate uploads. Returns the
+        existing CorpusItem (not the new one we'd have created). N today
+        is the number of items in this persona's corpus.
+        """
+        try:
+            existing = self.repository.list(persona_id)
+        except Exception:
+            return None
+        for item in existing:
+            if (
+                item.kind == kind
+                and item.content_sha256 == content_sha256
+            ):
+                return item
+        return None
 
 
 # ---------------------------------------------------------------------------

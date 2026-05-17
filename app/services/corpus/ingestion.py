@@ -42,9 +42,16 @@ from .chat_parsers import (
     parse_whatsapp,
     parse_wechat_csv,
 )
-from .chunker import ChunkSpan, chunk_text
+from .chunker import CHUNKER_VERSION, ChunkSpan, chunk_text
 from .models import CorpusItem, CorpusItemKind, CorpusItemStatus
 from .repository import CorpusItemNotFound, JsonCorpusRepository
+
+# Lazy import: Extractor protocol + default registry. extractors.py
+# imports back from this module via TYPE_CHECKING — keep concrete
+# imports inside functions to avoid cycles at module-load time.
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from .extractors import Extractor, ExtractResult
 
 log = logging.getLogger(__name__)
 
@@ -207,8 +214,12 @@ def _looks_like_real_text(text: str) -> bool:
     return True
 
 
-def _extract_conversation(path: Path) -> str:
+def _extract_conversation_with_metadata(path: Path) -> tuple[str, dict]:
     """Conversation extractor — sniffs the chat-export format and routes.
+
+    Returns `(canonical_text, metadata)` where metadata reports which
+    parser ran and how many messages were produced. Used by the
+    ConversationExtractor (extractors.py) to fill `ExtractResult.metadata`.
 
     Supported sources (slice 2B):
       - WhatsApp .txt
@@ -228,7 +239,10 @@ def _extract_conversation(path: Path) -> str:
             raise ExtractionFailedError(
                 "WeChat CSV parser produced no messages — check column headers"
             )
-        return messages_to_text(msgs)
+        return messages_to_text(msgs), {
+            "format": "wechat_csv",
+            "message_count": len(msgs),
+        }
 
     if ext == ".txt":
         raw = _extract_plaintext(path)
@@ -239,20 +253,26 @@ def _extract_conversation(path: Path) -> str:
             msgs = parse_line(raw)
         elif fmt == "wechat":
             # Detected wechat-shaped header in a .txt — try the CSV
-            # parser. Do NOT fall back to WhatsApp (review #9): if the
-            # CSV parser fails, the file is malformed wechat, not a
-            # WhatsApp export — silently retrying with the wrong parser
-            # produces garbage.
+            # parser. Do NOT fall back to WhatsApp (review #9 of 3f2f55e):
+            # if the CSV parser fails the file is malformed wechat, not
+            # a WhatsApp export — silently retrying with the wrong
+            # parser produces garbage.
             msgs = parse_wechat_csv(raw)
         else:
             # Unknown shape — treat as freeform conversation transcript.
-            log.info("Chat-export format not detected for %s; using plaintext fallback", path.name)
-            return raw
+            log.info(
+                "Chat-export format not detected for %s; using plaintext fallback",
+                path.name,
+            )
+            return raw, {"format": "freeform_text"}
         if not msgs:
             raise ExtractionFailedError(
                 f"Chat parser ({fmt}) ran but produced no messages"
             )
-        return messages_to_text(msgs)
+        return messages_to_text(msgs), {
+            "format": fmt,
+            "message_count": len(msgs),
+        }
 
     if ext == ".json":
         # JSON shapes are too varied to auto-parse — leave for a later
@@ -265,18 +285,10 @@ def _extract_conversation(path: Path) -> str:
     raise ExtractionFailedError(f"No conversation extractor for {ext}")
 
 
-# (kind, ext) → callable(path: Path) -> str
-# Kind-aware so chat-exports (which share extensions with plain text)
-# route to the right parser via `kind=conversation`.
-_EXTRACTORS = {
-    (CorpusItemKind.text, ".txt"): _extract_plaintext,
-    (CorpusItemKind.text, ".md"): _extract_plaintext,
-    (CorpusItemKind.transcript, ".txt"): _extract_plaintext,
-    (CorpusItemKind.transcript, ".md"): _extract_plaintext,
-    (CorpusItemKind.conversation, ".txt"): _extract_conversation,
-    (CorpusItemKind.conversation, ".csv"): _extract_conversation,
-    (CorpusItemKind.conversation, ".json"): _extract_conversation,
-}
+# Back-compat helper for any direct callers still using the old signature.
+def _extract_conversation(path: Path) -> str:
+    text, _meta = _extract_conversation_with_metadata(path)
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -291,22 +303,78 @@ class IngestionService:
         *,
         target_chunk_chars: int = 600,
         overlap_chars: int = 100,
+        extractors: "list[Extractor] | None" = None,
     ) -> None:
         self.repository = repository
         self.target_chunk_chars = target_chunk_chars
         self.overlap_chars = overlap_chars
+        # Lazy default — keeps the import chain clean for tests that
+        # construct IngestionService directly.
+        if extractors is None:
+            from .extractors import default_extractors
+            extractors = default_extractors()
+        self._extractors = extractors
 
     def supported_extensions(self) -> set[str]:
         """Flat set of supported extensions across all kinds.
 
         Used by the API error envelope as a hint to callers. Kind-aware
-        dispatch (e.g. `.txt` routes differently for text vs conversation)
-        is handled inside `ingest()`.
+        dispatch is handled inside `ingest()`.
         """
-        return {ext for (_kind, ext) in _EXTRACTORS.keys()}
+        # Probe every extractor across every kind / common-ext combo.
+        # Kept brute-force-but-cheap since the lists are O(10).
+        common_exts = {
+            ".txt", ".md", ".csv", ".json", ".pdf", ".epub", ".docx",
+            ".mp3", ".wav", ".m4a", ".mp4",
+        }
+        out: set[str] = set()
+        for kind in CorpusItemKind:
+            for ext in common_exts:
+                if self._find_extractor(kind, ext) is not None:
+                    out.add(ext)
+        return out
 
     def supported_for_kind(self, kind: CorpusItemKind) -> set[str]:
-        return {ext for (k, ext) in _EXTRACTORS.keys() if k == kind}
+        common_exts = {
+            ".txt", ".md", ".csv", ".json", ".pdf", ".epub", ".docx",
+            ".mp3", ".wav", ".m4a", ".mp4",
+        }
+        return {
+            ext for ext in common_exts
+            if self._find_extractor(kind, ext) is not None
+        }
+
+    def _find_extractor(
+        self, kind: CorpusItemKind, ext: str,
+    ) -> "Extractor | None":
+        for extractor in self._extractors:
+            if extractor.supports(kind, ext):
+                return extractor
+        return None
+
+    def sweep_stranded(self, persona_id: str) -> int:
+        """Reset any items stuck in `ingesting` status to `failed`.
+
+        Run at server startup so crashed/killed-mid-ingest items don't
+        stay stuck forever (task 62C). Synchronous ingest today means
+        an item in `ingesting` state at startup definitely means the
+        process died before completing.
+
+        Returns the number of items reset.
+        """
+        count = 0
+        for item in self.repository.list(persona_id):
+            if item.status == CorpusItemStatus.ingesting:
+                def _flip(it: CorpusItem, _id=item.item_id) -> None:
+                    it.status = CorpusItemStatus.failed
+                    it.error = "interrupted (server restarted mid-ingest)"
+                self.repository.update(persona_id, item.item_id, _flip)
+                count += 1
+                log.warning(
+                    "Reset stranded ingesting item: persona=%s item=%s",
+                    persona_id, item.item_id,
+                )
+        return count
 
     def ingest(self, persona_id: str, item_id: str) -> CorpusItem:
         """
@@ -325,11 +393,21 @@ class IngestionService:
         _validate_item_id(item_id)
 
         item = self.repository.get(persona_id, item_id)
+
+        # Flip to `ingesting` so a crash mid-ingest leaves the item in
+        # a recoverable state (task 62C / review #4 of 8161535). The
+        # startup-sweep in IngestionService.sweep_stranded() resets
+        # any items stuck in `ingesting` to `failed("interrupted")`.
+        def _start(it: CorpusItem) -> None:
+            it.status = CorpusItemStatus.ingesting
+            it.error = None
+        self.repository.update(persona_id, item_id, _start)
+
         original_path = self._find_original(item)
         ext = original_path.suffix.lower()
 
-        key = (item.kind, ext)
-        if key not in _EXTRACTORS:
+        extractor = self._find_extractor(item.kind, ext)
+        if extractor is None:
             # Mark failed so the manifest reflects reality, but raise
             # so the API can return 4xx.
             self._mark_failed(
@@ -341,7 +419,13 @@ class IngestionService:
 
         # Run the extractor.
         try:
-            text = _EXTRACTORS[key](original_path)
+            result = extractor.extract(original_path)
+            text = result.text
+            for warning in result.warnings:
+                log.warning(
+                    "[%s/%s] extractor warning: %s",
+                    persona_id, item_id, warning,
+                )
         except ExtractionFailedError as e:
             self._mark_failed(persona_id, item_id, str(e))
             raise
@@ -429,7 +513,12 @@ class IngestionService:
                 "item_id": item.item_id,
                 "kind": item.kind.value,
                 "listener_tag": item.listener_tag,
+                "persona_speaker_alias": item.persona_speaker_alias,
                 "source": item.source,
+                # Chunker-algorithm version stamp (task 62B / review #5).
+                # Downstream vector indexes detect a mismatch and
+                # re-embed when the chunker is re-tuned.
+                "chunker_version": CHUNKER_VERSION,
             }
             lines.append(json.dumps(record, ensure_ascii=False))
         _atomic_write_text(chunks_path, "\n".join(lines) + ("\n" if lines else ""))

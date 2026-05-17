@@ -48,8 +48,15 @@ class CorpusItemStatus(str, Enum):
 # Aggregates
 # ---------------------------------------------------------------------------
 class CorpusItem(BaseModel):
-    """One uploaded artifact in the per-persona corpus."""
-    model_config = ConfigDict(extra="forbid")
+    """One uploaded artifact in the per-persona corpus.
+
+    On-disk schema posture: `extra="ignore"` (task 62C / review #19 of
+    a0e7b8e). When a future slice adds a field, rolling back to the old
+    binary won't crash `list()` against forward-written metadata.json.
+    API response shapes (UploadResponse, ListResponse, etc.) keep
+    `extra="forbid"` because they're a public contract.
+    """
+    model_config = ConfigDict(extra="ignore")
 
     item_id: str
     persona_id: str
@@ -58,6 +65,13 @@ class CorpusItem(BaseModel):
     mime_type: Optional[str] = None
     size_bytes: int
     status: CorpusItemStatus = CorpusItemStatus.uploaded
+
+    # SHA-256 of the raw uploaded bytes — enables upload-time dedup
+    # (task 62B / review #18 of 6c9a87a). Two uploads of the same file
+    # produce the same hash; we surface the existing item_id instead of
+    # creating a duplicate corpus entry. Field is Optional only for
+    # backward compat with metadata.json written before task 62B.
+    content_sha256: Optional[str] = None
 
     # Provenance — optional but encouraged. `source` is a free-text label
     # ("私房書 ch.3", "podcast 2024-11-12", "Line export 2024-Q4"). Source
@@ -68,6 +82,14 @@ class CorpusItem(BaseModel):
     # If a conversation is with a specific listener (e.g. user's child),
     # tag it so per-listener retrieval can filter accordingly.
     listener_tag: Optional[str] = None
+
+    # Display-name of the PERSONA in this item — answers "which side of
+    # the conversation is the persona?" for chat exports, "which speaker
+    # is the persona?" for transcripts. Phase 3 LoRA training filters
+    # in-character turns by matching this against per-message sender
+    # (review #15 of 6c9a87a). Optional because text-kind items don't
+    # have multiple speakers.
+    persona_speaker_alias: Optional[str] = None
 
     notes: Optional[str] = None
 

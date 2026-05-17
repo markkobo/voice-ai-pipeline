@@ -14,6 +14,13 @@ from .chat_parsers import (
     parse_wechat_csv,
 )
 from .chunker import ChunkSpan, chunk_text
+from .extractors import (
+    ConversationExtractor,
+    Extractor,
+    ExtractResult,
+    PlaintextExtractor,
+    default_extractors,
+)
 from .ingestion import (
     ExtractionFailedError,
     IngestionError,
@@ -37,13 +44,17 @@ __all__ = [
     "ChatMessage",
     "ChunkSpan",
     "chunk_text",
+    "ConversationExtractor",
     "CorpusItem",
     "CorpusItemKind",
     "CorpusItemStatus",
     "CorpusManifest",
     "CorpusService",
+    "default_extractors",
     "detect_chat_format",
+    "Extractor",
     "ExtractionFailedError",
+    "ExtractResult",
     "IngestionError",
     "IngestionService",
     "JsonCorpusRepository",
@@ -53,5 +64,6 @@ __all__ = [
     "parse_line",
     "parse_whatsapp",
     "parse_wechat_csv",
+    "PlaintextExtractor",
     "UnsupportedIngestionFormatError",
 ]

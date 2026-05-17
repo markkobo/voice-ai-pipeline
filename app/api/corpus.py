@@ -91,6 +91,7 @@ async def api_upload_corpus(
     source: Optional[str] = Form(None),
     source_date: Optional[datetime] = Form(None),
     listener_tag: Optional[str] = Form(None),
+    persona_speaker_alias: Optional[str] = Form(None),
     notes: Optional[str] = Form(None),
     service: CorpusService = Depends(get_corpus_service),
 ) -> UploadResponse:
@@ -105,6 +106,7 @@ async def api_upload_corpus(
             source=source,
             source_date=source_date,
             listener_tag=listener_tag,
+            persona_speaker_alias=persona_speaker_alias,
             notes=notes,
         )
     except SvcInvalidCorpusIdError as e:
