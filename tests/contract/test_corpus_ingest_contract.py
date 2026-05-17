@@ -144,25 +144,21 @@ class TestIngestErrors:
         body = r.json()
         assert body["error"] == "corpus_item_not_found"
 
-    def test_ingest_unsupported_format_415(self, client):
-        # .pdf upload under kind=text is accepted at upload (whitelisted
-        # in ALLOWED_EXTENSIONS_BY_KIND) but slice 2A/2B don't have a
-        # PDF extractor yet → ingestion returns 415.
+    def test_upload_rejects_unsupported_until_slice_2c(self, client):
+        # Slice 2B fix to review #3: ALLOWED_EXTENSIONS_BY_KIND now
+        # matches what ingestion can actually process. PDF/EPUB/DOCX
+        # land in slice 2C — until then, upload rejects them at the
+        # door instead of accepting then 415-ing at ingest time
+        # (the "accept then refuse" anti-pattern).
         up = _upload(
             client,
             kind="text",
             content=b"%PDF-1.4 fake bytes\n",
             filename="book.pdf",
         )
-        assert up.status_code == 200
-        item_id = up.json()["item_id"]
-
-        r = client.post(f"/api/corpus/{PERSONA_ID}/items/{item_id}/ingest")
-        assert r.status_code == 415, r.text
-        body = r.json()
-        assert body["error"] == "ingestion_unsupported_format"
-        assert ".txt" in body["details"]["supported"]
-        assert ".md" in body["details"]["supported"]
+        assert up.status_code == 415, up.text
+        body = up.json()
+        assert body["error"] == "unsupported_corpus_format"
 
 
 # ---------------------------------------------------------------------------

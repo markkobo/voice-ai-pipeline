@@ -131,8 +131,12 @@ def _extract_conversation(path: Path) -> str:
         elif fmt == "line":
             msgs = parse_line(raw)
         elif fmt == "wechat":
-            # Sometimes WeChat dumps come labeled .txt — try CSV first.
-            msgs = parse_wechat_csv(raw) or parse_whatsapp(raw)
+            # Detected wechat-shaped header in a .txt — try the CSV
+            # parser. Do NOT fall back to WhatsApp (review #9): if the
+            # CSV parser fails, the file is malformed wechat, not a
+            # WhatsApp export — silently retrying with the wrong parser
+            # produces garbage.
+            msgs = parse_wechat_csv(raw)
         else:
             # Unknown shape — treat as freeform conversation transcript.
             log.info("Chat-export format not detected for %s; using plaintext fallback", path.name)

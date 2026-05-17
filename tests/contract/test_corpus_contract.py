@@ -93,20 +93,26 @@ class TestCorpusUpload:
         assert r.status_code == 422
 
     def test_upload_extension_pinned_per_kind(self, client):
-        """.json is allowed for conversation kind but not for text kind."""
+        """.csv is allowed for conversation kind but not for text kind.
+
+        Updated after slice 2B review #3: ALLOWED_EXTENSIONS_BY_KIND was
+        tightened so upload only accepts what ingestion can process.
+        .json/.zip/.srt/.vtt land when their respective extractors do
+        (slice 2C/2D).
+        """
         ok = _upload(
             client,
             kind="conversation",
-            filename="export.json",
-            content=b'{"a":1}',
+            filename="export.csv",
+            content=b"time,sender,message\n2024,me,hi\n",
         )
         assert ok.status_code == 200, ok.text
 
         bad = _upload(
             client,
             kind="text",
-            filename="export.json",
-            content=b'{"a":1}',
+            filename="export.csv",
+            content=b"a,b\n1,2\n",
         )
         assert bad.status_code == 415
 
@@ -205,7 +211,8 @@ class TestCorpusManifest:
         _upload(client, kind="text", filename="b.md", content=b"bb")
         _upload(client, kind="transcript", filename="c.txt", content=b"ccc")
         _upload(
-            client, kind="conversation", filename="d.json", content=b'{"d":1}'
+            client, kind="conversation", filename="d.csv",
+            content=b"time,sender,message\n2024,me,hi here\n",
         )
 
         r = client.get(f"/api/corpus/{PERSONA_ID}/manifest")
@@ -214,8 +221,10 @@ class TestCorpusManifest:
         assert parsed.by_kind["text"] == 2
         assert parsed.by_kind["transcript"] == 1
         assert parsed.by_kind["conversation"] == 1
-        # 1 + 2 + 3 + 7 = 13 bytes
-        assert parsed.total_bytes == 13
+        # 1 + 2 + 3 + len(CSV body) bytes
+        assert parsed.total_bytes == 1 + 2 + 3 + len(
+            b"time,sender,message\n2024,me,hi here\n"
+        )
 
     def test_manifest_no_extra_fields_drift(self, client):
         """Body keys are frozen — if a future change adds a field, the

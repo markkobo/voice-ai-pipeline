@@ -120,8 +120,15 @@ LORA_ORGANIC_MIN_CHARS = 150_000      # ~5_000 turns × 30 chars/turn
 
 # Upload guardrails. Mirrors the recordings service's bounds style.
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024    # 200 MB — books/transcripts dominate
+
+# Allowlist == "ingestion can actually process this today" (review #3).
+# When slice 2C adds PDF/EPUB/DOCX, append them to the text kind. When
+# 2D adds audio/video extractors, append .srt/.vtt for transcripts and
+# `.zip` for chat-export bundles to conversation. Until those extractors
+# exist, we don't claim to accept the file. The "accept then 415"
+# anti-pattern was the worst UX shape.
 ALLOWED_EXTENSIONS_BY_KIND: dict[CorpusItemKind, frozenset[str]] = {
-    CorpusItemKind.text: frozenset({".txt", ".md", ".pdf", ".epub", ".docx"}),
-    CorpusItemKind.transcript: frozenset({".txt", ".md", ".srt", ".vtt", ".json"}),
-    CorpusItemKind.conversation: frozenset({".txt", ".json", ".csv", ".zip"}),
+    CorpusItemKind.text: frozenset({".txt", ".md"}),
+    CorpusItemKind.transcript: frozenset({".txt", ".md"}),
+    CorpusItemKind.conversation: frozenset({".txt", ".csv"}),
 }
