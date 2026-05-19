@@ -15,13 +15,14 @@ Removed in Phase 0:
   a real build_training_script() pure function once Phase 1.2 lands.
 """
 
+import json
 import pytest
 import tempfile
 import shutil
 from pathlib import Path
 
 from app.services.training_service.training_job import TrainingJob
-from app.services.training_service.lora_trainer import TrainingConfig
+from app.services.training_service.lora_trainer import TrainingConfig, TrainingResult
 
 
 class TestMergeLoraFunction:
@@ -175,3 +176,54 @@ class TestTrainingJobIntegration:
             )
             assert job.training_type == training_type
             assert job.version_id == f"test_v1_{training_type}"
+
+
+class TestTrainingResultSchema:
+    """
+    Demo-readiness #1 / `_phase2_followups.md §1`:
+    SFT training script writes ``sft_path`` into ``training_result.json``,
+    which the parent job loads via ``TrainingResult(**json.load(f))``.
+    Before the fix that raised ``TypeError`` and left ``index.json`` status
+    at ``"unknown"`` despite a successful merge.
+    """
+
+    def test_training_result_accepts_sft_path(self):
+        """TrainingResult(sft_path=...) must not raise TypeError."""
+        result = TrainingResult(
+            success=True,
+            sft_path="/data/models/merged_qwen3_tts_xiao_s_v2",
+            final_loss=9.6312,
+            training_time_seconds=19440,
+        )
+        assert result.sft_path == "/data/models/merged_qwen3_tts_xiao_s_v2"
+        assert result.success is True
+
+    def test_training_result_sft_path_optional(self):
+        """LoRA runs don't write sft_path; field must default to None."""
+        result = TrainingResult(success=True, lora_path="/x")
+        assert result.sft_path is None
+
+    def test_training_result_round_trip_from_subprocess_json(self):
+        """
+        Mirrors the production subprocess output for a successful SFT run
+        (training script writes this exact shape — see training_job.py:706).
+        The parent ``_run_training`` loads it as
+        ``TrainingResult(**json.load(f))`` — this is the call site that
+        was crashing.
+        """
+        subprocess_output = {
+            "success": True,
+            "sft_path": "/tmp/sft_model",
+            "final_loss": 9.6312,
+            "training_time_seconds": 19440,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            result_file = Path(tmp) / "training_result.json"
+            with open(result_file, "w") as f:
+                json.dump(subprocess_output, f)
+            with open(result_file) as f:
+                result = TrainingResult(**json.load(f))
+        assert result.success is True
+        assert result.sft_path == "/tmp/sft_model"
+        assert result.final_loss == 9.6312
+        assert result.training_time_seconds == 19440

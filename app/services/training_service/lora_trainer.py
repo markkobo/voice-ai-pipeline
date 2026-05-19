@@ -31,9 +31,18 @@ class TrainingConfig:
 
 @dataclass
 class TrainingResult:
-    """Result of training."""
+    """Result of training.
+
+    `sft_path` records where the merged SFT model was written (for
+    traceability — the auto-merge path in `training_job.py` discovers the
+    actual directory via the naming convention). Carried here so that
+    `TrainingResult(**json.load(training_result.json))` doesn't raise
+    TypeError when the SFT subprocess includes it in its output —
+    see `_phase2_followups.md §1` and the demo-readiness audit (#1).
+    """
     success: bool
     lora_path: Optional[str] = None
+    sft_path: Optional[str] = None
     final_loss: Optional[float] = None
     training_time_seconds: Optional[int] = None
     error: Optional[str] = None
