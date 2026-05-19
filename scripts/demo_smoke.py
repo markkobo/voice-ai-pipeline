@@ -300,20 +300,31 @@ def step8_training_versions_ready_active(
     if not active:
         # `active` may not be a per-version field; fall back to checking
         # active_version on system_status (already captured in step 1).
+        # Mind the namespacing: training-versions list returns the BARE
+        # version_id (`v2_20260514_…`) but system_status reports the
+        # TTS-merged-model name (`xiao_s_v2_20260514_…`). Match by suffix.
         ss = state.get("system_status") or {}
-        ss_active = (ss.get("tts") or {}).get("active_version")
-        if ss_active and any(v.get("version_id") == ss_active for v in ready):
-            preview_target = next(
-                v for v in ready if v.get("version_id") == ss_active
-            )
-            state["preview_version_id"] = ss_active
-            final_loss = preview_target.get("final_loss")
+        ss_active = (ss.get("tts") or {}).get("active_version") or ""
+        match = None
+        for v in ready:
+            vid = v.get("version_id") or ""
+            if vid and (vid == ss_active or ss_active.endswith("_" + vid) or ss_active.endswith(vid)):
+                match = v
+                break
+        if match:
+            state["preview_version_id"] = match["version_id"]
+            final_loss = match.get("final_loss")
             tally.passed(
                 8,
-                f"ready+active via system_status: {ss_active!r} final_loss={final_loss}",
+                f"ready+active via system_status: vid={match['version_id']!r} "
+                f"tts_active={ss_active!r} final_loss={final_loss}",
             )
             return
-        tally.failed(8, "no version flagged active=true and no active match via system_status")
+        tally.failed(
+            8,
+            f"no version flagged active=true and no match for tts.active_version="
+            f"{ss_active!r} among ready vids={[v.get('version_id') for v in ready]}",
+        )
         return
     target = active[0]
     state["preview_version_id"] = target.get("version_id")
