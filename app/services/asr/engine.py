@@ -1,10 +1,36 @@
 """ASR (Automatic Speech Recognition) engine module."""
 import asyncio
+import logging
 import time
 import numpy as np
 import struct
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
+
+logger = logging.getLogger(__name__)
+
+
+def set_asr_training_lock(active: bool) -> None:
+    """No-op shim for the training-job lock-release path.
+
+    Demo-readiness #2: ``training_service/training_job.py::_release_training_locks``
+    imports and calls this after every SFT run. Without the symbol the
+    surrounding ``try/except Exception`` swallowed an ``ImportError`` and
+    logged a scary "Failed to release ASR lock" warning after every
+    successful training run.
+
+    Today there is nothing to release — ASR runs serially per WebSocket
+    session and the global ``_cuda_lock`` in the engine module already
+    serializes GPU operations across ASR/TTS. This shim exists so the
+    training-job release path stays a normal import + call, not an
+    ImportError caught by a generic handler. Re-enable into a real lock
+    if/when a future architecture needs a coarser "training in progress"
+    flag visible to ASR.
+
+    Args:
+        active: ignored — kept for API compatibility with the call site.
+    """
+    logger.debug("set_asr_training_lock(%s) — no-op shim", active)
 
 
 class BaseASR(ABC):

@@ -631,6 +631,30 @@ def get_tts_generation_lock() -> _asyncio_for_lock.Lock:
     return _tts_generation_lock
 
 
+def set_tts_training_lock(active: bool) -> None:
+    """No-op shim for the training-job lock-release path.
+
+    Demo-readiness #2: ``training_service/training_job.py::_release_training_locks``
+    imports and calls this after every SFT run. Without the symbol, the
+    surrounding ``try/except Exception`` swallowed an ``ImportError`` and
+    logged a scary "Failed to release TTS lock" warning after every
+    successful training run.
+
+    Today there is nothing to release — GPU serialization lives in the
+    ``_load_lock`` (per-engine RLock) plus ``get_tts_generation_lock()``
+    (asyncio.Lock serializing concurrent generate_streaming calls), both
+    of which are already release-on-exit. This shim exists so the
+    training-job release path stays a normal import + call, not an
+    ImportError caught by a generic handler. Re-enabled into a real lock
+    if/when a future architecture needs a coarser "training in progress"
+    flag visible to TTS.
+
+    Args:
+        active: ignored — kept for API compatibility with the call site.
+    """
+    log.debug("set_tts_training_lock(%s) — no-op shim", active)
+
+
 def get_tts_engine(model_size: str = "1.7B") -> FasterQwenTTSEngine | MockTTSEngine:
     """Get or create the TTS engine singleton."""
     global _tts_engine
