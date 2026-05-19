@@ -75,6 +75,12 @@ class TrainingVersion(BaseModel):
     nickname: Optional[str] = None
     base_model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
     lora_path: Optional[str] = None
+    # Demo-readiness #4: explicit merged-model directory. Persisted by
+    # the training job on completion so TTS activation reads it directly
+    # instead of re-deriving from persona_id underscore-counts. Optional
+    # so legacy index.json (no `merged_path` key) still loads with
+    # `extra="ignore"`.
+    merged_path: Optional[str] = None
     model_type: Optional[str] = None  # "custom_voice" for SFT, None for LoRA
     training_type: Optional[TrainingType] = None
     rank: int = 16

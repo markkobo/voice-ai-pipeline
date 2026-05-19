@@ -895,11 +895,15 @@ if __name__ == "__main__":
                             matching = [v for v in vm.list_versions() if v.lora_path and Path(v.lora_path) == self.version_dir]
                             if matching:
                                 latest = matching[0]
+                                # Persist merged_path so activate_version()
+                                # doesn't have to re-derive it from persona_id
+                                # underscore-counts (demo-readiness #4).
                                 vm.update_version_status(
                                     latest.version_id,
                                     "ready",
                                     final_loss=self._result.final_loss if hasattr(self._result, 'final_loss') else None,
-                                    training_time_seconds=self._result.training_time_seconds if hasattr(self._result, 'training_time_seconds') else None
+                                    training_time_seconds=self._result.training_time_seconds if hasattr(self._result, 'training_time_seconds') else None,
+                                    merged_path=str(merged_path.resolve()),
                                 )
                                 logger.info(f"[TRAINING:{self.version_id[:8]}] Updated index.json status to ready for {latest.version_id}")
                         except Exception as vm_err:

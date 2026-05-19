@@ -36,6 +36,13 @@ class TrainingVersion:
     nickname: Optional[str] = None
     base_model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
     lora_path: Optional[str] = None
+    # Demo-readiness #4: persisted by the training job on success so the
+    # TTS engine's activate_version() doesn't have to re-derive the path
+    # from `persona_id` underscore-counts (brittle for personas like
+    # `elder_gentle_friendly`). Optional — legacy index.json entries
+    # written before this field existed fall back to the naming
+    # convention in `qwen_tts_engine.py::activate_version`.
+    merged_path: Optional[str] = None
     model_type: Optional[str] = None  # "custom_voice" for SFT, None for LoRA
     training_type: Optional[str] = None  # "sft" or "lora"
     rank: int = 16
@@ -62,7 +69,8 @@ class TrainingVersion:
         # Fields that TrainingVersion actually has
         fields = {
             "version_id", "persona_id", "status", "nickname", "base_model",
-            "lora_path", "model_type", "training_type", "rank", "learning_rate", "num_epochs", "batch_size",
+            "lora_path", "merged_path", "model_type", "training_type",
+            "rank", "learning_rate", "num_epochs", "batch_size",
             "final_loss", "training_time_seconds", "recording_ids_used",
             "segment_ids_used", "num_recordings_used", "created_at", "completed_at"
         }
@@ -226,8 +234,16 @@ class VersionManager:
         status: str,
         final_loss: Optional[float] = None,
         training_time_seconds: Optional[int] = None,
+        merged_path: Optional[str] = None,
     ):
-        """Update version status after training."""
+        """Update version status after training.
+
+        Args:
+            merged_path: Optional path to the merged model directory.
+                Persisted on the version so activate_version() can read
+                it directly instead of re-deriving from persona_id
+                underscores (demo-readiness #4).
+        """
         version = self.get_version(version_id)
         if not version:
             logger.error(f"[TRAINING] Version not found: {version_id}")
@@ -238,6 +254,8 @@ class VersionManager:
             version.final_loss = final_loss
         if training_time_seconds is not None:
             version.training_time_seconds = training_time_seconds
+        if merged_path is not None:
+            version.merged_path = merged_path
         if status == "ready":
             version.completed_at = datetime.now().isoformat()
 

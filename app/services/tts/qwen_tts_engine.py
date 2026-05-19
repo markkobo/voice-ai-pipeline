@@ -180,17 +180,34 @@ class FasterQwenTTSEngine:
             log.warning(f"[TTS] Version {version_id} has no lora_path")
             return
 
-        # Look for merged model: merged_{lora_dir_name_without_timestamp}
-        # e.g., data/models/xiao_s_v11_20260330_204755 -> data/models/merged_qwen3_tts_xiao_s_v11
         lora_dir = Path(version.lora_path)
-        parent_dir = lora_dir.parent
-        # Extract version base name (e.g., "xiao_s_v11" from "xiao_s_v11_20260330_204755")
-        # Name format: {persona}_{version}_{timestamp}
-        parts = lora_dir.name.split('_')
-        # First 3 parts: xiao, s, v11 -> xiao_s_v11
-        version_base = '_'.join(parts[:3])
-        merged_name = f"merged_qwen3_tts_{version_base}"
-        merged_path = parent_dir / merged_name
+
+        # Demo-readiness #4: prefer the persisted merged_path on the
+        # version (written by training_job at completion). Falls back to
+        # the legacy `parts[:3]` naming convention so old index.json
+        # entries (pre-merged_path field) still activate.
+        merged_path: Optional[Path] = None
+        stored = getattr(version, "merged_path", None)
+        if stored:
+            candidate = Path(stored)
+            if candidate.exists():
+                merged_path = candidate
+            else:
+                log.warning(
+                    f"[TTS] Stored merged_path {candidate} doesn't exist; "
+                    f"falling back to naming convention"
+                )
+
+        if merged_path is None:
+            # Legacy fallback for index.json entries written before #4.
+            # Name format: {persona}_{version}_{timestamp} with persona
+            # spanning >=1 underscore-segment. The original convention
+            # assumed exactly 2 (`xiao_s`); this still works for that
+            # case and is the best we can do without the persisted path.
+            parts = lora_dir.name.split('_')
+            version_base = '_'.join(parts[:3])
+            merged_name = f"merged_qwen3_tts_{version_base}"
+            merged_path = lora_dir.parent / merged_name
 
         if not merged_path.exists():
             log.warning(f"[TTS] Merged model not found at: {merged_path}")
