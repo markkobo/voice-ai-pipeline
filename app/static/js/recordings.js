@@ -27,9 +27,16 @@
         const listenerSelect = document.getElementById('listenerSelect');
         const personaSelect = document.getElementById('personaSelect');
 
-        // Modal state
-        let modalCallback = null;
-        let modalType = null;
+        // Modal state. The modal supports two flavours: 'persona' (with an
+        // is_family checkbox) and 'listener' (with a default_emotion select).
+        // `modalSubmit` is the async submit handler; it returns either
+        //   { ok: true }                              → modal closes
+        // or
+        //   { ok: false, message, field?: 'name'|'id' } → inline error shown,
+        //                                                modal stays open.
+        let modalSubmit = null;
+        let modalType = null;            // 'persona' | 'listener' | null
+        let modalIdManuallyEdited = false;  // user typed in the id box themselves
 
         // ==================== LOGGING ====================
         function log(message, level = 'info', component = 'UI') {
@@ -67,32 +74,194 @@
         }
 
         // ==================== MODAL ====================
-        function openModal(title, placeholder, callback) {
-            document.getElementById('modalTitle').textContent = title;
-            document.getElementById('modalInput').placeholder = placeholder;
-            document.getElementById('modalInput').value = '';
-            document.getElementById('addModal').classList.add('visible');
-            modalCallback = callback;
-            document.getElementById('modalInput').focus();
+        // Small map of common Chinese kinship / nickname terms → snake_case
+        // ASCII slugs. The ID input is a suggestion only — the user can edit
+        // it freely before confirming, so this list just covers the obvious
+        // family-member words we expect on this page.
+        const _ZH_SLUG_MAP = {
+            '媽': 'mom', '媽媽': 'mama', '阿媽': 'ama', '娘': 'niang',
+            '爸': 'dad', '爸爸': 'baba', '阿爸': 'aba',
+            '小孩': 'child', '孩子': 'kid', '寶寶': 'baby', '寶貝': 'baobei',
+            '哥': 'gege', '哥哥': 'gege', '姐': 'jiejie', '姐姐': 'jiejie',
+            '弟': 'didi', '弟弟': 'didi', '妹': 'meimei', '妹妹': 'meimei',
+            '爺爺': 'yeye', '奶奶': 'nainai',
+            '外公': 'waigong', '外婆': 'waipo',
+            '阿公': 'agong', '阿嬤': 'ama',
+            '叔叔': 'shushu', '阿姨': 'ayi', '舅舅': 'jiujiu', '姑姑': 'gugu',
+            '老師': 'teacher', '同學': 'classmate', '朋友': 'friend',
+            '長輩': 'elder', '記者': 'reporter', '預設': 'default',
+            '小S': 'xiao_s', '小s': 'xiao_s',
+        };
+
+        function slugifyName(name) {
+            if (!name) return '';
+            let raw = String(name).trim();
+            // Exact-match Chinese kinship terms first.
+            if (Object.prototype.hasOwnProperty.call(_ZH_SLUG_MAP, raw)) {
+                return _ZH_SLUG_MAP[raw];
+            }
+            // Substring replacement for combined terms like "Lily 媽媽".
+            let slug = raw;
+            for (const [zh, ascii] of Object.entries(_ZH_SLUG_MAP)) {
+                if (slug.includes(zh)) slug = slug.split(zh).join(' ' + ascii + ' ');
+            }
+            slug = slug
+                .toLowerCase()
+                .replace(/[\s\-\.]+/g, '_')        // whitespace / dash / dot → _
+                .replace(/[^a-z0-9_]/g, '')        // strip everything else
+                .replace(/_+/g, '_')
+                .replace(/^_+|_+$/g, '');
+            // Server requires a leading letter — prepend 'x_' if needed.
+            if (slug && !/^[a-z]/.test(slug)) {
+                slug = 'x_' + slug;
+            }
+            return slug;
+        }
+
+        const _ID_PATTERN = /^[a-z][a-z0-9_]*$/;
+
+        function _modalEls() {
+            return {
+                overlay: document.getElementById('addModal'),
+                content: document.querySelector('#addModal .modal-content'),
+                title: document.getElementById('modalTitle'),
+                nameInput: document.getElementById('modalInput'),
+                idInput: document.getElementById('modalIdInput'),
+                isFamily: document.getElementById('modalIsFamily'),
+                emotion: document.getElementById('modalEmotionSelect'),
+                error: document.getElementById('modalError'),
+                confirm: document.getElementById('modalConfirmBtn'),
+            };
+        }
+
+        function _setModalError(msg, field) {
+            const e = _modalEls();
+            e.error.textContent = msg || '';
+            e.nameInput.classList.toggle('invalid', field === 'name');
+            e.idInput.classList.toggle('invalid', field === 'id');
+        }
+
+        function _resetModal() {
+            const e = _modalEls();
+            e.nameInput.value = '';
+            e.idInput.value = '';
+            e.isFamily.checked = true;
+            e.emotion.value = '溫和';
+            e.nameInput.classList.remove('invalid');
+            e.idInput.classList.remove('invalid');
+            e.error.textContent = '';
+            e.confirm.disabled = false;
+            modalIdManuallyEdited = false;
+        }
+
+        // Generic opener. Sets type ('persona'|'listener'), title, and the
+        // submit handler. Submit handler is async and may return
+        // { ok: false, message, field } to keep the modal open with an
+        // inline error.
+        function openModal({ type, title, defaults, onSubmit }) {
+            modalType = type;
+            modalSubmit = onSubmit;
+            const e = _modalEls();
+            e.content.setAttribute('data-type', type);
+            e.title.textContent = title;
+            _resetModal();
+            if (defaults) {
+                if (defaults.name) e.nameInput.value = defaults.name;
+                if (defaults.id) {
+                    e.idInput.value = defaults.id;
+                    modalIdManuallyEdited = true;
+                }
+                if (typeof defaults.is_family === 'boolean') e.isFamily.checked = defaults.is_family;
+                if (defaults.default_emotion) e.emotion.value = defaults.default_emotion;
+            }
+            e.overlay.classList.add('visible');
+            e.nameInput.focus();
         }
 
         function closeModal() {
-            document.getElementById('addModal').classList.remove('visible');
-            modalCallback = null;
+            const e = _modalEls();
+            e.overlay.classList.remove('visible');
+            modalSubmit = null;
+            modalType = null;
+            _resetModal();
         }
 
-        function confirmModal() {
-            const value = document.getElementById('modalInput').value.trim();
-            if (value && modalCallback) {
-                modalCallback(value);
+        async function confirmModal() {
+            if (!modalSubmit) {
+                closeModal();
+                return;
             }
-            closeModal();
+            const e = _modalEls();
+            const name = e.nameInput.value.trim();
+            // If user never touched the id input, derive it now from the
+            // current name so empty-id submissions still work.
+            if (!modalIdManuallyEdited && !e.idInput.value.trim()) {
+                e.idInput.value = slugifyName(name);
+            }
+            const id = e.idInput.value.trim();
+
+            if (!name) {
+                _setModalError('請輸入名稱', 'name');
+                e.nameInput.focus();
+                return;
+            }
+            if (!id) {
+                _setModalError('請輸入 ID（或先輸入名稱以自動產生）', 'id');
+                e.idInput.focus();
+                return;
+            }
+            if (!_ID_PATTERN.test(id)) {
+                _setModalError('ID 格式不正確：只能小寫字母、數字、底線；以字母開頭', 'id');
+                e.idInput.focus();
+                return;
+            }
+
+            _setModalError('', null);
+            e.confirm.disabled = true;
+            try {
+                const result = await modalSubmit({
+                    name,
+                    id,
+                    is_family: e.isFamily.checked,
+                    default_emotion: e.emotion.value,
+                });
+                if (result && result.ok === false) {
+                    _setModalError(result.message || '新增失敗', result.field || null);
+                    e.confirm.disabled = false;
+                    return;
+                }
+                closeModal();
+            } catch (err) {
+                _setModalError('新增失敗: ' + (err && err.message ? err.message : err), null);
+                e.confirm.disabled = false;
+            }
         }
 
-        // Close modal on Escape key
+        // Live ID suggestion as the user types the name — only as long as
+        // they haven't manually edited the ID field.
+        document.addEventListener('input', (ev) => {
+            if (ev.target && ev.target.id === 'modalInput' && !modalIdManuallyEdited) {
+                const idEl = document.getElementById('modalIdInput');
+                if (idEl) idEl.value = slugifyName(ev.target.value);
+            }
+            if (ev.target && ev.target.id === 'modalIdInput') {
+                // Mark manual edit once user touches the id field directly.
+                modalIdManuallyEdited = true;
+            }
+        });
+
+        // Close modal on Escape; submit on Enter (but only when the modal
+        // is actually open, so global key bindings don't fire spuriously).
         document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') closeModal();
-            if (e.key === 'Enter') confirmModal();
+            const overlay = document.getElementById('addModal');
+            if (!overlay || !overlay.classList.contains('visible')) return;
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                closeModal();
+            } else if (e.key === 'Enter' && e.target && e.target.tagName !== 'BUTTON') {
+                e.preventDefault();
+                confirmModal();
+            }
         });
 
         // ==================== INITIALIZATION ====================
@@ -832,50 +1001,97 @@
         }
 
         // ==================== ADD PERSONA/LISTENER ====================
+        // Maps an API JSON error envelope to an inline modal message. The
+        // backend returns { error, message, details, detail } — see
+        // app/api/_errors.py. We surface a friendly Chinese string keyed off
+        // the `error` code, falling back to the server's message.
+        function _modalErrorFromApi(status, body) {
+            const code = (body && body.error) || '';
+            const apiMsg = (body && (body.message || body.detail)) || '';
+            switch (code) {
+                case 'duplicate_id':
+                    return { message: 'ID 重複，請改用其他 ID', field: 'id' };
+                case 'invalid_id_format':
+                    return { message: 'ID 格式不正確：只能小寫字母、數字、底線；以字母開頭', field: 'id' };
+                case 'invalid_emotion':
+                    return { message: '無效的情緒值', field: null };
+                case 'fixed_persona_readonly':
+                    return { message: '此 ID 為系統固定人格，無法建立', field: 'id' };
+            }
+            if (status === 400) return { message: apiMsg || '格式不正確', field: null };
+            if (status === 409) return { message: apiMsg || 'ID 重複', field: 'id' };
+            if (status === 422) return { message: apiMsg || '欄位驗證失敗', field: null };
+            return { message: apiMsg || `新增失敗 (HTTP ${status})`, field: null };
+        }
+
         function openAddPersonaModal() {
-            openModal('新增人格', '人格名稱', async (name) => {
-                const id = name.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '');
-                try {
-                    const res = await fetch('/api/personas/', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ persona_id: id, name: name, is_family: true })
-                    });
-                    if (!res.ok) {
-                        const err = await res.json();
-                        throw new Error(err.detail || 'Failed to create');
+            openModal({
+                type: 'persona',
+                title: '新增人格',
+                onSubmit: async ({ name, id, is_family }) => {
+                    let res, body;
+                    try {
+                        res = await fetch('/api/personas/', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ persona_id: id, name, is_family }),
+                        });
+                        body = await res.json().catch(() => ({}));
+                    } catch (e) {
+                        return { ok: false, message: '網路錯誤: ' + e.message };
                     }
+                    if (!res.ok) {
+                        return { ok: false, ...(_modalErrorFromApi(res.status, body)) };
+                    }
+                    // Server returns the persona; auto-select by its real id.
+                    const newId = (body && body.persona_id) || id;
                     await loadPersonas();
                     buildRecorderDropdowns();
-                    showToast(`已新增人格: ${name}`, 'success');
+                    personaSelect.value = newId;
+                    // Refresh per-segment dropdowns so the new option appears.
                     filterAndRender();
-                } catch (e) {
-                    showToast('新增失敗: ' + e.message, 'error');
-                }
+                    showToast('新增成功', 'success');
+                    log(`Persona created: ${newId} (${name})`, 'info', 'UI');
+                    return { ok: true };
+                },
             });
         }
 
         function openAddListenerModal() {
-            openModal('新增聆聽者', '聆聽者名稱', async (name) => {
-                const id = name.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '');
-                try {
-                    const res = await fetch('/api/listeners/', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ listener_id: id, name: name, is_family: false })
-                    });
-                    if (!res.ok) {
-                        const err = await res.json();
-                        throw new Error(err.detail || 'Failed to create');
+            openModal({
+                type: 'listener',
+                title: '新增聆聽者',
+                defaults: { is_family: false, default_emotion: '溫和' },
+                onSubmit: async ({ name, id, is_family, default_emotion }) => {
+                    let res, body;
+                    try {
+                        res = await fetch('/api/listeners/', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                listener_id: id,
+                                name,
+                                is_family,
+                                default_emotion,
+                            }),
+                        });
+                        body = await res.json().catch(() => ({}));
+                    } catch (e) {
+                        return { ok: false, message: '網路錯誤: ' + e.message };
                     }
+                    if (!res.ok) {
+                        return { ok: false, ...(_modalErrorFromApi(res.status, body)) };
+                    }
+                    const newId = (body && body.listener_id) || id;
                     await loadListeners();
                     buildListenerFilter();
                     buildRecorderDropdowns();
-                    showToast(`已新增聆聽者: ${name}`, 'success');
+                    listenerSelect.value = newId;
                     filterAndRender();
-                } catch (e) {
-                    showToast('新增失敗: ' + e.message, 'error');
-                }
+                    showToast('新增成功', 'success');
+                    log(`Listener created: ${newId} (${name})`, 'info', 'UI');
+                    return { ok: true };
+                },
             });
         }
 

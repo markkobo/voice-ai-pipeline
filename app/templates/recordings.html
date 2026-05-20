@@ -18,10 +18,37 @@
     <div class="modal-overlay" id="addModal">
         <div class="modal-content">
             <h3 id="modalTitle">新增</h3>
-            <input type="text" id="modalInput" placeholder="名稱">
+            <div class="modal-field">
+                <label for="modalInput">顯示名稱</label>
+                <input type="text" id="modalInput" placeholder="例如：媽媽、小孩、Lily">
+            </div>
+            <div class="modal-field">
+                <label for="modalIdInput">ID <span class="modal-hint">(只能小寫字母、數字、底線；以字母開頭)</span></label>
+                <input type="text" id="modalIdInput" placeholder="例如：mama、grandma_lily">
+            </div>
+            <div class="modal-field modal-field-persona" id="modalFieldIsFamily">
+                <label class="modal-checkbox-label">
+                    <input type="checkbox" id="modalIsFamily" checked>
+                    <span>家庭成員 (is_family)</span>
+                </label>
+            </div>
+            <div class="modal-field modal-field-listener" id="modalFieldEmotion">
+                <label for="modalEmotionSelect">預設情緒</label>
+                <select id="modalEmotionSelect">
+                    <option value="溫和">溫和</option>
+                    <option value="撒嬌">撒嬌</option>
+                    <option value="寵溺">寵溺</option>
+                    <option value="幽默">幽默</option>
+                    <option value="毒舌">毒舌</option>
+                    <option value="開心">開心</option>
+                    <option value="認真">認真</option>
+                    <option value="默認">默認</option>
+                </select>
+            </div>
+            <div class="modal-error" id="modalError"></div>
             <div class="modal-actions">
                 <button class="action-btn" style="background:#666" onclick="closeModal()">取消</button>
-                <button class="action-btn play" onclick="confirmModal()">確認</button>
+                <button class="action-btn play" id="modalConfirmBtn" onclick="confirmModal()">確認</button>
             </div>
         </div>
     </div>
@@ -60,11 +87,17 @@
                 <div class="metadata-selectors">
                     <div class="selector-group">
                         <label>👤 聆聽者</label>
-                        <select id="listenerSelect"></select>
+                        <div class="selector-row">
+                            <select id="listenerSelect"></select>
+                            <button type="button" class="add-btn add-btn-inline" onclick="openAddListenerModal()" title="新增聆聽者" aria-label="新增聆聽者">+</button>
+                        </div>
                     </div>
                     <div class="selector-group">
                         <label>🎭 人格</label>
-                        <select id="personaSelect"></select>
+                        <div class="selector-row">
+                            <select id="personaSelect"></select>
+                            <button type="button" class="add-btn add-btn-inline" onclick="openAddPersonaModal()" title="新增人格" aria-label="新增人格">+</button>
+                        </div>
                     </div>
                 </div>
 
