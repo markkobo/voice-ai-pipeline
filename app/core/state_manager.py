@@ -110,12 +110,23 @@ class StateManager:
         Initialize StateManager.
 
         Args:
-            vad: VAD engine instance (defaults to SileroVAD)
+            vad: VAD engine instance (defaults to EnergyVAD).
+                 Switched from SileroVAD to EnergyVAD 2026-05-20 — the
+                 Silero ONNX model returned ~0 probability on healthy
+                 speech audio (RMS up to 0.15, prob 0.001) even after
+                 a hysteresis-state-machine rewrite, sample-rate fix,
+                 client noise-gate removal, AGC enable, and 512-sample
+                 windowing. Root cause inside Silero never narrowed
+                 down — but per-chunk RMS in the diag log is wildly
+                 distinguishable between speech and silence on real
+                 audio, so a deterministic energy-threshold VAD is the
+                 reliable demo path. SileroVAD code is preserved for
+                 later return.
             asr: ASR engine instance (defaults to Qwen3ASR or MockASR)
             use_qwen: If True and no asr provided, use Qwen3ASR
         """
         self._sessions: Dict[str, SessionState] = {}
-        self._default_vad = vad or SileroVAD()
+        self._default_vad = vad or EnergyVAD()
 
         if asr is not None:
             self._default_asr = asr
@@ -168,19 +179,24 @@ class StateManager:
         state.audio_config.channels = audio_config.get("channels", 1)
         state.audio_config.format = audio_config.get("format", "pcm")
 
-        # VAD sensitivity - use provided value or preserve existing
+        # VAD sensitivity - use provided value or preserve existing.
+        # 2026-05-20: switched from SileroVAD to EnergyVAD — see __init__
+        # comment block. EnergyVAD has the same (is_commit, energy)
+        # interface and the same low/medium/high preset names.
         vad_sensitivity = config.get("vad")
         if vad_sensitivity:
-            state.vad = SileroVAD(
+            state.vad = EnergyVAD(
                 sample_rate=state.audio_config.sample_rate,
                 sensitivity=vad_sensitivity,
+                adaptive=False,  # avoid the speech-during-calibration trap
             )
         else:
             # Recreate VAD with new sample rate, preserve sensitivity
             current_sensitivity = getattr(state.vad, "sensitivity_label", "medium")
-            state.vad = SileroVAD(
+            state.vad = EnergyVAD(
                 sample_rate=state.audio_config.sample_rate,
                 sensitivity=current_sensitivity,
+                adaptive=False,
             )
 
         # Persona / listener
@@ -257,6 +273,26 @@ class StateManager:
 
         # Run VAD detection
         is_commit, avg_prob = state.vad.detect(audio_chunk)
+
+        # DIAGNOSTIC (remove after VAD investigation): per-chunk prob.
+        # Logs the first 30 chunks at INFO so we can see what Silero is
+        # actually producing without spamming logs forever.
+        if not hasattr(state, "_vad_diag_count"):
+            state._vad_diag_count = 0
+        if state._vad_diag_count < 30:
+            import struct as _struct
+            n_samples = len(audio_chunk) // 2
+            if n_samples > 0:
+                samples = _struct.unpack(f"{n_samples}h", audio_chunk[:n_samples * 2])
+                rms = (sum(s * s for s in samples) / n_samples) ** 0.5 / 32768.0
+            else:
+                rms = 0.0
+            log.info(
+                f"[VAD-DIAG] chunk={state._vad_diag_count} "
+                f"bytes={len(audio_chunk)} samples={n_samples} "
+                f"rms={rms:.4f} prob={avg_prob:.3f} commit={is_commit}"
+            )
+            state._vad_diag_count += 1
 
         # Accumulate audio
         state.audio_buffer.extend(audio_chunk)

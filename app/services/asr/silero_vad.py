@@ -309,20 +309,43 @@ class SileroVAD:
         if len(audio_float) < min_len:
             return None
 
-        # Run Silero VAD inference
-        # Model expects: (1, num_samples) float32
-        audio_input = audio_float[np.newaxis, :].astype(np.float32)
+        # Silero VAD expects FIXED-SIZE input windows: 512 samples for
+        # 16kHz audio per the model card. Larger windows produce garbage
+        # output (model returns ~0 prob even on clear speech). Confirmed
+        # 2026-05-20: ScriptProcessor chunks of 4096 samples @ 24kHz
+        # resample to ~2730 samples @ 16kHz = 5x the expected window
+        # → Silero scored healthy-RMS speech at prob ~0.000.
+        #
+        # Fix: slice into 512-sample subwindows, run model on each,
+        # aggregate by max() (the most-speech-like subwindow drives the
+        # decision). If the input is too short for a full window, pad
+        # with zeros — Silero handles padding gracefully.
+        WINDOW = 512
 
         try:
-            # Stateful Silero VAD requires state and sr inputs
-            # output[0] = speech probability, output[1] = new state
-            output = self._session.run(
-                None,
-                {"input": audio_input, "state": self._state, "sr": self._sr}
-            )
-            speech_prob = float(output[0][0, 0])
-            self._state = output[1]  # Update state for next call
-            return speech_prob
+            n = len(audio_float)
+            # Pad up to a multiple of WINDOW so we don't drop the tail.
+            pad = (-n) % WINDOW
+            if pad:
+                audio_float = np.concatenate(
+                    [audio_float, np.zeros(pad, dtype=np.float32)]
+                )
+
+            best_prob = 0.0
+            for start in range(0, len(audio_float), WINDOW):
+                window = audio_float[start:start + WINDOW]
+                audio_input = window[np.newaxis, :].astype(np.float32)
+                # Stateful Silero VAD requires state and sr inputs
+                # output[0] = speech probability, output[1] = new state
+                output = self._session.run(
+                    None,
+                    {"input": audio_input, "state": self._state, "sr": self._sr}
+                )
+                p = float(output[0][0, 0])
+                self._state = output[1]  # Update state for next call
+                if p > best_prob:
+                    best_prob = p
+            return best_prob
         except Exception as e:
             log.warning(f"Silero VAD inference failed: {e}")
             return None

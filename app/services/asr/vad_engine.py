@@ -172,6 +172,20 @@ class EnergyVAD(BaseVAD):
         if num_samples == 0:
             return False, 0.0
 
+        # Recompute frame-budget thresholds from the ACTUAL chunk size
+        # (in samples). The constructor assumed 1440 samples/chunk
+        # (60ms@24kHz) but the chat UI's ScriptProcessor sends 4096
+        # samples (170ms@24kHz). 2026-05-20 fix.
+        actual_chunk_dur = num_samples / self.sample_rate
+        if abs(actual_chunk_dur - self._chunk_duration_sec) > 0.001:
+            self._chunk_duration_sec = actual_chunk_dur
+            self._silence_frames_to_commit = max(1, int(
+                self.silence_duration_to_commit / actual_chunk_dur
+            ))
+            self._min_speech_frames = max(1, int(
+                self.min_speech_duration / actual_chunk_dur
+            ))
+
         sum_squares = sum(s * s for s in samples)
         rms = (sum_squares / num_samples) ** 0.5
         normalized_rms = rms / 32768.0

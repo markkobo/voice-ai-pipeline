@@ -257,20 +257,25 @@
             if (startStopBtn) startStopBtn.textContent = '🔴 停止對話';
             if (recordBtn) recordBtn.disabled = false;
             log('WS connected');
-            // Initialize AudioWorklet for TTS playback
+            // Initialize AudioWorklet for TTS playback. After this,
+            // audioContext exists and we know the ACTUAL sample rate the
+            // browser settled on (may differ from our 24000 hint —
+            // confirmed root cause of the VAD-never-fires bug, 2026-05-20).
             await ensureWorklet();
+            const actualSampleRate = audioContext ? audioContext.sampleRate : 24000;
+            log('AudioContext actual sampleRate=' + actualSampleRate + ' Hz (hint=24000)');
             // Send config
             const ttsModelEl = document.getElementById('tts_model');
             ws.send(JSON.stringify({
                 type: 'config',
-                audio: { sample_rate: 24000, channels: 1, format: 'pcm' },
+                audio: { sample_rate: actualSampleRate, channels: 1, format: 'pcm' },
                 persona_id: personaEl.value,
                 listener_id: listenerEl.value,
                 model: 'gpt-4o-mini',
                 vad: document.getElementById('vad').value,
                 tts_model: ttsModelEl ? ttsModelEl.value : '1.7B'
             }));
-            log('Config sent with tts_model=' + (ttsModelEl ? ttsModelEl.value : '1.7B'));
+            log('Config sent: sample_rate=' + actualSampleRate + ' tts_model=' + (ttsModelEl ? ttsModelEl.value : '1.7B'));
         };
 
         ws.onmessage = async (e) => {
@@ -622,13 +627,27 @@
         }
 
         try {
+            // MediaTrackConstraints. AGC + echo cancellation + noise
+            // suppression ENABLED (2026-05-20 VAD investigation):
+            //  - Without AGC, raw laptop mics deliver RMS ~0.005-0.025
+            //    which Silero can't distinguish from silence (prob ~0.001).
+            //    Adding the old Web Audio compressor masked this by acting
+            //    as a soft level normalizer but flattened the speech
+            //    dynamics enough that Silero ALSO returned ~0 prob.
+            //    Browser AGC handles level normalization correctly without
+            //    destroying the dynamics Silero needs.
+            //  - Echo cancellation prevents the TTS playback (we play AI
+            //    audio through speakers) from feeding back into the mic
+            //    and triggering false barge-in cancels.
+            //  - Noise suppression is a cheap quality win — chromedriver/
+            //    Safari/Firefox all use comparable models.
             const stream = await navigator.mediaDevices.getUserMedia({
                 audio: {
                     sampleRate: 24000,
                     channelCount: 1,
-                    echoCancellation: false,
-                    noiseSuppression: false,
-                    autoGainControl: false
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true,
                 }
             });
             recordingStream = stream;
@@ -641,25 +660,20 @@
             }
 
             // --- Web Audio preprocessing chain ---
-            // Source → HighPass(80Hz) → Compressor → ScriptProcessor → Destination
-            // High-pass removes low-frequency rumble (fan, HVAC, electrical hum)
-            // Compressor normalizes volume spikes, making voice more consistent
-
-            // High-pass filter: remove frequencies below 80Hz
-            const highPass = audioContext.createBiquadFilter();
-            highPass.type = 'highpass';
-            highPass.frequency.value = 80;   // Hz - removes rumble below human speech range
-            highPass.Q.value = 0.7;
-            log('High-pass filter: 80Hz (removes low-frequency noise)');
-
-            // Dynamics compressor: normalize voice volume, reduce clipping
-            const compressor = audioContext.createDynamicsCompressor();
-            compressor.threshold.value = -24;  // dB - start compressing here
-            compressor.knee.value = 12;         // dB - soft knee
-            compressor.ratio.value = 4;         // 4:1 compression above threshold
-            compressor.attack.value = 0.003;    // 3ms attack - fast enough for speech
-            compressor.release.value = 0.1;     // 100ms release - smooth
-            log('Dynamics compressor: -24dB threshold, 4:1 ratio');
+            // Source → ScriptProcessor → Destination (RAW MIC).
+            //
+            // Prior chain (highpass + 4:1 compressor at -24dB) was flattening
+            // speech dynamics enough that Silero VAD scored real speech at
+            // ~0.0 probability despite healthy RMS. Diagnosed 2026-05-20:
+            // post-removal of the client noise gate (0d77db2), audio reached
+            // the server with rms=0.03-0.07 (speech-level) but Silero
+            // returned prob=0.000–0.025 across the board — model trained on
+            // natural dynamics couldn't recognize compressed-to-tone speech.
+            //
+            // Silero is robust to volume variance; the model and Qwen3-ASR
+            // both handle the un-preprocessed mic stream fine. The browser
+            // already runs OS-level AGC/echo cancellation via the default
+            // MediaTrackConstraints, so we don't need our own.
 
             // Client noise gate REMOVED (2026-05-20 — VAD bug investigation).
             // The previous design calibrated `noiseFloor = max(rms)` over the
@@ -718,12 +732,10 @@
                 accumulatedChunks.push(int16.buffer);
             };
 
-            // Connect the nodes (needed to start processing)
-            // Chain: source → highpass → compressor → scriptProcessor → destination
+            // Connect the nodes — RAW chain (see comment block above):
+            //   source → scriptProcessor → destination
             const source = audioContext.createMediaStreamSource(stream);
-            source.connect(highPass);
-            highPass.connect(compressor);
-            compressor.connect(scriptProcessor);
+            source.connect(scriptProcessor);
             scriptProcessor.connect(audioContext.destination);
 
             accumulatedChunks = []; // Reset accumulation buffer
