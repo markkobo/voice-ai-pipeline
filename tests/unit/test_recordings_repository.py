@@ -153,6 +153,125 @@ class TestListToleratesMixedDatetimeAwareness:
 # ---------------------------------------------------------------------------
 # Helper-level unit tests — keeps the walker honest as the model evolves.
 # ---------------------------------------------------------------------------
+class TestSweepStranded:
+    """RecordingsService.sweep_stranded resets recordings stuck in
+    `processing` state to `failed` on startup (mirrors the corpus
+    sweep at `app/services/corpus/ingestion.py::sweep_stranded`).
+
+    Lives here, not in a separate service test file, because there
+    is no test_recordings_service.py yet and these fixtures already
+    set up a working repo on disk.
+    """
+
+    @pytest.fixture
+    def service(self, tmp_path):
+        from app.services.recordings.repository import JsonRecordingsRepository
+        from app.services.recordings.service import RecordingsService
+
+        class _AlwaysValid:
+            def is_valid(self, _id):
+                return True
+
+            def list_ids(self):
+                return {"xiao_s", "child"}
+
+        repo = JsonRecordingsRepository(tmp_path)
+        return RecordingsService(
+            repository=repo,
+            persona_validator=_AlwaysValid(),
+            listener_validator=_AlwaysValid(),
+            audio_root=tmp_path / "recordings" / "raw",
+        )
+
+    def _plant(self, service, *, recording_id, status, segments=None):
+        """Create a recording on disk with a given status (and optional
+        speaker_segments to verify they're preserved across the sweep)."""
+        from app.services.recordings.models import (
+            Recording,
+            RecordingStatus,
+            SpeakerSegment,
+        )
+
+        recording = Recording.new(
+            recording_id=recording_id,
+            folder_name=f"folder_{recording_id}",
+            listener_id="child",
+            persona_id="xiao_s",
+        )
+        recording.status = RecordingStatus(status)
+        if segments:
+            recording.speaker_segments = [SpeakerSegment(**s) for s in segments]
+        service.repository.save(recording)
+        return recording
+
+    def test_sweep_resets_stranded_processing_to_failed(self, service):
+        self._plant(service, recording_id="rec-stranded", status="processing")
+        count = service.sweep_stranded()
+        assert count == 1
+        rec = service.repository.get("rec-stranded")
+        assert rec.status.value == "failed"
+        assert "interrupted" in (rec.error_message or "")
+
+    def test_sweep_leaves_other_statuses_alone(self, service):
+        self._plant(service, recording_id="rec-raw", status="raw")
+        self._plant(service, recording_id="rec-processed", status="processed")
+        self._plant(service, recording_id="rec-failed", status="failed")
+        count = service.sweep_stranded()
+        assert count == 0
+        assert service.repository.get("rec-raw").status.value == "raw"
+        assert service.repository.get("rec-processed").status.value == "processed"
+        assert service.repository.get("rec-failed").status.value == "failed"
+
+    def test_sweep_preserves_partial_speaker_segments(self, service):
+        """If processing got partway and wrote speaker_segments before
+        crashing, the sweep MUST keep them — only the top-level status
+        flips. This is the "don't destroy partial work" guarantee."""
+        self._plant(
+            service,
+            recording_id="rec-partial",
+            status="processing",
+            segments=[
+                {
+                    "speaker_id": "SPEAKER_00",
+                    "start_time": 0.0,
+                    "end_time": 5.0,
+                    "transcription": "嗨大家好",
+                }
+            ],
+        )
+        service.sweep_stranded()
+        rec = service.repository.get("rec-partial")
+        assert rec.status.value == "failed"
+        assert len(rec.speaker_segments) == 1
+        assert rec.speaker_segments[0].speaker_id == "SPEAKER_00"
+        assert rec.speaker_segments[0].transcription == "嗨大家好"
+
+    def test_sweep_tolerates_concurrent_delete(self, service):
+        """If a recording is deleted between list() and update(),
+        the sweep must not crash — just skip and continue. Mirrors
+        the corpus regression at TestSweepHandlesConcurrentDelete."""
+        from unittest.mock import patch
+        from app.services.recordings.repository import RecordingNotFound
+
+        self._plant(service, recording_id="rec-a", status="processing")
+        self._plant(service, recording_id="rec-b", status="processing")
+
+        real_update = service.repository.update
+        calls = {"n": 0}
+
+        def flaky_update(recording_id, mutator):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RecordingNotFound(recording_id)
+            return real_update(recording_id, mutator)
+
+        with patch.object(service.repository, "update", side_effect=flaky_update):
+            # Should not raise — just skip the "missing" item.
+            count = service.sweep_stranded()
+        # One survived to be flipped (the other was "concurrently deleted").
+        assert count == 1
+
+
 class TestCoerceNaiveDatetimesToUtc:
     def test_walks_nested_model_fields(self, repo):
         """Nested ProcessingSteps.{step}.started_at / completed_at should

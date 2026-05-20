@@ -205,6 +205,19 @@ async def startup_event():
     except Exception as e:
         logger.exception(f"Corpus sweep_stranded_all failed: {e}")
 
+    # Reset any recordings left in `processing` state from a previous
+    # crash to `failed` so the "處理中" UI doesn't show ghost rows.
+    # Mirrors the corpus sweep above — recordings processing is a
+    # BackgroundTask, so a server kill mid-job orphans the metadata.
+    try:
+        from app.api._dependencies import _get_or_create_recordings_service
+        rec_svc = _get_or_create_recordings_service(app.state)
+        n = rec_svc.sweep_stranded()
+        if n:
+            logger.warning(f"Reset {n} stranded processing recordings on startup")
+    except Exception as e:
+        logger.exception(f"Recordings sweep_stranded failed: {e}")
+
 
 if __name__ == "__main__":
     import uvicorn

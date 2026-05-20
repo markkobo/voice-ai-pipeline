@@ -580,12 +580,65 @@
                     break;
                 }
             }
+
+            // If a recording has been "processing" for >5 minutes, the
+            // BackgroundTask almost certainly died (real pipeline takes
+            // ~90s max). Show a retry button so the user can recover
+            // without waiting for a server restart sweep.
+            let stuck = false;
+            if (r.updated_at) {
+                const updatedMs = Date.parse(r.updated_at);
+                if (!Number.isNaN(updatedMs)) {
+                    stuck = (Date.now() - updatedMs) > 5 * 60 * 1000;
+                }
+            }
+            const retryBtn = stuck
+                ? `<button class="action-btn parse" style="margin-left:8px" onclick="retryStuckRecording('${r.recording_id}')" title="處理已停滯，點擊重試">🔄 重試</button>`
+                : '';
+
             return `
                 <div class="processing-state">
                     <span class="loading"></span>
                     <span>處理中: ${currentStep || '準備中'}...</span>
+                    ${retryBtn}
                 </div>
             `;
+        }
+
+        async function retryStuckRecording(recordingId) {
+            if (gateIfTraining('重試錄音')) return;
+            log(`Retrying stuck recording: ${recordingId}`, 'info', 'PIPELINE');
+
+            // Optimistic local update — swap the "重試" affordance for a
+            // fresh status string so we don't re-fire on the very next
+            // poll tick while the server is still updating updated_at.
+            const el = document.getElementById(`rec-${recordingId}`);
+            if (el) {
+                const processingState = el.querySelector('.processing-state');
+                if (processingState) {
+                    processingState.innerHTML = '<span class="loading"></span><span>處理中: 重新啟動...</span>';
+                }
+            }
+
+            try {
+                const response = await fetch(`/api/recordings/${recordingId}/process`, {
+                    method: 'POST'
+                });
+                if (!response.ok) {
+                    const err = await response.json().catch(() => ({}));
+                    throw new Error(err.detail || `HTTP ${response.status}`);
+                }
+                log(`Retry triggered for ${recordingId}`, 'info', 'PIPELINE');
+                showToast('已重新啟動處理', 'success');
+                // Re-fetch so the row updates with fresh server state
+                // (status=processing + new updated_at → button hidden).
+                loadRecordings();
+            } catch (e) {
+                log(`Retry failed: ${e.message}`, 'error', 'PIPELINE');
+                showToast('重試失敗: ' + e.message, 'error');
+                // Re-render so the retry button reappears for another try.
+                loadRecordings();
+            }
         }
 
         function renderSegmentRow(r, segment) {

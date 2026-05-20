@@ -34,7 +34,7 @@ from app.api._errors import (
     UnsupportedAudioFormatError,
 )
 
-from .models import Recording, SpeakerSegment
+from .models import Recording, RecordingStatus, SpeakerSegment
 from .repository import RecordingNotFound, RecordingsRepository
 
 log = logging.getLogger(__name__)
@@ -493,6 +493,47 @@ class RecordingsService:
                         recording_id,
                         e,
                     )
+
+    # ------------------------------------------------------------------
+    # Startup sweep — reset stranded `processing` items to `failed`.
+    # ------------------------------------------------------------------
+    def sweep_stranded(self) -> int:
+        """Reset any recordings stuck in `processing` status to `failed`.
+
+        Run at server startup so recordings whose BackgroundTask died
+        (server crash / kill / restart mid-process) don't stay stuck in
+        the "處理中" UI state forever. Mirrors the corpus sweep at
+        `app/services/corpus/ingestion.py::sweep_stranded` (task 62C).
+
+        Tolerates a concurrent delete between list() and update() —
+        a RecordingNotFound from update() just means the user removed
+        the recording while we were iterating; carry on.
+
+        Preserves `speaker_segments` and other partial-work fields —
+        only flips `status` + sets `error_message`.
+
+        Returns the number of recordings reset.
+        """
+        count = 0
+        for recording in self.repository.list():
+            if recording.status != RecordingStatus.processing:
+                continue
+
+            def _flip(rec: Recording) -> None:
+                rec.status = RecordingStatus.failed
+                rec.error_message = "interrupted (server restarted mid-process)"
+
+            try:
+                self.repository.update(recording.recording_id, _flip)
+            except RecordingNotFound:
+                # Concurrent delete won the race — skip.
+                continue
+            count += 1
+            log.warning(
+                "Reset stranded processing recording: id=%s folder=%s",
+                recording.recording_id, recording.folder_name,
+            )
+        return count
 
     # ------------------------------------------------------------------
     # Quality + pipeline hooks (kept thin — pipeline.py owns the heavy work).
