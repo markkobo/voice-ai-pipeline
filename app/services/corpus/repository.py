@@ -250,11 +250,16 @@ class JsonCorpusRepository:
                 f"{meta_path} is not valid JSON: {e}"
             ) from e
         try:
-            return CorpusItem.model_validate(data)
+            item = CorpusItem.model_validate(data)
         except Exception as e:  # pydantic ValidationError + anything else
             raise CorruptCorpusMetadata(
                 f"{meta_path} failed schema validation: {e}"
             ) from e
+        # Coerce any tz-naive datetimes (legacy `datetime.utcnow()` writes)
+        # to UTC so the sort by `created_at` in `list()` never mixes naive and
+        # aware datetimes. See note in recordings/repository.py.
+        _coerce_naive_datetimes_to_utc(item)
+        return item
 
     # ------------------------------------------------------------------
     # POSIX flock + atomic-rename primitives — copied from
@@ -313,3 +318,27 @@ def _json_default(o: object) -> object:
     if isinstance(o, datetime):
         return o.isoformat()
     raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
+
+
+def _coerce_naive_datetimes_to_utc(obj: object) -> None:
+    """Walk a Pydantic model and replace tz-naive datetimes with UTC-tagged
+    equivalents. See `app/services/recordings/repository.py` for the full
+    rationale — kept as a per-module local to avoid a shared utils module."""
+    try:
+        from pydantic import BaseModel
+    except ImportError:  # pragma: no cover
+        return
+
+    if isinstance(obj, BaseModel):
+        for field_name in obj.__class__.model_fields:
+            value = getattr(obj, field_name, None)
+            if isinstance(value, datetime) and value.tzinfo is None:
+                setattr(obj, field_name, value.replace(tzinfo=timezone.utc))
+            else:
+                _coerce_naive_datetimes_to_utc(value)
+    elif isinstance(obj, list):
+        for item in obj:
+            _coerce_naive_datetimes_to_utc(item)
+    elif isinstance(obj, dict):
+        for item in obj.values():
+            _coerce_naive_datetimes_to_utc(item)

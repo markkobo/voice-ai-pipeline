@@ -26,7 +26,7 @@ import os
 import shutil
 import tempfile
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterator, Optional, Protocol
 
@@ -122,8 +122,13 @@ class JsonTrainingRepository:
         if persona_id is not None:
             versions = [v for v in versions if v.persona_id == persona_id]
         # Sort newest first by created_at, falling back to version_id.
+        # `created_at` may be missing (None) for legacy entries; we substitute
+        # an aware sentinel so we never mix naive/aware datetimes in the
+        # comparison. `_coerce_naive_datetimes_to_utc` (in _read_index_locked)
+        # ensures the populated created_at values are also tz-aware.
+        _EPOCH_UTC = datetime.min.replace(tzinfo=timezone.utc)
         versions.sort(
-            key=lambda v: (v.created_at or datetime.min, v.version_id),
+            key=lambda v: (v.created_at or _EPOCH_UTC, v.version_id),
             reverse=True,
         )
         return versions
@@ -325,10 +330,15 @@ class JsonTrainingRepository:
         versions: list[TrainingVersion] = []
         for raw in raw_versions:
             try:
-                versions.append(TrainingVersion.model_validate(raw))
+                v = TrainingVersion.model_validate(raw)
             except Exception as e:
                 log.warning("Skipping invalid version entry: %s (%s)", raw, e)
                 continue
+            # Legacy index.json entries may carry tz-naive `created_at` /
+            # `completed_at`. Coerce so the `list()` sort never mixes naive
+            # and aware datetimes.
+            _coerce_naive_datetimes_to_utc(v)
+            versions.append(v)
         raw_active = data.get("active_version") if isinstance(data, dict) else None
         active: Optional[ActiveVersion] = None
         if raw_active:
@@ -336,6 +346,8 @@ class JsonTrainingRepository:
                 active = ActiveVersion.model_validate(raw_active)
             except Exception as e:
                 log.warning("Active version entry invalid, ignoring: %s (%s)", raw_active, e)
+            else:
+                _coerce_naive_datetimes_to_utc(active)
         return (versions, active)
 
     def _write_index_locked(
@@ -422,3 +434,27 @@ def _json_default(o: object) -> object:
     if isinstance(o, datetime):
         return o.isoformat()
     raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
+
+
+def _coerce_naive_datetimes_to_utc(obj: object) -> None:
+    """Walk a Pydantic model and replace tz-naive datetimes with UTC-tagged
+    equivalents. See `app/services/recordings/repository.py` for rationale.
+    Kept as a per-module local to avoid a shared utils module."""
+    try:
+        from pydantic import BaseModel
+    except ImportError:  # pragma: no cover
+        return
+
+    if isinstance(obj, BaseModel):
+        for field_name in obj.__class__.model_fields:
+            value = getattr(obj, field_name, None)
+            if isinstance(value, datetime) and value.tzinfo is None:
+                setattr(obj, field_name, value.replace(tzinfo=timezone.utc))
+            else:
+                _coerce_naive_datetimes_to_utc(value)
+    elif isinstance(obj, list):
+        for item in obj:
+            _coerce_naive_datetimes_to_utc(item)
+    elif isinstance(obj, dict):
+        for item in obj.values():
+            _coerce_naive_datetimes_to_utc(item)

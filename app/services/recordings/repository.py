@@ -254,9 +254,17 @@ class JsonRecordingsRepository:
         except json.JSONDecodeError as e:
             raise CorruptMetadata(f"{metadata_path} is not valid JSON: {e}") from e
         try:
-            return Recording.model_validate(data)
+            recording = Recording.model_validate(data)
         except Exception as e:  # ValidationError or anything from Pydantic
             raise CorruptMetadata(f"{metadata_path} failed schema validation: {e}") from e
+        # Older metadata.json files were written with `datetime.utcnow().isoformat()`
+        # — tz-naive. Newer code writes `datetime.now(timezone.utc).isoformat()` —
+        # tz-aware. Mixing the two crashes any code that compares the resulting
+        # datetimes (e.g. the sort in `list()`). Coerce naive → UTC at the boundary
+        # so downstream code can assume aware datetimes everywhere. The on-disk
+        # representation is left untouched.
+        _coerce_naive_datetimes_to_utc(recording)
+        return recording
 
     # ------------------------------------------------------------------
     # File locking + atomic write primitives.
@@ -338,3 +346,40 @@ def _json_default(o: object) -> object:
     if isinstance(o, datetime):
         return o.isoformat()
     raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
+
+
+def _coerce_naive_datetimes_to_utc(obj: object) -> None:
+    """
+    Recursively replace any tz-naive `datetime` fields on a Pydantic model
+    (and nested models / lists / dicts thereof) with the same instant tagged
+    as UTC.
+
+    Rationale: some legacy `metadata.json` files on disk were written with
+    `datetime.utcnow()` (tz-naive), while newer code writes
+    `datetime.now(timezone.utc)` (tz-aware). Pydantic happily parses both,
+    but comparing them — as `list()` does when sorting by `created_at` —
+    raises `TypeError: can't compare offset-naive and offset-aware datetimes`.
+    Coercing at the load boundary keeps downstream code simple.
+
+    Mutates `obj` in place. Safe to call on any value — non-models are no-ops.
+    """
+    # Local import to avoid a top-level dependency cycle: pydantic is already
+    # imported transitively via .models, but we want this helper resilient.
+    try:
+        from pydantic import BaseModel
+    except ImportError:  # pragma: no cover - pydantic is a hard dep
+        return
+
+    if isinstance(obj, BaseModel):
+        for field_name in obj.__class__.model_fields:
+            value = getattr(obj, field_name, None)
+            if isinstance(value, datetime) and value.tzinfo is None:
+                setattr(obj, field_name, value.replace(tzinfo=timezone.utc))
+            else:
+                _coerce_naive_datetimes_to_utc(value)
+    elif isinstance(obj, list):
+        for item in obj:
+            _coerce_naive_datetimes_to_utc(item)
+    elif isinstance(obj, dict):
+        for item in obj.values():
+            _coerce_naive_datetimes_to_utc(item)
