@@ -756,7 +756,7 @@
                                     完成: ${completedDate}
                                 </div>
                                 <div class="version-stats">
-                                    Loss: ${lossStr} | Epochs: ${v.num_epochs} | LR: ${lrStr} ${batchInfo}
+                                    <span title="Loss 數值單獨看沒意義 — 按右側 ▶ 預覽 聽實際音質才是真正的判斷依據">Loss: ${lossStr}</span> | Epochs: ${v.num_epochs} | LR: ${lrStr} ${batchInfo}
                                 </div>
                                 <div style="font-size: 0.8rem; margin-top: 5px; color: #666;">
                                     片段: ${recordingCount} 個錄音, ${segmentCount} 個片段
@@ -765,7 +765,7 @@
                             </div>
                             <div class="version-actions">
                                 ${v.status === 'ready' && !isActive ? `<button class="btn-activate" onclick="activateVersion('${v.version_id}')">啟用</button>` : ''}
-                                ${v.status === 'ready' ? `<button class="btn-preview" onclick="previewVersion('${v.version_id}')">▶ 預覽</button>` : ''}
+                                ${v.status === 'ready' ? `<button class="btn-preview" title="試聽此版本的音色 (Loss 不能反映音質，請以此為準)" onclick="previewVersion('${v.version_id}')">▶ 預覽</button>` : ''}
                                 ${v.status !== 'training' ? `
                                     <button class="btn-delete" id="delbtn-${v.version_id}" onclick="confirmDelete('${v.version_id}')">✕</button>
                                     <span id="delcfm-${v.version_id}" class="delete-confirm" style="display: none;">
