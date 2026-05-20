@@ -53,6 +53,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def _no_cache_static(request, call_next):
+    """Force browsers to revalidate /static/* on every request.
+
+    StaticFiles emits Last-Modified + ETag but no Cache-Control, so
+    browsers heuristically cache by mtime — which means after every JS
+    deploy, users see stale code until they hard-refresh manually.
+    Bit user 2026-05-20 (stuck FSM in OLD CONNECTING path despite
+    server having the new code).
+
+    Demo-safe fix: send `Cache-Control: no-cache` for /static/* so the
+    browser always sends If-Modified-Since and we serve fresh bytes.
+    Long-term we should switch to content-hashed asset filenames +
+    immutable cache (see 00df3a5 review #5).
+    """
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return response
+
 # Mount static assets (RFC_M6 Phase 0-pre). All dev-UI CSS + JS lives at
 # `app/static/`; access via `/static/...`.
 app.mount(
