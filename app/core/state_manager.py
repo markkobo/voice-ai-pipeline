@@ -209,9 +209,15 @@ class StateManager:
         if "model" in config:
             state.llm_model = config.get("model")
 
-        # TTS model
+        # TTS model — legacy field (was 0.6B/1.7B base picker, removed
+        # 2026-05-20 when SFT/LoRA shipped: the server now always uses the
+        # active merged model from system_status.tts.active_version, so
+        # this preference is meaningless). Accept the field for backward
+        # compatibility with older clients but persist nothing actionable.
         if "tts_model" in config:
-            state.tts_model = config.get("tts_model")
+            legacy_value = config.get("tts_model")
+            state.tts_model = legacy_value  # kept on session for any logs
+            # Note: ws_asr.py emits a one-line ignore log when it sees this.
 
         state.is_configured = True
         return True

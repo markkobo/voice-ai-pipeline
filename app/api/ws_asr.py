@@ -72,7 +72,6 @@ async def _stream_tts_sentence(
     websocket: WebSocket,
     text: str,
     emotion: str,
-    model_size: str,
     persona_id: Optional[str],
     sentence_idx: int,
     session_id: str = "",
@@ -87,14 +86,19 @@ async def _stream_tts_sentence(
         websocket: Client WebSocket connection
         text: Sentence text to synthesize
         emotion: Emotion tag string
-        model_size: "0.6B" or "1.7B"
         persona_id: Persona ID for voice clone (optional)
         sentence_idx: Index of this sentence in the utterance (for tracking)
+
+    Note: the singleton TTS engine is initialized once at startup and may
+    be re-loaded with a merged SFT model when a version is activated; the
+    legacy 0.6B/1.7B picker was removed 2026-05-20.
     """
     if not text or not text.strip():
         return
 
-    engine = get_tts_engine(model_size=model_size)
+    engine = get_tts_engine()
+    # Read engine's actual loaded model size for the metric label.
+    model_size = getattr(engine, "model_size", "1.7B")
 
     # Phase 1 Path B: Use text enhancement instead of instruct strings
     enhanced_text_content = enhance_text(text.strip(), emotion)
@@ -310,7 +314,6 @@ async def run_llm_stream(
     persona_id: Optional[str],
     listener_id: Optional[str],
     llm_model: Optional[str],
-    tts_model: str = "1.7B",
     utterance_seq: int = 0,
 ) -> None:
     """
@@ -389,7 +392,6 @@ async def run_llm_stream(
                             websocket=websocket,
                             text=tts_text,
                             emotion=current_emotion or "默認",
-                            model_size=tts_model,
                             persona_id=persona_id,
                             sentence_idx=tts_sentence_idx,
                             session_id=session_id,
@@ -422,7 +424,6 @@ async def run_llm_stream(
                                         websocket=websocket,
                                         text=part,
                                         emotion=current_emotion or "默認",
-                                        model_size=tts_model,
                                         persona_id=persona_id,
                                         sentence_idx=tts_sentence_idx,
                                         session_id=session_id,
@@ -454,7 +455,6 @@ async def run_llm_stream(
                                         websocket=websocket,
                                         text=part,
                                         emotion=current_emotion or "默認",
-                                        model_size=tts_model,  # Use user's selected TTS model
                                         persona_id=persona_id,
                                         sentence_idx=tts_sentence_idx,
                                         session_id=session_id,
@@ -483,7 +483,6 @@ async def run_llm_stream(
                                         websocket=websocket,
                                         text=part,
                                         emotion=current_emotion or "默認",
-                                        model_size=tts_model,
                                         persona_id=persona_id,
                                         sentence_idx=tts_sentence_idx,
                                         session_id=session_id,
@@ -534,7 +533,6 @@ async def run_llm_stream(
                                 websocket=websocket,
                                 text=remaining,
                                 emotion=current_emotion or "默認",
-                                model_size=tts_model,
                                 persona_id=persona_id,
                                 sentence_idx=tts_sentence_idx,
                                 session_id=session_id,
@@ -654,6 +652,16 @@ async def websocket_endpoint(websocket: WebSocket):
                             f"listener={payload.get('listener_id')}, "
                             f"model={payload.get('model')}"
                         )
+                        # Legacy tts_model preference (0.6B/1.7B picker) was
+                        # removed 2026-05-20 — server always uses the active
+                        # SFT/LoRA merged model now. We accept the field for
+                        # backward compatibility but log+ignore it.
+                        if "tts_model" in payload:
+                            log.info(
+                                f"[{session_id}] ignoring legacy "
+                                f"tts_model={payload.get('tts_model')!r} "
+                                f"(server uses active version)"
+                            )
 
                         if not success:
                             await websocket.close(code=1003, reason="Failed to apply config")
@@ -682,7 +690,6 @@ async def websocket_endpoint(websocket: WebSocket):
                         persona_id = state.persona_id
                         listener_id = state.listener_id
                         llm_model = state.llm_model
-                        tts_model = state.tts_model or "1.7B"  # Default to 1.7B
 
                         # M1 stub for RAG retrieval time
                         rag_start = time.perf_counter()
@@ -709,7 +716,6 @@ async def websocket_endpoint(websocket: WebSocket):
                                 persona_id=persona_id,
                                 listener_id=listener_id,
                                 llm_model=llm_model,
-                                tts_model=tts_model,
                                 utterance_seq=utterance_seq,
                             )
                         )

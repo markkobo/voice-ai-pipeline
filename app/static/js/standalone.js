@@ -264,18 +264,19 @@
             await ensureWorklet();
             const actualSampleRate = audioContext ? audioContext.sampleRate : 24000;
             log('AudioContext actual sampleRate=' + actualSampleRate + ' Hz (hint=24000)');
-            // Send config
-            const ttsModelEl = document.getElementById('tts_model');
+            // Send config. tts_model was removed 2026-05-20 — the server
+            // always uses the active SFT version
+            // (system_status.tts.active_version); the legacy 0.6B/1.7B
+            // picker was vestigial once LoRA training shipped.
             ws.send(JSON.stringify({
                 type: 'config',
                 audio: { sample_rate: actualSampleRate, channels: 1, format: 'pcm' },
                 persona_id: personaEl.value,
                 listener_id: listenerEl.value,
                 model: 'gpt-4o-mini',
-                vad: document.getElementById('vad').value,
-                tts_model: ttsModelEl ? ttsModelEl.value : '1.7B'
+                vad: document.getElementById('vad').value
             }));
-            log('Config sent: sample_rate=' + actualSampleRate + ' tts_model=' + (ttsModelEl ? ttsModelEl.value : '1.7B'));
+            log('Config sent: sample_rate=' + actualSampleRate);
         };
 
         ws.onmessage = async (e) => {
@@ -440,18 +441,6 @@
         } else {
             startRecording();
         }
-    }
-
-    function onTtsModelChange() {
-        const hint = document.getElementById('ttsModelHint');
-        const modelValue = document.getElementById('tts_model').value;
-        const modelLabel = modelValue === '0.6B' ? '0.6B (快速)' : '1.7B (高品質)';
-        document.getElementById('ttsModelHintValue').textContent = modelLabel;
-        hint.style.display = 'block';
-        hint.style.color = '#00ccff';
-        // Hide after 3 seconds
-        setTimeout(() => { hint.style.display = 'none'; }, 3000);
-        log('TTS model preference set to: ' + modelValue);
     }
 
     function onVadChange() {
@@ -793,14 +782,12 @@
 
     listenerEl.addEventListener('change', () => {
         if (ws && ws.readyState === WebSocket.OPEN) {
-            const ttsModelEl = document.getElementById('tts_model');
             ws.send(JSON.stringify({
                 type: 'config',
                 audio: { sample_rate: 24000, channels: 1, format: 'pcm' },
                 persona_id: personaEl.value,
                 listener_id: listenerEl.value,
-                model: 'gpt-4o-mini',
-                tts_model: ttsModelEl ? ttsModelEl.value : '1.7B'
+                model: 'gpt-4o-mini'
             }));
         }
         // Reload versions when listener changes (persona might be same but different active version)

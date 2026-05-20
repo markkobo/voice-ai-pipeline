@@ -53,6 +53,46 @@ class TestStateManager:
         assert state.audio_config.sample_rate == 16000
         assert state.is_configured is True
 
+    def test_update_config_without_tts_model(self):
+        """Config without tts_model is accepted (2026-05-20: dropdown removed)."""
+        manager = StateManager()
+        manager.create_session("test-session")
+
+        # No tts_model key — the new client never sends it.
+        config = {
+            "audio": {"sample_rate": 24000, "channels": 1, "format": "pcm"},
+            "persona_id": "xiao_s",
+            "listener_id": "child",
+            "model": "gpt-4o-mini",
+            "vad": "medium",
+        }
+
+        assert manager.update_config("test-session", config) is True
+        state = manager.get_session("test-session")
+        assert state.is_configured is True
+        assert state.tts_model is None  # never assigned
+
+    def test_update_config_with_legacy_tts_model_is_accepted(self):
+        """Legacy clients may still send tts_model — server accepts it
+        without error but treats it as a no-op (the engine uses the active
+        SFT version regardless).
+        """
+        manager = StateManager()
+        manager.create_session("test-session")
+
+        config = {
+            "audio": {"sample_rate": 24000, "channels": 1, "format": "pcm"},
+            "persona_id": "xiao_s",
+            "tts_model": "1.7B",  # legacy field
+        }
+
+        assert manager.update_config("test-session", config) is True
+        state = manager.get_session("test-session")
+        # Value is captured on the session for logging visibility, but no
+        # downstream code reads it any more.
+        assert state.tts_model == "1.7B"
+        assert state.is_configured is True
+
     @pytest.mark.asyncio
     async def test_process_audio_empty_buffer(self):
         """Test audio processing with empty buffer returns empty on commit."""
