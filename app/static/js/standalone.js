@@ -661,19 +661,19 @@
             compressor.release.value = 0.1;     // 100ms release - smooth
             log('Dynamics compressor: -24dB threshold, 4:1 ratio');
 
-            // Noise gate state: track running energy to suppress ambient noise
-            // Calibrate on first 10 chunks to establish noise floor
-            const noiseGate = {
-                calibrated: false,
-                noiseFloor: 0.0,
-                sampleCount: 0,
-                calibrationSamples: 10,
-                threshold: 0.015,  // RMS threshold - chunks below this are suppressed
-                // Adaptive: raise threshold slightly above measured noise floor
-                getThreshold: function() {
-                    return Math.max(this.threshold, this.noiseFloor * 2.5);
-                }
-            };
+            // Client noise gate REMOVED (2026-05-20 — VAD bug investigation).
+            // The previous design calibrated `noiseFloor = max(rms)` over the
+            // first 10 ScriptProcessor chunks (~1.7s). Users start speaking
+            // immediately after pressing the mic, so calibration captured
+            // speech-level RMS as the "noise floor", then the post-calibration
+            // threshold (floor × 2.5) silently suppressed all subsequent
+            // speech. Symptom: the server only ever received ~1.7s of audio
+            // and ASR returned the first one or two syllables.
+            //
+            // Server-side Silero VAD is the authoritative gate. The Web Audio
+            // pipeline above (highpass + compressor) already handles
+            // pre-emphasis; the server side handles the actual speech/noise
+            // discrimination.
 
             // Create and configure script processor
             if (scriptProcessor) {
@@ -692,52 +692,30 @@
                 if (!localIsRecording.value) return;
                 const inputData = e.inputBuffer.getChannelData(0); // Float32 mono
 
-                // --- Noise gate: calibrate on first N chunks, then suppress quiet ambient ---
-                let chunkRMS = 0;
-                for (let i = 0; i < inputData.length; i++) {
-                    chunkRMS += inputData[i] * inputData[i];
-                }
-                chunkRMS = Math.sqrt(chunkRMS / inputData.length);
-
-                // Calibrate noise floor from first few chunks
-                if (!noiseGate.calibrated) {
-                    noiseGate.noiseFloor = Math.max(noiseGate.noiseFloor, chunkRMS);
-                    noiseGate.sampleCount++;
-                    if (noiseGate.sampleCount >= noiseGate.calibrationSamples) {
-                        noiseGate.calibrated = true;
-                        log('Noise gate calibrated: floor=' + noiseGate.noiseFloor.toFixed(4) +
-                            ', threshold=' + noiseGate.getThreshold().toFixed(4));
-                    }
-                }
-
-                // Suppress chunks below adaptive threshold (gating, not muting)
-                // Mute entirely if not yet calibrated
-                if (!noiseGate.calibrated || chunkRMS >= noiseGate.getThreshold()) {
-                    // Debug: check if audio data is non-zero
+                // First 3 chunks: log avg-abs to confirm mic is producing
+                // non-zero signal (preserved from earlier debug). Server-
+                // side Silero VAD does the real speech/noise discrimination.
+                if (debugSampleCount < 3) {
                     let sum = 0;
                     for (let i = 0; i < inputData.length; i++) {
                         sum += Math.abs(inputData[i]);
                     }
-                    debugSum += sum;
                     debugSampleCount++;
-                    if (debugSampleCount <= 3) {
-                        log('audio chunk ' + debugSampleCount + ': avg_abs=' + (sum/inputData.length).toFixed(4));
-                    }
-
-                    // Convert Float32 [-1,1] -> Int16 [−32768, 32767]
-                    const int16 = new Int16Array(inputData.length);
-                    for (let i = 0; i < inputData.length; i++) {
-                        const s = Math.max(-1, Math.min(1, inputData[i]));
-                        int16[i] = s < 0 ? s * 32768 : s * 32767;
-                    }
-                    // Send chunk to server immediately for VAD processing
-                    if (ws && ws.readyState === WebSocket.OPEN) {
-                        ws.send(int16.buffer);
-                    }
-                    // Also accumulate for later sending on commit
-                    accumulatedChunks.push(int16.buffer);
+                    log('audio chunk ' + debugSampleCount + ': avg_abs=' + (sum/inputData.length).toFixed(4));
                 }
-                // else: chunk suppressed by noise gate - do NOT send or accumulate
+
+                // Convert Float32 [-1,1] -> Int16 [−32768, 32767]
+                const int16 = new Int16Array(inputData.length);
+                for (let i = 0; i < inputData.length; i++) {
+                    const s = Math.max(-1, Math.min(1, inputData[i]));
+                    int16[i] = s < 0 ? s * 32768 : s * 32767;
+                }
+                // Send chunk to server immediately for VAD processing
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(int16.buffer);
+                }
+                // Also accumulate for later sending on commit
+                accumulatedChunks.push(int16.buffer);
             };
 
             // Connect the nodes (needed to start processing)

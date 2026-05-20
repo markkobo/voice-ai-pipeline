@@ -379,11 +379,11 @@ class SileroVAD:
                     self._vad_state = _STATE_SPEECH
                     self._consec_above = 0
                     self._consec_below = 0
+                    log.info(
+                        f"[VAD] SILENCE→SPEECH prob={prob:.3f} "
+                        f"min_silence_frames={self._min_silence_frames}"
+                    )
             else:
-                # Any frame below speech_threshold breaks the streak.
-                # NB this means a single dip resets the onset counter —
-                # min_speech_duration of 0.15s (~3 frames at 60ms)
-                # demands sustained energy.
                 self._consec_above = 0
             return False, prob
 
@@ -392,14 +392,17 @@ class SileroVAD:
             self._consec_below += 1
             if self._consec_below >= self._min_silence_frames:
                 # Confirmed end-of-speech — commit.
+                log.info(
+                    f"[VAD] SPEECH→SILENCE commit prob={prob:.3f} "
+                    f"silent_frames={self._consec_below}/{self._min_silence_frames}"
+                )
                 self._vad_state = _STATE_SILENCE
                 self._consec_above = 0
                 self._consec_below = 0
                 return True, prob
         else:
-            # Any frame at or above silence_threshold breaks the
-            # silence streak — this is the hysteresis band that
-            # prevents flicker.
+            # Hysteresis band — speech is still going (or noise floor
+            # transient); reset the silence streak.
             self._consec_below = 0
         return False, prob
 
