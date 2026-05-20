@@ -264,7 +264,8 @@ function renderUI() {
     statusEl.textContent = pill.text;
 
     const btnByState = {
-        [STATE.IDLE]:       { txt: '連線中…',    disabled: true,  cls: 'primary' },
+        // IDLE = disconnected. Click → reconnect. Distinct from CONNECTING.
+        [STATE.IDLE]:       { txt: '🔌 重新連線', disabled: false, cls: 'primary' },
         [STATE.CONNECTING]: { txt: '連線中…',    disabled: true,  cls: 'primary' },
         [STATE.READY]:      { txt: '🎤 開始說話', disabled: false, cls: 'primary' },
         [STATE.LISTENING]:  { txt: '✋ 送出',     disabled: false, cls: 'primary recording' },
@@ -323,8 +324,39 @@ function clearConversation() {
     log('Conversation cleared');
 }
 
+// Heartbeat ping + auto-reconnect state. Cloudflared (and many corporate
+// proxies) kill WebSockets after ~100s of no traffic. A periodic
+// no-op message keeps the connection warm; auto-reconnect with
+// exponential backoff handles the failures that slip through.
+let _heartbeatTimer = null;
+let _reconnectAttempts = 0;
+const HEARTBEAT_INTERVAL_MS = 30 * 1000;  // 30s — well below the 100s cutoff
+const MAX_RECONNECT_DELAY_MS = 10 * 1000;
+
+function _stopHeartbeat() {
+    if (_heartbeatTimer) {
+        clearInterval(_heartbeatTimer);
+        _heartbeatTimer = null;
+    }
+}
+
+function _scheduleReconnect() {
+    const delay = Math.min(
+        MAX_RECONNECT_DELAY_MS,
+        500 * Math.pow(2, _reconnectAttempts),
+    );
+    _reconnectAttempts++;
+    log('Auto-reconnect scheduled in ' + delay + 'ms (attempt ' + _reconnectAttempts + ')');
+    setTimeout(() => {
+        if (state === STATE.IDLE) connect();
+    }, delay);
+}
+
 function connect() {
-    if (ws) ws.close();
+    if (ws) {
+        try { ws.close(); } catch (e) {}
+    }
+    _stopHeartbeat();
     transition(STATE.CONNECTING, 'connect()');
     ws = new WebSocket(WS_URL);
     ws.binaryType = 'arraybuffer';
@@ -358,6 +390,17 @@ function connect() {
             log('Config send failed: ' + e.message);
         }
         transition(STATE.READY, 'ws.onopen');
+        // Heartbeat to keep the cloudflared/proxy WebSocket from being
+        // killed at ~100s of inactivity. Server tolerates unknown msg
+        // types — no server change needed.
+        _reconnectAttempts = 0;
+        _stopHeartbeat();
+        _heartbeatTimer = setInterval(() => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                try { ws.send(JSON.stringify({type: 'ping'})); }
+                catch (e) { log('ping failed: ' + e.message); }
+            }
+        }, HEARTBEAT_INTERVAL_MS);
     };
 
     ws.onmessage = async (e) => {
@@ -382,6 +425,7 @@ function connect() {
     };
 
     ws.onclose = () => {
+        _stopHeartbeat();
         if (state === STATE.LISTENING) {
             if (scriptProcessor) { scriptProcessor.disconnect(); scriptProcessor = null; }
             if (recordingStream) { recordingStream.getTracks().forEach(t => t.stop()); recordingStream = null; }
@@ -392,6 +436,11 @@ function connect() {
         }
         transition(STATE.IDLE, 'ws.onclose');
         log('WS disconnected');
+        // Auto-reconnect with backoff. User can still click "重新連線" in
+        // IDLE to skip the wait. Reset attempts counter on successful
+        // onopen so a long-stable connection that drops once doesn't
+        // start at a huge backoff.
+        _scheduleReconnect();
     };
 
     ws.onerror = (e) => log('WS error: ' + JSON.stringify(e));
@@ -480,6 +529,11 @@ async function onPrimaryClick() {
         log('ensureWorklet failed (will retry on next click): ' + e.message);
     }
     switch (state) {
+        case STATE.IDLE:
+            // Disconnected — user clicked "重新連線" to manually reconnect.
+            log('Manual reconnect from IDLE');
+            connect();
+            break;
         case STATE.READY:
             startRecording();
             break;

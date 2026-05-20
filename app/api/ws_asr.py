@@ -781,6 +781,15 @@ async def websocket_endpoint(websocket: WebSocket):
         # log doesn't blame the disconnect on `remove_session` (review #22).
         log.info(f"[{session_id}] Client disconnected")
         state_manager.cancel_llm_task(session_id, origin="ws_disconnect")
+    except RuntimeError as e:
+        # Starlette raises RuntimeError('Cannot call "receive" once a disconnect
+        # message has been received.') instead of WebSocketDisconnect in some
+        # paths — treat it as a normal disconnect, not an error to log.
+        if "disconnect" in str(e).lower():
+            log.info(f"[{session_id}] Client disconnected (post-disconnect receive)")
+            state_manager.cancel_llm_task(session_id, origin="ws_disconnect")
+        else:
+            raise
     except Exception as e:
         log.exception(f"[{session_id}] Error: {e}")
         metrics.errors_total.labels(
