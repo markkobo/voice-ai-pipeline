@@ -550,12 +550,34 @@ async function onPrimaryClick() {
 }
 
 function sendCancel() {
+    // Cancel any TTS audio mid-buffer.
     if (audioWorkletNode) {
         try { audioWorkletNode.port.postMessage({ type: 'flush' }); } catch(e) {}
     }
     if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'control', action: 'cancel' }));
         log('Sent cancel');
+    }
+    // Optimistic UI transition — the user clicked 中斷 to escape THINKING/
+    // SPEAKING regardless of whether the server has anything to cancel.
+    // Server may not emit `llm_cancelled` if the LLM task already
+    // completed (server log: `had_task=False had_event=False`) — without
+    // this optimistic transition the FSM would stay in THINKING forever.
+    if (state === STATE.THINKING || state === STATE.SPEAKING) {
+        ttsText = '';
+        ttsEmotion = '';
+        const ti = document.getElementById('thinkingIndicator');
+        if (ti) ti.style.display = 'none';
+        // Reset response-tracking counters so a stray late `llm_done` /
+        // `tts_done` doesn't re-fire `maybeFinishResponse` into the next
+        // utterance.
+        llmDoneSeen = true;
+        ttsStartCount = ttsDoneCount;
+        if (autoContinueChk && autoContinueChk.checked) {
+            startRecording();
+        } else {
+            transition(STATE.READY, 'sendCancel optimistic');
+        }
     }
 }
 
