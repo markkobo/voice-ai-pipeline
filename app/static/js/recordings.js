@@ -930,7 +930,10 @@
                     const mins = Math.floor(elapsed / 60).toString().padStart(2, '0');
                     const secs = (elapsed % 60).toString().padStart(2, '0');
                     duration.textContent = `${mins}:${secs}`;
-                    if (elapsed >= 300) stopRecording();
+                    // Auto-stop sanity guard matches server MAX_DURATION_SECONDS.
+                    // Bumped 300→3600 (1 hour) 2026-05-20 for client/demo
+                    // longer-take workflows.
+                    if (elapsed >= 3600) stopRecording();
                 }, 1000);
 
                 updateDbMeter();

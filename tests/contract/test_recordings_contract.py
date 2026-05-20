@@ -183,10 +183,19 @@ class TestUpload:
         assert body["details"]["duration_seconds"] == pytest.approx(1.0, abs=0.05)
 
     def test_rejects_long_audio(self, client):
-        # 301s — just over the 300s limit. Generated as silence so it's tiny.
+        # 3601s — just over the 1-hour limit (raised from 300s in 2026-05-20
+        # for client/demo longer-take workflows). 1-hour silent WAV at 48kHz
+        # mono = ~345 MB; this test uses a smaller-rate stub to keep the
+        # generation fast.
         r = client.post(
             "/api/recordings/upload",
-            files={"file": ("long.wav", _make_wav_bytes(duration_seconds=301.0), "audio/wav")},
+            files={
+                "file": (
+                    "long.wav",
+                    _make_wav_bytes(duration_seconds=3601.0, sample_rate=8000),
+                    "audio/wav",
+                ),
+            },
             data={"listener_id": "child", "persona_id": "xiao_s"},
         )
         assert r.status_code == 422

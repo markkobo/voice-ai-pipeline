@@ -53,9 +53,12 @@ class IdValidator(Protocol):
 # Constraints (kept here so they're testable in isolation).
 # ---------------------------------------------------------------------------
 SUPPORTED_FORMATS = {".wav", ".mp3", ".m4a", ".webm"}
-MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
+# Recording-side limits. Bumped 2026-05-20 — client/demo workflows need
+# longer takes (elders telling a story, podcast-style sample). Practical
+# upper bound: 1h at 48kHz mono 16-bit WAV = ~345 MB, leave headroom.
+MAX_FILE_SIZE_BYTES = 500 * 1024 * 1024  # 500 MB
 MIN_DURATION_SECONDS = 3.0
-MAX_DURATION_SECONDS = 300.0
+MAX_DURATION_SECONDS = 3600.0  # 1 hour
 
 # Target normalized format on disk — matches what RecordingPaths.save_audio writes.
 TARGET_SAMPLE_RATE = 48000
