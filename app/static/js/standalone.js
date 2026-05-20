@@ -329,22 +329,34 @@ function connect() {
     ws = new WebSocket(WS_URL);
     ws.binaryType = 'arraybuffer';
 
-    ws.onopen = async () => {
+    ws.onopen = () => {
+        // Browser autoplay policy blocks AudioContext.resume() before a user
+        // gesture. Previously we did `await ensureWorklet()` here on page
+        // load — if it threw or stayed pending, the FSM never reached READY
+        // and the UI showed "連線中…" forever. Fix: transition to READY
+        // immediately; the worklet is initialized lazily on the first
+        // primary-button click (which IS a user gesture).
         log('WS connected');
-        await ensureWorklet();
-        const actualSampleRate = audioContext ? audioContext.sampleRate : 24000;
-        log('AudioContext actual sampleRate=' + actualSampleRate + ' Hz (hint=24000)');
-        const ttsModelEl = document.getElementById('tts_model');
-        ws.send(JSON.stringify({
-            type: 'config',
-            audio: { sample_rate: actualSampleRate, channels: 1, format: 'pcm' },
-            persona_id: personaEl.value,
-            listener_id: listenerEl.value,
-            model: 'gpt-4o-mini',
-            vad: document.getElementById('vad').value,
-            tts_model: ttsModelEl ? ttsModelEl.value : '1.7B'
-        }));
-        log('Config sent: sample_rate=' + actualSampleRate + ' tts_model=' + (ttsModelEl ? ttsModelEl.value : '1.7B'));
+        // Send config WITHOUT touching audio context. sample_rate hint is
+        // 24000 — if the audio context ends up at a different rate after
+        // user-gesture initialization, we resend config in primary click.
+        try {
+            ws.send(JSON.stringify({
+                type: 'config',
+                audio: { sample_rate: 24000, channels: 1, format: 'pcm' },
+                persona_id: personaEl.value,
+                listener_id: listenerEl.value,
+                model: 'gpt-4o-mini',
+                vad: document.getElementById('vad').value,
+                // tts_model dropdown removed in ea55cac — server tolerates
+                // missing field. If a future UI re-adds it, this guard
+                // picks up whatever value it sets.
+                tts_model: (document.getElementById('tts_model') || {}).value || '1.7B',
+            }));
+            log('Config sent (worklet deferred to user-gesture)');
+        } catch (e) {
+            log('Config send failed: ' + e.message);
+        }
         transition(STATE.READY, 'ws.onopen');
     };
 
@@ -458,7 +470,15 @@ function showToast(message, type = 'info') {
     }, 3000);
 }
 
-function onPrimaryClick() {
+async function onPrimaryClick() {
+    // First click on this page IS a user gesture — kick the worklet/audio
+    // context awake here (deferred from ws.onopen to avoid autoplay-policy
+    // hang). Subsequent clicks no-op via the workletNodeCreated guard.
+    try {
+        await ensureWorklet();
+    } catch (e) {
+        log('ensureWorklet failed (will retry on next click): ' + e.message);
+    }
     switch (state) {
         case STATE.READY:
             startRecording();
