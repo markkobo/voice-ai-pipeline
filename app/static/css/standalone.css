@@ -6,9 +6,27 @@
         .status { padding: 8px 16px; border-radius: 20px; font-size: 14px; font-weight: bold; display: inline-block; margin-bottom: 20px; }
         .status.disconnected { background: #eee; color: #888; }
         .status.connecting { background: #fff3cd; color: #856404; }
-        .status.connected { background: #d4edda; color: #155724; }
-        .status.recording { background: #f8d7da; color: #721c24; animation: pulse 1s infinite; }
+        .status.connected, .status.ready { background: #d4edda; color: #155724; }
+        .status.recording, .status.listening { background: #f8d7da; color: #721c24; animation: pulse 1s infinite; }
+        .status.thinking { background: #fff3cd; color: #856404; animation: pulse 1.4s infinite; }
+        .status.speaking { background: #d1ecf1; color: #0c5460; animation: pulse 1s infinite; }
         @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.7; } }
+        /* Auto-continue checkbox lives next to the primary action button.
+           Inline-flex keeps it on the same row but doesn't stretch like
+           the primary button does. */
+        .auto-continue-toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 13px;
+            color: #555;
+            white-space: nowrap;
+            cursor: pointer;
+            user-select: none;
+            padding: 0 8px;
+        }
+        .auto-continue-toggle input { width: auto; margin: 0; cursor: pointer; }
+        .controls { align-items: center; }
         .config-row { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
         .config-item { flex: 1; min-width: 150px; }
         label { display: block; font-size: 12px; color: #666; margin-bottom: 4px; font-weight: 500; }

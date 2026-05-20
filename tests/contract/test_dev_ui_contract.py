@@ -40,6 +40,45 @@ class TestStandaloneUI:
         # Sentinel — the WebSocket connection function name.
         assert "function connect" in r.text or "connect()" in r.text
 
+    def test_fsm_state_constants_present(self, client):
+        """v27 chat-UI refactor introduced a 6-state FSM. The state
+        constants live in standalone.js and drive all button labels.
+        Regressing this back to scattered boolean flags
+        (isRecording/isThinking/…) is exactly the class of UX bug
+        the refactor was meant to prevent."""
+        r = client.get("/static/js/standalone.js")
+        assert r.status_code == 200
+        body = r.text
+        for sym in ("IDLE", "CONNECTING", "READY", "LISTENING", "THINKING", "SPEAKING"):
+            assert f"'{sym}'" in body, f"FSM constant {sym!r} missing"
+        # The window.CHAT_STATE export is what external tests/devtools
+        # use to assert on FSM state.
+        assert "window.CHAT_STATE" in body
+        # Single primary button rather than the legacy 4-button row.
+        assert "onPrimaryClick" in body
+
+    def test_auto_continue_checkbox_present(self, client):
+        """Bug 1 fix: after the AI finishes replying, the mic should
+        auto-re-arm so the user can keep talking. The checkbox lets
+        users opt out and fall back to push-to-talk."""
+        r = client.get("/ui")
+        assert r.status_code == 200
+        assert 'id="autoContinueChk"' in r.text
+        assert "自動繼續對話" in r.text
+        # And the JS must actually consult the checkbox.
+        js = client.get("/static/js/standalone.js").text
+        assert "autoContinueChk" in js
+        assert "maybeFinishResponse" in js
+
+    def test_legacy_buttons_removed(self, client):
+        """The four redundant buttons (開始對話/停止對話/開始錄音/
+        停止錄音 plus the separate 強制送出/取消) collapsed into one
+        primary button. If they reappear, the refactor regressed."""
+        r = client.get("/ui")
+        html = r.text
+        for legacy_id in ("startStopBtn", "recordBtn", "commitBtn", "cancelBtn"):
+            assert f'id="{legacy_id}"' not in html, f"legacy button {legacy_id} reintroduced"
+
 
 class TestRecordingsUI:
     def test_ui_returns_html(self, client):

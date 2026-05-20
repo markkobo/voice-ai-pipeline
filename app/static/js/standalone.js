@@ -1,887 +1,816 @@
+// =====================================================================
+// Chat-session finite state machine (refactor 2026-05-20).
+//
+// The chat UI used to expose six overlapping buttons (開始對話/停止對話/
+// 開始錄音/停止錄音/強制送出/取消) plus ad-hoc state flags
+// (`isRecording`, `isThinking`, `isStartingRecording`). The button state
+// drifted from the actual WS/mic state — after `vad_commit`, the
+// recordBtn label said "🎤 開始錄音" but the status pill still said
+// "Recording...", so users had no idea what was happening.
+//
+// This rewrite collapses everything onto ONE primary button whose label
+// is a pure function of the FSM state, and one auto-continue checkbox.
+//
+// STATES
+//   IDLE         — page just loaded, no WS, no mic. Primary disabled.
+//   CONNECTING   — ws.readyState === CONNECTING. Primary disabled.
+//   READY        — WS open, awaiting user gesture. Primary → "開始說話".
+//   LISTENING    — mic streaming, server VAD active. Primary → "送出".
+//   THINKING     — server has the audio, ASR/LLM running, no TTS yet.
+//                  Primary → "中斷".
+//   SPEAKING     — TTS audio playing on client. Primary → "中斷".
+//
+// LEGAL TRANSITIONS (trigger → next state)
+//   IDLE         → CONNECTING        connect() on page load
+//   CONNECTING   → READY             ws.onopen + worklet ready
+//   CONNECTING   → IDLE              ws.onerror | ws.onclose
+//   READY        → LISTENING         primary click | Space key
+//   LISTENING    → THINKING          primary click ('送出')
+//                                    | vad_commit msg from server
+//   LISTENING    → READY             Esc key (cancel without commit)
+//   THINKING     → SPEAKING          first tts_start msg
+//   THINKING     → READY             llm_done (no TTS played)
+//                                    | llm_cancelled | llm_error
+//   SPEAKING     → READY             llm_done AND all tts_done received
+//                                    AND auto-continue is OFF
+//   SPEAKING     → LISTENING         llm_done AND all tts_done received
+//                                    AND auto-continue is ON
+//   THINKING     → LISTENING         llm_done with empty text AND
+//                                    auto-continue is ON (no TTS path)
+//   THINKING|SPEAKING → READY        primary click ('中斷') sends cancel
+//   ANY (except IDLE)  → IDLE        ws.onclose
+//
+// Auto-continue is default ON. The user can disable it via the
+// "自動繼續對話" checkbox; that puts them back in classic
+// push-to-talk mode.
+// =====================================================================
+
 // System status poller moved to _status_bar.js (RFC_M6 Phase 0-pre
-    // review #28). This page registers a SYS_ON_UPDATE hook for the
-    // chat-specific mic-button gating: disable record when training is
-    // running OR TTS/ASR aren't ready.
-    window.SYS_ON_UPDATE = window.SYS_ON_UPDATE || [];
-    window.SYS_ON_UPDATE.push(function () {
-        const rec = document.getElementById('recordBtn');
-        if (!rec) return;
-        const should = window.SYS.trainingActive || !window.SYS.ttsReady || !window.SYS.asrReady;
-        rec.disabled = should || rec.dataset.userDisabled === '1';
-        rec.classList.toggle('gated', should);
-        rec.title = window.SYS.trainingActive
-            ? '訓練進行中，無法對話 (training in progress)'
-            : (!window.SYS.ttsReady ? 'TTS engine loading…' : (!window.SYS.asrReady ? 'ASR engine loading…' : ''));
-    });
-    // ---------------------------------------------------------
-    // Global error handler to catch uncaught errors
-    window.onerror = function(msg, url, line, col, error) {
-        log('GLOBAL ERROR: ' + msg + ' at line ' + line + ' col ' + col);
+// review #28). This page registers a SYS_ON_UPDATE hook that lets the
+// chat-specific FSM gate the primary button when training is running
+// OR TTS/ASR aren't ready.
+window.SYS_ON_UPDATE = window.SYS_ON_UPDATE || [];
+window.SYS_ON_UPDATE.push(function () {
+    if (typeof renderUI === 'function') renderUI();
+});
+
+window.onerror = function(msg, url, line, col, error) {
+    log('GLOBAL ERROR: ' + msg + ' at line ' + line + ' col ' + col);
+    return false;
+};
+window.UI_VERSION = '2026-05-20-v27-fsm-refactor';
+console.log('UI Version: ' + window.UI_VERSION);
+const _uiVerEl = document.getElementById('uiVersion');
+if (_uiVerEl) _uiVerEl.textContent = '[v27]';
+
+const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/asr';
+
+// FSM state constants. Exposed on `window` so contract tests can grep.
+const STATE = Object.freeze({
+    IDLE: 'IDLE',
+    CONNECTING: 'CONNECTING',
+    READY: 'READY',
+    LISTENING: 'LISTENING',
+    THINKING: 'THINKING',
+    SPEAKING: 'SPEAKING',
+});
+window.CHAT_STATE = STATE;
+
+let state = STATE.IDLE;
+let ws = null;
+let audioContext = null;
+let scriptProcessor = null;
+let utteranceId = null;
+let ttsText = '';
+let ttsEmotion = null;
+let recordingStream = null;
+let accumulatedChunks = [];
+let selectedVersionId = null;
+let ttsStartCount = 0;
+let ttsDoneCount = 0;
+let llmDoneSeen = false;
+let isStartingRecording = false;
+
+let audioWorkletNode = null;
+let workletInitialized = false;
+let workletNodeCreated = false;
+
+async function initAudioWorklet() {
+    if (workletInitialized) {
+        log('Worklet already initialized');
+        return true;
+    }
+    log('initAudioWorklet: starting');
+
+    if (!audioContext) {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+        log('Created AudioContext');
+    }
+    if (audioContext.state === 'suspended') {
+        await audioContext.resume();
+        log('Resumed AudioContext');
+    }
+    if (!audioContext.audioWorklet) {
+        log('AudioWorklet not supported');
         return false;
-    };
-    // Version for debugging
-    window.UI_VERSION = '2026-04-01-v26-emotion-fix';
-    console.log('UI Version: ' + window.UI_VERSION);
-    document.getElementById('uiVersion').textContent = '[v26]';
-
-    const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/asr';
-
-    let ws = null;
-    let audioContext = null;
-    let scriptProcessor = null;
-    let isRecording = false;
-    let isStartingRecording = false;  // Guard against re-entrant start
-    let utteranceId = null;
-    let ttsText = '';
-    let ttsEmotion = null;
-    let recordingStream = null;
-    let accumulatedChunks = [];  // Accumulated PCM ArrayBuffers
-    let isThinking = false;  // Track if AI is processing
-    let selectedVersionId = null;  // Selected TTS version ID from dropdown
-
-    // AudioWorklet for streaming PCM playback
-    let audioWorkletNode = null;
-    let workletInitialized = false;  // Track if worklet module is registered
-    let workletNodeCreated = false;  // Track if AudioWorkletNode is created
-
-    // Simple AudioWorklet implementation
-    async function initAudioWorklet() {
-        if (workletInitialized) {
-            log('Worklet already initialized');
-            return true;
-        }
-
-        log('initAudioWorklet: starting');
-
-        // Create AudioContext if needed
-        if (!audioContext) {
-            audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
-            log('Created AudioContext');
-        }
-
-        // Resume if suspended
-        if (audioContext.state === 'suspended') {
-            await audioContext.resume();
-            log('Resumed AudioContext');
-        }
-
-        // Check if AudioWorklet is supported
-        if (!audioContext.audioWorklet) {
-            log('AudioWorklet not supported');
-            return false;
-        }
-
-        try {
-            const workletCode = `
-                class PCMPlayer extends AudioWorkletProcessor {
-                    constructor() {
-                        super();
-                        // Ring buffer for incoming PCM data - 20 seconds
-                        this.ringBuffer = new Float32Array(24000 * 20);
-                        this.writePos = 0;
-                        this.readPos = 0;
-                        this.samplesInBuffer = 0;
-                        this.isPlaying = true;
-                        this.pendingFlush = false;  // Don't interrupt mid-sentence
-
-                        this.port.onmessage = (e) => {
-                            if (e.data.type === 'pcm') {
-                                // Convert incoming Int16 to Float32 and add to ring buffer
-                                const int16Data = new Int16Array(e.data.buffer);
-                                let dropped = 0;
-                                for (let i = 0; i < int16Data.length; i++) {
-                                    this.ringBuffer[this.writePos] = int16Data[i] / 32768.0;
-                                    this.writePos = (this.writePos + 1) % this.ringBuffer.length;
-                                    this.samplesInBuffer++;
-                                    // Prevent overflow - drop oldest samples if needed
-                                    if (this.samplesInBuffer > this.ringBuffer.length) {
-                                        this.readPos = (this.readPos + 1) % this.ringBuffer.length;
-                                        this.samplesInBuffer--;
-                                        dropped++;
-                                    }
+    }
+    try {
+        const workletCode = `
+            class PCMPlayer extends AudioWorkletProcessor {
+                constructor() {
+                    super();
+                    this.ringBuffer = new Float32Array(24000 * 20);
+                    this.writePos = 0;
+                    this.readPos = 0;
+                    this.samplesInBuffer = 0;
+                    this.isPlaying = true;
+                    this.pendingFlush = false;
+                    this.port.onmessage = (e) => {
+                        if (e.data.type === 'pcm') {
+                            const int16Data = new Int16Array(e.data.buffer);
+                            let dropped = 0;
+                            for (let i = 0; i < int16Data.length; i++) {
+                                this.ringBuffer[this.writePos] = int16Data[i] / 32768.0;
+                                this.writePos = (this.writePos + 1) % this.ringBuffer.length;
+                                this.samplesInBuffer++;
+                                if (this.samplesInBuffer > this.ringBuffer.length) {
+                                    this.readPos = (this.readPos + 1) % this.ringBuffer.length;
+                                    this.samplesInBuffer--;
+                                    dropped++;
                                 }
-                                // Log if we dropped samples
-                                if (dropped > 0) {
-                                    this.port.postMessage({ type: 'log', msg: 'BUF DROPPED ' + dropped + ' samples, buf=' + this.samplesInBuffer });
-                                }
-                            } else if (e.data.type === 'flush') {
-                                // Only flush if buffer is nearly empty (end of sentence)
-                                // This prevents cutting off mid-sentence audio
-                                if (this.samplesInBuffer < 24000) {  // < 1 second
-                                    this.writePos = 0;
-                                    this.readPos = 0;
-                                    this.samplesInBuffer = 0;
-                                }
-                            } else if (e.data.type === 'stop') {
-                                this.isPlaying = false;
-                            } else if (e.data.type === 'log') {
-                                console.log('Worklet: ' + e.data.msg);
                             }
-                        };
-                    }
-
-                    process(inputs, outputs, parameters) {
-                        const output = outputs[0];
-                        if (!output || output.length === 0) return true;
-                        const out = output[0];
-                        if (!out) return true;
-
-                        if (!this.isPlaying) {
-                            // Output silence if not playing
-                            for (let i = 0; i < out.length; i++) {
-                                out[i] = 0;
+                            if (dropped > 0) {
+                                this.port.postMessage({ type: 'log', msg: 'BUF DROPPED ' + dropped + ' samples, buf=' + this.samplesInBuffer });
                             }
-                            return true;
+                        } else if (e.data.type === 'flush') {
+                            if (this.samplesInBuffer < 24000) {
+                                this.writePos = 0;
+                                this.readPos = 0;
+                                this.samplesInBuffer = 0;
+                            }
+                        } else if (e.data.type === 'stop') {
+                            this.isPlaying = false;
+                        } else if (e.data.type === 'log') {
+                            console.log('Worklet: ' + e.data.msg);
                         }
-
-                        // Fill output buffer from ring buffer
-                        for (let i = 0; i < out.length; i++) {
-                            if (this.samplesInBuffer > 0) {
-                                out[i] = this.ringBuffer[this.readPos];
-                                this.readPos = (this.readPos + 1) % this.ringBuffer.length;
-                                this.samplesInBuffer--;
-                            } else {
-                                out[i] = 0;
-                            }
-                        }
+                    };
+                }
+                process(inputs, outputs, parameters) {
+                    const output = outputs[0];
+                    if (!output || output.length === 0) return true;
+                    const out = output[0];
+                    if (!out) return true;
+                    if (!this.isPlaying) {
+                        for (let i = 0; i < out.length; i++) out[i] = 0;
                         return true;
                     }
+                    for (let i = 0; i < out.length; i++) {
+                        if (this.samplesInBuffer > 0) {
+                            out[i] = this.ringBuffer[this.readPos];
+                            this.readPos = (this.readPos + 1) % this.ringBuffer.length;
+                            this.samplesInBuffer--;
+                        } else {
+                            out[i] = 0;
+                        }
+                    }
+                    return true;
                 }
-                registerProcessor('pcm-player', PCMPlayer);
-            `;
+            }
+            registerProcessor('pcm-player', PCMPlayer);
+        `;
+        const blob = new Blob([workletCode], { type: 'application/javascript' });
+        const workletUrl = URL.createObjectURL(blob);
+        log('Adding worklet module...');
+        await audioContext.audioWorklet.addModule(workletUrl);
+        workletInitialized = true;
+        log('Worklet module registered, AudioContext state: ' + audioContext.state);
+        return true;
+    } catch (e) {
+        log('Worklet init error: ' + e.name);
+        return false;
+    }
+}
 
-            const blob = new Blob([workletCode], { type: 'application/javascript' });
-            const workletUrl = URL.createObjectURL(blob);
+async function ensureWorklet() {
+    if (workletNodeCreated && audioWorkletNode) {
+        if (audioContext.state === 'suspended') {
+            await audioContext.resume();
+            log('Resumed suspended AudioContext');
+        }
+        return true;
+    }
+    const ok = await initAudioWorklet();
+    if (ok && !workletNodeCreated) {
+        audioWorkletNode = new AudioWorkletNode(audioContext, 'pcm-player');
+        audioWorkletNode.connect(audioContext.destination);
+        audioWorkletNode.port.onmessage = (e) => {
+            if (e.data.type === 'log') log('Worklet: ' + e.data.msg);
+        };
+        workletNodeCreated = true;
+        log('AudioWorkletNode created, state=' + audioContext.state);
+        if (audioContext.state === 'suspended') {
+            await audioContext.resume();
+            log('Resumed after node creation, state=' + audioContext.state);
+        }
+    }
+    return ok;
+}
 
-            log('Adding worklet module...');
-            await audioContext.audioWorklet.addModule(workletUrl);
-            workletInitialized = true;
-            log('Worklet module registered, AudioContext state: ' + audioContext.state);
-            return true;
+const statusEl = document.getElementById('status');
+const primaryBtn = document.getElementById('primaryBtn');
+const autoContinueChk = document.getElementById('autoContinueChk');
+const convEl = document.getElementById('conversation');
+const debugEl = document.getElementById('debug');
+const debugContent = document.getElementById('debugContent');
+const listenerEl = document.getElementById('listener');
+const personaEl = document.getElementById('persona');
+
+function transition(next, reason) {
+    if (state === next) return;
+    const prev = state;
+    state = next;
+    log('FSM: ' + prev + ' → ' + next + ' (' + (reason || '') + ')');
+    renderUI();
+}
+
+function isResponseDone() {
+    return llmDoneSeen && (ttsStartCount === 0 || ttsDoneCount >= ttsStartCount);
+}
+
+function maybeFinishResponse() {
+    if (!isResponseDone()) return;
+    if (state !== STATE.THINKING && state !== STATE.SPEAKING) return;
+    if (autoContinueChk && autoContinueChk.checked) {
+        log('Auto-continue: re-arming mic');
+        startRecording();
+    } else {
+        transition(STATE.READY, 'response finished, auto-continue off');
+    }
+}
+
+function renderUI() {
+    if (!primaryBtn) return;
+
+    const pillByState = {
+        [STATE.IDLE]:       { cls: 'disconnected', text: 'Disconnected' },
+        [STATE.CONNECTING]: { cls: 'connecting',   text: '連線中…' },
+        [STATE.READY]:      { cls: 'ready',        text: '已連線・就緒' },
+        [STATE.LISTENING]:  { cls: 'listening',    text: '錄音中…' },
+        [STATE.THINKING]:   { cls: 'thinking',     text: 'AI 思考中…' },
+        [STATE.SPEAKING]:   { cls: 'speaking',     text: 'AI 說話中…' },
+    };
+    const pill = pillByState[state] || pillByState[STATE.IDLE];
+    statusEl.className = 'status ' + pill.cls;
+    statusEl.textContent = pill.text;
+
+    const btnByState = {
+        [STATE.IDLE]:       { txt: '連線中…',    disabled: true,  cls: 'primary' },
+        [STATE.CONNECTING]: { txt: '連線中…',    disabled: true,  cls: 'primary' },
+        [STATE.READY]:      { txt: '🎤 開始說話', disabled: false, cls: 'primary' },
+        [STATE.LISTENING]:  { txt: '✋ 送出',     disabled: false, cls: 'primary recording' },
+        [STATE.THINKING]:   { txt: '⏹ 中斷',     disabled: false, cls: 'primary danger' },
+        [STATE.SPEAKING]:   { txt: '⏹ 中斷',     disabled: false, cls: 'primary danger' },
+    };
+    const btn = btnByState[state] || btnByState[STATE.IDLE];
+    primaryBtn.textContent = btn.txt;
+    primaryBtn.className = btn.cls;
+
+    const sys = window.SYS || {};
+    const sysBlocks = sys.trainingActive || sys.ttsReady === false || sys.asrReady === false;
+    primaryBtn.disabled = btn.disabled || sysBlocks;
+    primaryBtn.classList.toggle('gated', sysBlocks);
+    primaryBtn.title = sys.trainingActive
+        ? '訓練進行中，無法對話 (training in progress)'
+        : (sys.ttsReady === false ? 'TTS engine loading…'
+        : (sys.asrReady === false ? 'ASR engine loading…' : ''));
+
+    const locked = state === STATE.LISTENING || state === STATE.THINKING || state === STATE.SPEAKING;
+    [listenerEl, personaEl, document.getElementById('vad'), document.getElementById('tts_model')].forEach(el => {
+        if (el) el.disabled = locked;
+    });
+}
+
+function addMessage(role, text, emotion) {
+    const placeholder = convEl.querySelector('.placeholder');
+    if (placeholder) placeholder.remove();
+    const div = document.createElement('div');
+    div.className = 'message ' + role;
+    div.textContent = text;
+    if (emotion) {
+        const e = document.createElement('div');
+        e.className = 'emotion';
+        e.textContent = '情緒: ' + emotion;
+        div.appendChild(e);
+    }
+    convEl.appendChild(div);
+    convEl.scrollTop = convEl.scrollHeight;
+}
+
+function log(msg, level = 'info') {
+    const d = document.createElement('div');
+    d.className = 'debug-entry' + (level === 'error' ? ' error' : '');
+    d.textContent = new Date().toISOString().substr(11,8) + ' [' + level.toUpperCase() + '] ' + msg;
+    if (debugContent) debugContent.prepend(d);
+}
+
+function toggleDebug() {
+    debugEl.classList.toggle('show');
+}
+
+function clearConversation() {
+    convEl.innerHTML = '<div class="placeholder">按 [🎤 開始說話] 或空白鍵開始對話...</div>';
+    document.getElementById('thinkingIndicator').style.display = 'none';
+    log('Conversation cleared');
+}
+
+function connect() {
+    if (ws) ws.close();
+    transition(STATE.CONNECTING, 'connect()');
+    ws = new WebSocket(WS_URL);
+    ws.binaryType = 'arraybuffer';
+
+    ws.onopen = async () => {
+        log('WS connected');
+        await ensureWorklet();
+        const actualSampleRate = audioContext ? audioContext.sampleRate : 24000;
+        log('AudioContext actual sampleRate=' + actualSampleRate + ' Hz (hint=24000)');
+        const ttsModelEl = document.getElementById('tts_model');
+        ws.send(JSON.stringify({
+            type: 'config',
+            audio: { sample_rate: actualSampleRate, channels: 1, format: 'pcm' },
+            persona_id: personaEl.value,
+            listener_id: listenerEl.value,
+            model: 'gpt-4o-mini',
+            vad: document.getElementById('vad').value,
+            tts_model: ttsModelEl ? ttsModelEl.value : '1.7B'
+        }));
+        log('Config sent: sample_rate=' + actualSampleRate + ' tts_model=' + (ttsModelEl ? ttsModelEl.value : '1.7B'));
+        transition(STATE.READY, 'ws.onopen');
+    };
+
+    ws.onmessage = async (e) => {
+        if (typeof e.data === 'string') {
+            const msg = JSON.parse(e.data);
+            handleMessage(msg);
+        } else if (e.data instanceof ArrayBuffer) {
+            const buf = new Int16Array(e.data);
+            if (buf.length > 0 && audioWorkletNode) {
+                const now = performance.now();
+                const gap = ws._lastBinaryTime ? Math.round(now - ws._lastBinaryTime) : 0;
+                ws._lastBinaryTime = now;
+                log('WS binary: ' + buf.length + ' samples, gap=' + gap + 'ms');
+                if (audioContext.state === 'suspended') await audioContext.resume();
+                audioWorkletNode.port.postMessage({ type: 'pcm', buffer: buf.buffer }, [buf.buffer]);
+            } else if (buf.length === 0) {
+                log('WS binary: empty chunk');
+            } else if (!audioWorkletNode) {
+                log('WS binary: no audioWorkletNode');
+            }
+        }
+    };
+
+    ws.onclose = () => {
+        if (state === STATE.LISTENING) {
+            if (scriptProcessor) { scriptProcessor.disconnect(); scriptProcessor = null; }
+            if (recordingStream) { recordingStream.getTracks().forEach(t => t.stop()); recordingStream = null; }
+            accumulatedChunks = [];
+        }
+        if (audioWorkletNode) {
+            try { audioWorkletNode.port.postMessage({ type: 'flush' }); } catch(e) {}
+        }
+        transition(STATE.IDLE, 'ws.onclose');
+        log('WS disconnected');
+    };
+
+    ws.onerror = (e) => log('WS error: ' + JSON.stringify(e));
+}
+
+async function loadVersions() {
+    const versionSelect = document.getElementById('versionSelect');
+    try {
+        const personaId = document.getElementById('persona').value;
+        const response = await fetch(`/api/training/versions?persona_id=${personaId}`);
+        const data = await response.json();
+        const versions = data.versions || [];
+
+        const activeRes = await fetch(`/api/training/active?persona_id=${personaId}`);
+        const activeData = await activeRes.json();
+        const activeVersionId = activeData.version?.version_id;
+
+        versionSelect.innerHTML = '<option value="">系統預設</option>';
+        versions.forEach(v => {
+            if (v.status === 'ready') {
+                const label = v.nickname ? `${v.version_id}: ${v.nickname}` : v.version_id;
+                const selected = v.version_id === activeVersionId ? 'selected' : '';
+                versionSelect.innerHTML += `<option value="${v.version_id}" ${selected}>${label}</option>`;
+            }
+        });
+
+        if (activeVersionId) {
+            versionSelect.value = activeVersionId;
+            selectedVersionId = activeVersionId;
+        } else {
+            versionSelect.value = '';
+            selectedVersionId = null;
+        }
+        updateVersionInfo(activeData.version);
+    } catch (e) {
+        log('Failed to load versions: ' + e.message);
+    }
+}
+
+function updateVersionInfo(version) {
+    const versionInfo = document.getElementById('versionInfo');
+    if (!version) { versionInfo.textContent = ''; return; }
+    const loss = version.final_loss ? ` loss: ${version.final_loss.toFixed(4)}` : '';
+    const date = version.completed_at ? new Date(version.completed_at).toLocaleDateString('zh-TW') : '';
+    versionInfo.textContent = `${loss} ${date}`;
+}
+
+async function onVersionChange() {
+    const versionSelect = document.getElementById('versionSelect');
+    const versionId = versionSelect.value;
+    selectedVersionId = versionId || null;
+    if (versionId) {
+        try {
+            await fetch(`/api/training/versions/${versionId}/activate`, { method: 'POST' });
+            log(`Version ${versionId} activated`);
+            showToast(`已切換至: ${versionSelect.options[versionSelect.selectedIndex].text}`, 'success');
+            loadVersions();
         } catch (e) {
-            log('Worklet init error: ' + e.name);
-            return false;
+            log(`Failed to activate version: ${e.message}`, 'error');
+            showToast('切換版本失敗', 'error');
         }
     }
+}
 
-    async function ensureWorklet() {
-        if (workletNodeCreated && audioWorkletNode) {
-            // Ensure audio context is running
-            if (audioContext.state === 'suspended') {
-                await audioContext.resume();
-                log('Resumed suspended AudioContext');
+function showToast(message, type = 'info') {
+    const container = document.getElementById('toastContainer') || document.body;
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.textContent = message;
+    container.appendChild(toast);
+    toast.offsetHeight;
+    toast.classList.add('show');
+    setTimeout(() => {
+        toast.classList.remove('show');
+        setTimeout(() => { if (toast.parentNode) toast.remove(); }, 300);
+    }, 3000);
+}
+
+function onPrimaryClick() {
+    switch (state) {
+        case STATE.READY:
+            startRecording();
+            break;
+        case STATE.LISTENING:
+            stopRecordingAndSend();
+            break;
+        case STATE.THINKING:
+        case STATE.SPEAKING:
+            sendCancel();
+            break;
+        default:
+            log('Primary click ignored in state=' + state);
+    }
+}
+
+function sendCancel() {
+    if (audioWorkletNode) {
+        try { audioWorkletNode.port.postMessage({ type: 'flush' }); } catch(e) {}
+    }
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'control', action: 'cancel' }));
+        log('Sent cancel');
+    }
+}
+
+function onTtsModelChange() {
+    const hintEl = document.getElementById('ttsModelHint');
+    const modelEl = document.getElementById('tts_model');
+    if (!modelEl) return;
+    const modelValue = modelEl.value;
+    const modelLabel = modelValue === '0.6B' ? '0.6B (快速)' : '1.7B (高品質)';
+    if (hintEl) {
+        const hintValEl = document.getElementById('ttsModelHintValue');
+        if (hintValEl) hintValEl.textContent = modelLabel;
+        hintEl.style.display = 'block';
+        hintEl.style.color = '#00ccff';
+        setTimeout(() => { hintEl.style.display = 'none'; }, 3000);
+    }
+    log('TTS model preference set to: ' + modelValue);
+}
+
+function onVadChange() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const vadValue = document.getElementById('vad').value;
+    const ttsModelEl = document.getElementById('tts_model');
+    ws.send(JSON.stringify({
+        type: 'config',
+        audio: { sample_rate: 24000, channels: 1, format: 'pcm' },
+        persona_id: personaEl.value,
+        listener_id: listenerEl.value,
+        model: 'gpt-4o-mini',
+        vad: vadValue,
+        tts_model: ttsModelEl ? ttsModelEl.value : '1.7B'
+    }));
+    log('VAD sensitivity changed to: ' + vadValue);
+}
+
+function handleMessage(msg) {
+    log('MSG: ' + JSON.stringify(msg));
+
+    if (msg.type === 'asr_result') {
+        log('ASR result: is_final=' + msg.is_final + ' text=' + (msg.text || '(empty)'));
+        addMessage('user', msg.text || '(no text)');
+    }
+
+    if (msg.type === 'vad_commit') {
+        log('VAD commit: silence detected, auto-committing utterance');
+        if (state === STATE.LISTENING) {
+            if (scriptProcessor && scriptProcessor._localIsRecording) {
+                scriptProcessor._localIsRecording.value = false;
             }
-            return true;
+            if (scriptProcessor) { scriptProcessor.disconnect(); scriptProcessor = null; }
+            if (recordingStream) { recordingStream.getTracks().forEach(t => t.stop()); recordingStream = null; }
+            ws.send(JSON.stringify({ type: 'control', action: 'commit_utterance' }));
+            accumulatedChunks = [];
+            log('VAD commit: sent commit_utterance (audio already streamed)');
+            transition(STATE.THINKING, 'vad_commit');
         }
-
-        const ok = await initAudioWorklet();
-        if (ok && !workletNodeCreated) {
-            audioWorkletNode = new AudioWorkletNode(audioContext, 'pcm-player');
-            audioWorkletNode.connect(audioContext.destination);
-            // Handle messages from AudioWorklet
-            audioWorkletNode.port.onmessage = (e) => {
-                if (e.data.type === 'log') {
-                    log('Worklet: ' + e.data.msg);
-                }
-            };
-            workletNodeCreated = true;
-            log('AudioWorkletNode created, state=' + audioContext.state);
-
-            // CRITICAL: Ensure AudioContext is running before sending audio
-            if (audioContext.state === 'suspended') {
-                await audioContext.resume();
-                log('Resumed after node creation, state=' + audioContext.state);
-            }
-        }
-        return ok;
     }
 
-    const statusEl = document.getElementById('status');
-    const startStopBtn = document.getElementById('startStopBtn');
-    const recordBtn = document.getElementById('recordBtn');
-    const commitBtn = document.getElementById('commitBtn');
-    const cancelBtn = document.getElementById('cancelBtn');
-    const convEl = document.getElementById('conversation');
-    const debugEl = document.getElementById('debug');
-    const debugContent = document.getElementById('debugContent');
-    const listenerEl = document.getElementById('listener');
-    const personaEl = document.getElementById('persona');
-
-    function setStatus(s) {
-        statusEl.className = 'status ' + s;
-        statusEl.textContent = { disconnected: 'Disconnected', connecting: 'Connecting...', connected: 'Connected', recording: 'Recording...' }[s] || s;
+    if (msg.type === 'llm_start') {
+        log('LLM started: utterance_id=' + msg.utterance_id);
+        if (audioWorkletNode) {
+            try { audioWorkletNode.port.postMessage({ type: 'flush' }); } catch(e) {}
+        }
+        ttsText = '';
+        ttsStartCount = 0;
+        ttsDoneCount = 0;
+        llmDoneSeen = false;
+        document.getElementById('thinkingIndicator').style.display = 'block';
+        log('Thinking indicator shown');
+        if (state === STATE.LISTENING) {
+            transition(STATE.THINKING, 'llm_start (skipped vad_commit)');
+        } else if (state === STATE.READY) {
+            transition(STATE.THINKING, 'llm_start');
+        }
     }
 
-    function addMessage(role, text, emotion) {
-        const placeholder = convEl.querySelector('.placeholder');
-        if (placeholder) placeholder.remove();
-        const div = document.createElement('div');
-        div.className = 'message ' + role;
-        div.textContent = text;
-        if (emotion) {
-            const e = document.createElement('div');
-            e.className = 'emotion';
-            e.textContent = '情緒: ' + emotion;
-            div.appendChild(e);
+    if (msg.type === 'llm_token') {
+        document.getElementById('thinkingIndicator').style.display = 'none';
+        let content = msg.content || '';
+        if (content === '[' || content === '情' || content === '感' || content === ':' ||
+            content === '默' || content === ' 幽' || content.match(/^\[情感/)) {
+            // skip emotion-tag fragments
+        } else {
+            ttsText += content;
         }
-        convEl.appendChild(div);
+        let displayText = ttsText.replace(/\[情感[:：][^\]]*\]/g, '');
+        if (displayText.startsWith('[')) {
+            displayText = displayText.replace(/^\[情感[:：][^\]]*/, '');
+        }
+        let aiMsg = convEl.querySelector('.message.ai:last-child');
+        if (!aiMsg) {
+            aiMsg = document.createElement('div');
+            aiMsg.className = 'message ai';
+            convEl.appendChild(aiMsg);
+        }
+        aiMsg.textContent = displayText;
+        if (msg.emotion) {
+            let e = aiMsg.querySelector('.emotion');
+            if (!e) { e = document.createElement('div'); e.className = 'emotion'; aiMsg.appendChild(e); }
+            e.textContent = '情緒: ' + msg.emotion;
+        }
         convEl.scrollTop = convEl.scrollHeight;
     }
 
-    function log(msg, level = 'info') {
-        const d = document.createElement('div');
-        d.className = 'debug-entry' + (level === 'error' ? ' error' : '');
-        d.textContent = new Date().toISOString().substr(11,8) + ' [' + level.toUpperCase() + '] ' + msg;
-        debugContent.prepend(d);
+    if (msg.type === 'tts_start') {
+        ttsStartCount += 1;
+        if (audioWorkletNode) {
+            audioWorkletNode.port.postMessage({ type: 'flush' });
+        }
+        if (audioContext && audioContext.state === 'suspended') {
+            audioContext.resume();
+        }
+        log('TTS stream started: sentence_idx=' + msg.sentence_idx + ' (count=' + ttsStartCount + ')');
+        if (state === STATE.THINKING) {
+            transition(STATE.SPEAKING, 'tts_start');
+        }
     }
 
-    function toggleDebug() {
-        debugEl.classList.toggle('show');
+    if (msg.type === 'tts_done') {
+        ttsDoneCount += 1;
+        log('TTS stream done: sentence_idx=' + msg.sentence_idx + ' (' + ttsDoneCount + '/' + ttsStartCount + ')');
+        maybeFinishResponse();
     }
 
-    function clearConversation() {
-        convEl.innerHTML = '<div class="placeholder">開始說話吧...</div>';
-        isThinking = false;
+    if (msg.type === 'llm_done') {
+        log('LLM done: text=' + (msg.text || '').substring(0, 80) + ' total_tokens=' + (msg.total_tokens || '?'));
+        ttsText = '';
+        ttsEmotion = '';
         document.getElementById('thinkingIndicator').style.display = 'none';
-        log('Conversation cleared');
+        llmDoneSeen = true;
+        maybeFinishResponse();
     }
 
-    function connect() {
-        if (ws) ws.close();
-        setStatus('connecting');
-        ws = new WebSocket(WS_URL);
-        ws.binaryType = 'arraybuffer';
-
-        ws.onopen = async () => {
-            setStatus('connected');
-            if (startStopBtn) startStopBtn.textContent = '🔴 停止對話';
-            if (recordBtn) recordBtn.disabled = false;
-            log('WS connected');
-            // Initialize AudioWorklet for TTS playback. After this,
-            // audioContext exists and we know the ACTUAL sample rate the
-            // browser settled on (may differ from our 24000 hint —
-            // confirmed root cause of the VAD-never-fires bug, 2026-05-20).
-            await ensureWorklet();
-            const actualSampleRate = audioContext ? audioContext.sampleRate : 24000;
-            log('AudioContext actual sampleRate=' + actualSampleRate + ' Hz (hint=24000)');
-            // Send config. tts_model was removed 2026-05-20 — the server
-            // always uses the active SFT version
-            // (system_status.tts.active_version); the legacy 0.6B/1.7B
-            // picker was vestigial once LoRA training shipped.
-            ws.send(JSON.stringify({
-                type: 'config',
-                audio: { sample_rate: actualSampleRate, channels: 1, format: 'pcm' },
-                persona_id: personaEl.value,
-                listener_id: listenerEl.value,
-                model: 'gpt-4o-mini',
-                vad: document.getElementById('vad').value
-            }));
-            log('Config sent: sample_rate=' + actualSampleRate);
-        };
-
-        ws.onmessage = async (e) => {
-            if (typeof e.data === 'string') {
-                const msg = JSON.parse(e.data);
-                handleMessage(msg);
-            } else if (e.data instanceof ArrayBuffer) {
-                // Binary PCM chunk streamed directly from TTS — play immediately
-                const buf = new Int16Array(e.data);
-                if (buf.length > 0 && audioWorkletNode) {
-                    const now = performance.now();
-                    const gap = ws._lastBinaryTime ? Math.round(now - ws._lastBinaryTime) : 0;
-                    ws._lastBinaryTime = now;
-                    log('WS binary: ' + buf.length + ' samples, gap=' + gap + 'ms');
-                    // Ensure AudioContext is running before posting
-                    if (audioContext.state === 'suspended') {
-                        await audioContext.resume();
-                    }
-                    // Send raw PCM to AudioWorklet for immediate playback
-                    audioWorkletNode.port.postMessage({ type: 'pcm', buffer: buf.buffer }, [buf.buffer]);
-                } else if (buf.length === 0) {
-                    log('WS binary: empty chunk');
-                } else if (!audioWorkletNode) {
-                    log('WS binary: no audioWorkletNode');
-                }
-            }
-        };
-
-        ws.onclose = () => {
-            setStatus('disconnected');
-            if (startStopBtn) {
-                startStopBtn.textContent = '🎤 開始對話';
-                startStopBtn.disabled = false;
-            }
-            if (recordBtn) {
-                recordBtn.disabled = true;
-                recordBtn.textContent = '🎤 開始錄音';
-            }
-            commitBtn.disabled = true;
-            cancelBtn.disabled = true;
-            if (isRecording) {
-                if (scriptProcessor) { scriptProcessor.disconnect(); scriptProcessor = null; }
-                if (recordingStream) { recordingStream.getTracks().forEach(t => t.stop()); recordingStream = null; }
-                isRecording = false;
-                accumulatedChunks = [];
-            }
-            if (audioWorkletNode) {
-                try { audioWorkletNode.port.postMessage({ type: 'flush' }); } catch(e) {}
-            }
-            log('WS disconnected');
-        };
-
-        ws.onerror = (e) => log('WS error: ' + JSON.stringify(e));
-    }
-
-    // Load all versions for selected persona into dropdown
-    async function loadVersions() {
-        const versionSelect = document.getElementById('versionSelect');
-        const versionInfo = document.getElementById('versionInfo');
-        try {
-            const personaId = document.getElementById('persona').value;
-            const response = await fetch(`/api/training/versions?persona_id=${personaId}`);
-            const data = await response.json();
-            const versions = data.versions || [];
-
-            // Get active version
-            const activeRes = await fetch(`/api/training/active?persona_id=${personaId}`);
-            const activeData = await activeRes.json();
-            const activeVersionId = activeData.version?.version_id;
-
-            versionSelect.innerHTML = '<option value="">系統預設</option>';
-            versions.forEach(v => {
-                if (v.status === 'ready') {
-                    const label = v.nickname ? `${v.version_id}: ${v.nickname}` : v.version_id;
-                    const selected = v.version_id === activeVersionId ? 'selected' : '';
-                    versionSelect.innerHTML += `<option value="${v.version_id}" ${selected}>${label}</option>`;
-                }
-            });
-
-            // Set selected from active
-            if (activeVersionId) {
-                versionSelect.value = activeVersionId;
-                selectedVersionId = activeVersionId;
+    if (msg.type === 'llm_cancelled') {
+        if (audioWorkletNode) {
+            try { audioWorkletNode.port.postMessage({ type: 'flush' }); } catch(e) {}
+        }
+        ttsText = '';
+        ttsEmotion = '';
+        document.getElementById('thinkingIndicator').style.display = 'none';
+        log('LLM cancelled: partial=' + (msg.partial_text || '').substring(0, 50));
+        llmDoneSeen = true;
+        ttsStartCount = ttsDoneCount;
+        if (state === STATE.THINKING || state === STATE.SPEAKING) {
+            if (autoContinueChk && autoContinueChk.checked) {
+                startRecording();
             } else {
-                versionSelect.value = '';
-                selectedVersionId = null;
-            }
-
-            // Show info for selected version
-            updateVersionInfo(activeData.version);
-
-        } catch (e) {
-            log('Failed to load versions: ' + e.message);
-        }
-    }
-
-    // Update version info tooltip
-    function updateVersionInfo(version) {
-        const versionInfo = document.getElementById('versionInfo');
-        if (!version) {
-            versionInfo.textContent = '';
-            return;
-        }
-        const loss = version.final_loss ? ` loss: ${version.final_loss.toFixed(4)}` : '';
-        const date = version.completed_at ? new Date(version.completed_at).toLocaleDateString('zh-TW') : '';
-        versionInfo.textContent = `${loss} ${date}`;
-    }
-
-    // On version dropdown change → activate version
-    async function onVersionChange() {
-        const versionSelect = document.getElementById('versionSelect');
-        const versionId = versionSelect.value;
-        selectedVersionId = versionId || null;
-
-        if (versionId) {
-            try {
-                await fetch(`/api/training/versions/${versionId}/activate`, { method: 'POST' });
-                log(`Version ${versionId} activated`);
-                showToast(`已切換至: ${versionSelect.options[versionSelect.selectedIndex].text}`, 'success');
-                loadVersions();  // Refresh to update "active" badge
-            } catch (e) {
-                log(`Failed to activate version: ${e.message}`, 'error');
-                showToast('切換版本失敗', 'error');
+                transition(STATE.READY, 'llm_cancelled');
             }
         }
     }
 
-    // Show toast notification
-    function showToast(message, type = 'info') {
-        const container = document.getElementById('toastContainer') || document.body;
-        const toast = document.createElement('div');
-        toast.className = `toast ${type}`;
-        toast.textContent = message;
-        container.appendChild(toast);
-        // Force reflow so transition fires
-        toast.offsetHeight;
-        toast.classList.add('show');
-        setTimeout(() => {
-            toast.classList.remove('show');
-            setTimeout(() => { if (toast.parentNode) toast.remove(); }, 300);
-        }, 3000);
-    }
-
-    // Toggle conversation start/stop
-    function toggleConversation() {
-        if (!ws || ws.readyState !== WebSocket.OPEN) {
-            connect();
-        } else {
-            ws.close();
-            ws = null;
+    if (msg.type === 'llm_error') {
+        log('LLM ERROR: ' + (msg.error || 'unknown'));
+        document.getElementById('thinkingIndicator').style.display = 'none';
+        llmDoneSeen = true;
+        ttsStartCount = ttsDoneCount;
+        if (state === STATE.THINKING || state === STATE.SPEAKING) {
+            transition(STATE.READY, 'llm_error');
         }
     }
 
-    // Toggle recording start/stop
-    function toggleRecording() {
-        if (!ws || ws.readyState !== WebSocket.OPEN) {
-            log('WS not open, cannot toggle recording');
-            return;
-        }
-        if (isRecording) {
-            stopRecordingAndSend();
-        } else {
-            startRecording();
+    if (msg.type === 'asr_error') {
+        log('ASR ERROR: ' + (msg.error || 'unknown'), 'error');
+        if (state === STATE.LISTENING || state === STATE.THINKING) {
+            transition(STATE.READY, 'asr_error');
         }
     }
 
-    function onVadChange() {
-        if (!ws || ws.readyState !== WebSocket.OPEN) return;
-        const vadValue = document.getElementById('vad').value;
+    if (msg.type === 'vad_error') {
+        log('VAD ERROR: ' + (msg.error || 'unknown'), 'error');
+    }
+
+    if (msg.type === 'tts_error') {
+        log('TTS stream error: sentence_idx=' + (msg.sentence_idx || '?') + ' error=' + (msg.error || 'unknown'), 'error');
+        ttsDoneCount += 1;
+        maybeFinishResponse();
+    }
+}
+
+async function startRecording() {
+    if (isStartingRecording) return;
+    isStartingRecording = true;
+    if (state === STATE.LISTENING) {
+        isStartingRecording = false;
+        return;
+    }
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        log('startRecording: WS not open, cannot start');
+        isStartingRecording = false;
+        return;
+    }
+    try {
+        // MediaTrackConstraints. AGC + echo cancellation + noise
+        // suppression ENABLED (2026-05-20 VAD investigation): without AGC
+        // raw laptop mics deliver RMS ~0.005-0.025 which Silero can't
+        // distinguish from silence. Echo cancellation prevents TTS
+        // playback feedback from triggering false barge-in cancels.
+        const stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                sampleRate: 24000,
+                channelCount: 1,
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+            }
+        });
+        recordingStream = stream;
+
+        if (!audioContext || audioContext.state === 'closed') {
+            audioContext = new AudioContext({ sampleRate: 24000 });
+        } else if (audioContext.state === 'suspended') {
+            await audioContext.resume();
+        }
+
+        if (scriptProcessor) scriptProcessor.disconnect();
+        scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
+        log('Using onaudioprocess for raw PCM at ' + audioContext.sampleRate + ' Hz');
+
+        let debugSampleCount = 0;
+        const localIsRecording = { value: true };
+
+        scriptProcessor.onaudioprocess = (e) => {
+            if (!localIsRecording.value) return;
+            const inputData = e.inputBuffer.getChannelData(0);
+            if (debugSampleCount < 3) {
+                let sum = 0;
+                for (let i = 0; i < inputData.length; i++) sum += Math.abs(inputData[i]);
+                debugSampleCount++;
+                log('audio chunk ' + debugSampleCount + ': avg_abs=' + (sum/inputData.length).toFixed(4));
+            }
+            const int16 = new Int16Array(inputData.length);
+            for (let i = 0; i < inputData.length; i++) {
+                const s = Math.max(-1, Math.min(1, inputData[i]));
+                int16[i] = s < 0 ? s * 32768 : s * 32767;
+            }
+            if (ws && ws.readyState === WebSocket.OPEN) ws.send(int16.buffer);
+            accumulatedChunks.push(int16.buffer);
+        };
+
+        const source = audioContext.createMediaStreamSource(stream);
+        source.connect(scriptProcessor);
+        scriptProcessor.connect(audioContext.destination);
+
+        accumulatedChunks = [];
+        ttsText = '';
+        scriptProcessor._localIsRecording = localIsRecording;
+
+        ws.send(JSON.stringify({ type: 'control', action: 'start_speech' }));
+        log('start_speech sent');
+        transition(STATE.LISTENING, 'startRecording');
+    } catch (e) {
+        log('Mic error: ' + e.message);
+        alert('無法訪問麥克風: ' + e.message);
+        transition(STATE.READY, 'startRecording failed');
+    } finally {
+        isStartingRecording = false;
+    }
+}
+
+function stopRecordingAndSend() {
+    if (state !== STATE.LISTENING) return;
+    if (scriptProcessor && scriptProcessor._localIsRecording) {
+        scriptProcessor._localIsRecording.value = false;
+    }
+    if (scriptProcessor) { scriptProcessor.disconnect(); scriptProcessor = null; }
+    if (recordingStream) { recordingStream.getTracks().forEach(t => t.stop()); recordingStream = null; }
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'control', action: 'commit_utterance' }));
+    }
+    accumulatedChunks = [];
+    transition(STATE.THINKING, 'force commit');
+}
+
+listenerEl.addEventListener('change', () => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        const ttsModelEl = document.getElementById('tts_model');
         ws.send(JSON.stringify({
             type: 'config',
             audio: { sample_rate: 24000, channels: 1, format: 'pcm' },
             persona_id: personaEl.value,
             listener_id: listenerEl.value,
             model: 'gpt-4o-mini',
-            vad: vadValue
+            vad: document.getElementById('vad').value,
+            tts_model: ttsModelEl ? ttsModelEl.value : '1.7B'
         }));
-        log('VAD sensitivity changed to: ' + vadValue);
     }
+    loadVersions();
+});
 
-    function handleMessage(msg) {
-        log('MSG: ' + JSON.stringify(msg));
+personaEl.addEventListener('change', () => {
+    loadVersions();
+});
 
-        if (msg.type === 'asr_result') {
-            log('ASR result: is_final=' + msg.is_final + ' text=' + (msg.text || '(empty)'));
-            addMessage('user', msg.text || '(no text)');
-        }
+document.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
 
-        if (msg.type === 'vad_commit') {
-            log('VAD commit: silence detected, auto-committing utterance');
-            // Server VAD detected end of speech — audio was already sent in real-time
-            // Just stop recording and send commit_utterance (don't resend audio)
-            if (isRecording) {
-                // Signal onaudioprocess to stop FIRST
-                if (scriptProcessor && scriptProcessor._localIsRecording) {
-                    scriptProcessor._localIsRecording.value = false;
-                }
-                // Stop audio processing
-                if (scriptProcessor) {
-                    scriptProcessor.disconnect();
-                    scriptProcessor = null;
-                }
-                if (recordingStream) {
-                    recordingStream.getTracks().forEach(t => t.stop());
-                    recordingStream = null;
-                }
-                isRecording = false;
-                if (recordBtn) recordBtn.textContent = '🎤 開始錄音';
-                commitBtn.disabled = true;
-                cancelBtn.disabled = true;
-                // Audio was already sent in real-time - just send commit_utterance
-                ws.send(JSON.stringify({ type: 'control', action: 'commit_utterance' }));
-                accumulatedChunks = [];
-                log('VAD commit: sent commit_utterance (audio already streamed)');
-            }
-        }
-
-        if (msg.type === 'llm_start') {
-            log('LLM started: utterance_id=' + msg.utterance_id);
-            // Flush AudioWorklet for new utterance (barge-in)
-            if (audioWorkletNode) {
-                try {
-                    audioWorkletNode.port.postMessage({ type: 'flush' });
-                } catch(e) {}
-            }
-            ttsText = '';
-            // Show thinking indicator
-            isThinking = true;
-            document.getElementById('thinkingIndicator').style.display = 'block';
-            log('Thinking indicator shown');
-        }
-
-        if (msg.type === 'llm_token') {
-            // Hide thinking indicator on first real token
-            if (isThinking) {
-                isThinking = false;
-                document.getElementById('thinkingIndicator').style.display = 'none';
-                log('Thinking indicator hidden (first token)');
-            }
-            let content = msg.content || '';
-            // Before accumulating, strip if this content looks like emotion tag fragment
-            // These fragments arrive with emotion=null: "默", " 幽", ":", "感", "情", "["
-            if (content === '[' || content === '情' || content === '感' || content === ':' ||
-                content === '默' || content === ' 幽' || content.match(/^\[情感/)) {
-                // Skip this fragment, don't accumulate
-            } else {
-                ttsText += content;
-            }
-            // Strip complete emotion tags
-            let displayText = ttsText.replace(/\[情感[:：][^\]]*\]/g, '');
-            // Remove any partial bracket at start
-            if (displayText.startsWith('[')) {
-                displayText = displayText.replace(/^\[情感[:：][^\]]*/, '');
-            }
-            // Only create a new box if there is NO existing AI message box
-            let aiMsg = convEl.querySelector('.message.ai:last-child');
-            if (!aiMsg) {
-                aiMsg = document.createElement('div');
-                aiMsg.className = 'message ai';
-                convEl.appendChild(aiMsg);
-            }
-            aiMsg.textContent = displayText;
-            if (msg.emotion) {
-                let e = aiMsg.querySelector('.emotion');
-                if (!e) { e = document.createElement('div'); e.className = 'emotion'; aiMsg.appendChild(e); }
-                e.textContent = '情緒: ' + msg.emotion;
-            }
-            convEl.scrollTop = convEl.scrollHeight;
-        }
-
-        if (msg.type === 'tts_start') {
-            // New sentence TTS starting over WebSocket — prepare AudioWorklet for immediate playback
-            // Flush any pending streaming audio so new chunks take priority
-            if (audioWorkletNode) {
-                audioWorkletNode.port.postMessage({ type: 'flush' });
-            }
-            // Ensure AudioContext is running
-            if (audioContext && audioContext.state === 'suspended') {
-                audioContext.resume();
-            }
-            log('TTS stream started: sentence_idx=' + msg.sentence_idx);
-        }
-
-        if (msg.type === 'tts_done') {
-            log('TTS stream done: sentence_idx=' + msg.sentence_idx);
-        }
-
-        if (msg.type === 'llm_done') {
-            log('LLM done: text=' + (msg.text || '').substring(0, 80) + ' total_tokens=' + (msg.total_tokens || '?'));
-            ttsText = '';
-            ttsEmotion = '';
-            isThinking = false;
-            document.getElementById('thinkingIndicator').style.display = 'none';
-        }
-
-        if (msg.type === 'llm_cancelled') {
-            // Flush AudioWorklet (WS binary streaming - cancel ongoing TTS)
-            if (audioWorkletNode) {
-                try {
-                    audioWorkletNode.port.postMessage({ type: 'flush' });
-                } catch(e) {}
-            }
-            ttsText = '';
-            ttsEmotion = '';
-            isThinking = false;
-            document.getElementById('thinkingIndicator').style.display = 'none';
-            log('LLM cancelled: partial=' + (msg.partial_text || '').substring(0, 50));
-        }
-
-        if (msg.type === 'llm_error') {
-            log('LLM ERROR: ' + (msg.error || 'unknown'));
-            isThinking = false;
-            document.getElementById('thinkingIndicator').style.display = 'none';
-        }
-
-        if (msg.type === 'asr_error') {
-            log('ASR ERROR: ' + (msg.error || 'unknown'), 'error');
-        }
-
-        if (msg.type === 'vad_error') {
-            log('VAD ERROR: ' + (msg.error || 'unknown'), 'error');
-        }
-
-        if (msg.type === 'tts_error') {
-            log('TTS stream error: sentence_idx=' + (msg.sentence_idx || '?') + ' error=' + (msg.error || 'unknown'), 'error');
-        }
+    if (e.code === 'Space' && !e.repeat) {
+        e.preventDefault();
+        if (!primaryBtn.disabled) onPrimaryClick();
     }
-
-    async function startRecording() {
-        // Guard against re-entrant calls
-        if (isStartingRecording) return;
-        isStartingRecording = true;
-
-        // Stop any existing recording first
-        if (isRecording) {
-            stopRecordingAndSend();
-        }
-
-        try {
-            // MediaTrackConstraints. AGC + echo cancellation + noise
-            // suppression ENABLED (2026-05-20 VAD investigation):
-            //  - Without AGC, raw laptop mics deliver RMS ~0.005-0.025
-            //    which Silero can't distinguish from silence (prob ~0.001).
-            //    Adding the old Web Audio compressor masked this by acting
-            //    as a soft level normalizer but flattened the speech
-            //    dynamics enough that Silero ALSO returned ~0 prob.
-            //    Browser AGC handles level normalization correctly without
-            //    destroying the dynamics Silero needs.
-            //  - Echo cancellation prevents the TTS playback (we play AI
-            //    audio through speakers) from feeding back into the mic
-            //    and triggering false barge-in cancels.
-            //  - Noise suppression is a cheap quality win — chromedriver/
-            //    Safari/Firefox all use comparable models.
-            const stream = await navigator.mediaDevices.getUserMedia({
-                audio: {
-                    sampleRate: 24000,
-                    channelCount: 1,
-                    echoCancellation: true,
-                    noiseSuppression: true,
-                    autoGainControl: true,
-                }
-            });
-            recordingStream = stream;
-
-            // Resume AudioContext if suspended
-            if (!audioContext || audioContext.state === 'closed') {
-                audioContext = new AudioContext({ sampleRate: 24000 });
-            } else if (audioContext.state === 'suspended') {
-                await audioContext.resume();
-            }
-
-            // --- Web Audio preprocessing chain ---
-            // Source → ScriptProcessor → Destination (RAW MIC).
-            //
-            // Prior chain (highpass + 4:1 compressor at -24dB) was flattening
-            // speech dynamics enough that Silero VAD scored real speech at
-            // ~0.0 probability despite healthy RMS. Diagnosed 2026-05-20:
-            // post-removal of the client noise gate (0d77db2), audio reached
-            // the server with rms=0.03-0.07 (speech-level) but Silero
-            // returned prob=0.000–0.025 across the board — model trained on
-            // natural dynamics couldn't recognize compressed-to-tone speech.
-            //
-            // Silero is robust to volume variance; the model and Qwen3-ASR
-            // both handle the un-preprocessed mic stream fine. The browser
-            // already runs OS-level AGC/echo cancellation via the default
-            // MediaTrackConstraints, so we don't need our own.
-
-            // Client noise gate REMOVED (2026-05-20 — VAD bug investigation).
-            // The previous design calibrated `noiseFloor = max(rms)` over the
-            // first 10 ScriptProcessor chunks (~1.7s). Users start speaking
-            // immediately after pressing the mic, so calibration captured
-            // speech-level RMS as the "noise floor", then the post-calibration
-            // threshold (floor × 2.5) silently suppressed all subsequent
-            // speech. Symptom: the server only ever received ~1.7s of audio
-            // and ASR returned the first one or two syllables.
-            //
-            // Server-side Silero VAD is the authoritative gate. The Web Audio
-            // pipeline above (highpass + compressor) already handles
-            // pre-emphasis; the server side handles the actual speech/noise
-            // discrimination.
-
-            // Create and configure script processor
-            if (scriptProcessor) {
-                scriptProcessor.disconnect();
-            }
-            scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
-            log('Using onaudioprocess for raw PCM at ' + audioContext.sampleRate + ' Hz');
-
-            // Debug: check first few audio samples
-            let debugSampleCount = 0;
-            let debugSum = 0;
-
-            const localIsRecording = { value: true };
-
-            scriptProcessor.onaudioprocess = (e) => {
-                if (!localIsRecording.value) return;
-                const inputData = e.inputBuffer.getChannelData(0); // Float32 mono
-
-                // First 3 chunks: log avg-abs to confirm mic is producing
-                // non-zero signal (preserved from earlier debug). Server-
-                // side Silero VAD does the real speech/noise discrimination.
-                if (debugSampleCount < 3) {
-                    let sum = 0;
-                    for (let i = 0; i < inputData.length; i++) {
-                        sum += Math.abs(inputData[i]);
-                    }
-                    debugSampleCount++;
-                    log('audio chunk ' + debugSampleCount + ': avg_abs=' + (sum/inputData.length).toFixed(4));
-                }
-
-                // Convert Float32 [-1,1] -> Int16 [−32768, 32767]
-                const int16 = new Int16Array(inputData.length);
-                for (let i = 0; i < inputData.length; i++) {
-                    const s = Math.max(-1, Math.min(1, inputData[i]));
-                    int16[i] = s < 0 ? s * 32768 : s * 32767;
-                }
-                // Send chunk to server immediately for VAD processing
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                    ws.send(int16.buffer);
-                }
-                // Also accumulate for later sending on commit
-                accumulatedChunks.push(int16.buffer);
-            };
-
-            // Connect the nodes — RAW chain (see comment block above):
-            //   source → scriptProcessor → destination
-            const source = audioContext.createMediaStreamSource(stream);
-            source.connect(scriptProcessor);
-            scriptProcessor.connect(audioContext.destination);
-
-            accumulatedChunks = []; // Reset accumulation buffer
-            ttsText = ''; // Clear previous LLM response text
-            isRecording = true;
-            // Store the closure for stop function to access
-            scriptProcessor._localIsRecording = localIsRecording;
-
-            // Notify server to cancel any ongoing LLM and reset VAD (barge-in)
-            ws.send(JSON.stringify({ type: 'control', action: 'start_speech' }));
-            log('start_speech sent');
-
-            setStatus('recording');
-            if (recordBtn) recordBtn.textContent = '🔴 錄音中...';
-            commitBtn.disabled = false;
-            cancelBtn.disabled = false;
-            log('Recording started');
-        } catch (e) {
-            log('Mic error: ' + e.message);
-            alert('無法訪問麥克風: ' + e.message);
-        } finally {
-            isStartingRecording = false;
-        }
-    }
-
-    function stopRecordingAndSend() {
-        if (!isRecording) return;
-
-        // Signal onaudioprocess to stop FIRST (before disconnecting)
-        if (scriptProcessor && scriptProcessor._localIsRecording) {
-            scriptProcessor._localIsRecording.value = false;
-        }
-
-        // Stop audio processing
-        if (scriptProcessor) {
-            scriptProcessor.disconnect();
-            scriptProcessor = null;
-        }
-        if (recordingStream) {
-            recordingStream.getTracks().forEach(t => t.stop());
-            recordingStream = null;
-        }
-        isRecording = false;
-        if (recordBtn) recordBtn.textContent = '🎤 開始錄音';
-        commitBtn.disabled = true;
-        cancelBtn.disabled = true;
-
-        // Audio is now sent in real-time via onaudioprocess
-        // Just send commit_utterance (don't resend audio to avoid duplicates)
-        ws.send(JSON.stringify({ type: 'control', action: 'commit_utterance' }));
-        accumulatedChunks = [];
-
-        setStatus(ws && ws.readyState === WebSocket.OPEN ? 'connected' : 'disconnected');
-    }
-
-    listenerEl.addEventListener('change', () => {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({
-                type: 'config',
-                audio: { sample_rate: 24000, channels: 1, format: 'pcm' },
-                persona_id: personaEl.value,
-                listener_id: listenerEl.value,
-                model: 'gpt-4o-mini'
-            }));
-        }
-        // Reload versions when listener changes (persona might be same but different active version)
-        loadVersions();
-    });
-
-    personaEl.addEventListener('change', () => {
-        // Reload versions when persona changes
-        loadVersions();
-    });
-
-    // Commit button: force send current audio even if VAD hasn't triggered
-    commitBtn.addEventListener('click', () => {
-        log('COMMIT BTN: isRecording=' + isRecording + ', chunks=' + accumulatedChunks.length);
-        if (isRecording) {
-            stopRecordingAndSend();
-        } else if (accumulatedChunks.length > 0) {
-            // Send pending audio even without recording
-            let totalSamples = 0;
-            for (const chunk of accumulatedChunks) totalSamples += chunk.byteLength / 2;
-            const combined = new Int16Array(totalSamples);
-            let offset = 0;
-            for (const chunk of accumulatedChunks) { combined.set(new Int16Array(chunk), offset); offset += new Int16Array(chunk).length; }
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(combined.buffer);
-                ws.send(JSON.stringify({ type: 'control', action: 'commit_utterance' }));
-                accumulatedChunks = [];
-                log('COMMIT: sent pending audio + commit_utterance');
-            }
-        } else {
-            // No audio accumulated — just send commit_utterance
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'control', action: 'commit_utterance' }));
-                log('COMMIT: sent commit_utterance (no audio)');
-            }
-        }
-        commitBtn.disabled = true;
-    });
-
-    // Cancel button: cancel current LLM request
-    cancelBtn.addEventListener('click', () => {
-        log('CANCEL BTN');
-        if (isRecording) {
+    if (e.code === 'Escape') {
+        e.preventDefault();
+        if (state === STATE.LISTENING) {
+            if (scriptProcessor && scriptProcessor._localIsRecording) scriptProcessor._localIsRecording.value = false;
             if (scriptProcessor) { scriptProcessor.disconnect(); scriptProcessor = null; }
             if (recordingStream) { recordingStream.getTracks().forEach(t => t.stop()); recordingStream = null; }
-            isRecording = false;
             accumulatedChunks = [];
+            sendCancel();
+            transition(STATE.READY, 'Esc cancel during listening');
+        } else if (state === STATE.THINKING || state === STATE.SPEAKING) {
+            sendCancel();
         }
-        if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'control', action: 'cancel' }));
-            log('CANCEL: cancel SENT');
-        }
-        cancelBtn.disabled = true;
-    });
+    }
+    if (e.code === 'KeyK' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        clearConversation();
+        log('Ctrl+K: conversation cleared');
+    }
+});
 
-    // Keyboard shortcuts
-    // Space: Push-to-talk (when not recording, start; when recording, stop+send)
-    // Esc: Cancel current request
-    // Ctrl+K: Clear conversation
-    document.addEventListener('keydown', (e) => {
-        // Ignore if user is typing in an input
-        if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
+window.toggleDebug = toggleDebug;
+window.clearConversation = clearConversation;
+window.onPrimaryClick = onPrimaryClick;
+window.onTtsModelChange = onTtsModelChange;
+window.onVadChange = onVadChange;
+window.loadVersions = loadVersions;
+window.onVersionChange = onVersionChange;
 
-        if (e.code === 'Space' && !e.repeat) {
-            e.preventDefault();
-            if (!recordBtn.disabled) {
-                if (isRecording) {
-                    stopRecordingAndSend();
-                } else {
-                    startRecording();
-                }
-            }
-        }
-
-        if (e.code === 'Escape') {
-            e.preventDefault();
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'control', action: 'cancel' }));
-                log('ESC: cancel SENT');
-            }
-            if (isRecording) {
-                stopRecordingAndSend();
-            }
-        }
-
-        if (e.code === 'KeyK' && (e.ctrlKey || e.metaKey)) {
-            e.preventDefault();
-            // Clear conversation
-            convEl.innerHTML = '<div class="placeholder">開始說話吧...</div>';
-            log('Ctrl+K: conversation cleared');
-        }
-    });
-
-    // Auto-connect
-    connect();
-    // Load versions for selected persona
-    loadVersions();
+renderUI();
+connect();
+loadVersions();

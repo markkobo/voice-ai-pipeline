@@ -14,10 +14,10 @@
     <div class="container">
         <div style="display: flex; justify-content: space-between; align-items: center;">
             <div>
-                <h1>Voice AI — 小S <span id="uiVersion" style="font-size:12px;color:#888">[v26]</span></h1>
-                <p class="subtitle">選擇對象，開始對話</p>
+                <h1>Voice AI — 小S <span id="uiVersion" style="font-size:12px;color:#888">[v27]</span></h1>
+                <p class="subtitle">選擇對象，按一下開始對話</p>
             </div>
-            <button onclick="clearConversation()" style="background:#555;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:13px;">🗑 清除對話</button>
+            <button id="clearBtn" onclick="clearConversation()" style="background:#555;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:13px;">🗑 清除對話</button>
         </div>
         <div id="status" class="status disconnected">Disconnected</div>
 
@@ -60,15 +60,20 @@
             <button onclick="loadVersions()" style="background: #333; color: #aaa; border: none; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 0.75rem; margin-left: auto;">🔄</button>
         </div>
 
+        <!-- Single-button FSM control row (refactor 2026-05-20).
+             The old four-button row (開始對話/停止對話/開始錄音/停止錄音/強制送出/取消)
+             collapsed into ONE primary button whose label is driven by the
+             chat FSM state machine in standalone.js. -->
         <div class="controls">
-            <button id="startStopBtn" class="primary" onclick="toggleConversation()">🎤 開始對話</button>
-            <button id="recordBtn" class="primary" disabled onclick="toggleRecording()">🎤 開始錄音</button>
-            <button id="commitBtn" disabled>✋ 強制送出</button>
-            <button id="cancelBtn" disabled>⏹ 取消</button>
+            <button id="primaryBtn" class="primary" disabled onclick="onPrimaryClick()">連線中…</button>
+            <label class="auto-continue-toggle" title="AI 回答結束後自動再次開啟麥克風，免按按鈕就能繼續對話">
+                <input type="checkbox" id="autoContinueChk" checked>
+                <span>自動繼續對話</span>
+            </label>
         </div>
 
         <div class="conversation" id="conversation">
-            <div class="placeholder">開始說話吧...</div>
+            <div class="placeholder">按 [🎤 開始說話] 或空白鍵開始對話...</div>
         </div>
 
         <!-- Thinking indicator (hidden by default) -->
@@ -86,7 +91,7 @@
             <div id="debugContent"></div>
         </div>
         <div class="keyboard-hint">
-            快捷鍵: <kbd>Space</kbd> 說話/停止 &nbsp;|&nbsp; <kbd>Esc</kbd> 取消 &nbsp;|&nbsp; <kbd>Ctrl+K</kbd> 清除對話
+            快捷鍵: <kbd>Space</kbd> 開始/送出 &nbsp;|&nbsp; <kbd>Esc</kbd> 中斷 &nbsp;|&nbsp; <kbd>Ctrl+K</kbd> 清除對話
         </div>
     </div>
 
