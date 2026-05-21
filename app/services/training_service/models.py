@@ -35,6 +35,13 @@ class TrainingType(str, Enum):
 
 class ProgressStatus(str, Enum):
     training = "training"
+    # Intermediate phase: epochs finished, LoRA adapter saved, now merging
+    # the adapter into the base model. For a 1.7B model this can take
+    # several minutes on g5.4xlarge — without this state the status bar
+    # would show "training 100% 10/10" for the entire merge window
+    # (validator used to reject status="merging" with only the three
+    # legal values below).
+    merging = "merging"
     ready = "ready"
     failed = "failed"
 

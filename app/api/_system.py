@@ -63,6 +63,12 @@ class TrainingStatusBlock(BaseModel):
     total_epochs: Optional[int] = None
     progress_pct: Optional[int] = None
     current_loss: Optional[float] = None
+    # Subprocess-reported phase: "training" during the epoch loop,
+    # "merging" after epochs finish while the parent merges LoRA into
+    # the base model. The status bar uses this to show "merging…"
+    # instead of leaving the pill stuck on "training 100% 10/10" for
+    # the multi-minute merge window.
+    phase: Optional[str] = None
 
 
 class SystemStatusResponse(BaseModel):
@@ -173,6 +179,7 @@ def _probe_training(service: TrainingService) -> TrainingStatusBlock:
             block.total_epochs = snap.total_epochs
             block.progress_pct = snap.progress_pct
             block.current_loss = snap.current_loss
+            block.phase = snap.status.value
     return block
 
 

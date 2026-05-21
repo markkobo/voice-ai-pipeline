@@ -58,29 +58,39 @@
             const diskText = document.getElementById('sysDiskText');
             if (diskText) diskText.textContent = s.disk_free_gb;
             // Training pill — formats:
-            //   pct only           → "training 23%"
-            //   epoch only         → "training 7/30"
-            //   both               → "training 23% 7/30"
-            //   neither            → "training…"          (fallback)
+            //   training phase, pct only   → "training 23%"
+            //   training phase, both       → "training 23% 7/30"
+            //   merging phase              → "merging…"  (parent is merging
+            //                                  LoRA → base, can take several
+            //                                  minutes for 1.7B — without
+            //                                  this the pill would stay
+            //                                  stuck on "training 100% 10/10")
+            //   neither                    → "training…"  (fallback)
             // The pill uses `white-space: nowrap`; on narrow viewports the
             // whole pill wraps to a new row rather than being clipped.
             const tEl = document.getElementById('sysTraining');
             if (tEl) {
                 if (window.SYS.trainingActive) {
                     const t = s.training || {};
-                    const parts = ['training'];
-                    if (t.progress_pct != null) parts.push(t.progress_pct + '%');
-                    if (t.current_epoch != null && t.total_epochs != null) {
-                        parts.push(`${t.current_epoch}/${t.total_epochs}`);
-                    }
                     const trainingText = document.getElementById('sysTrainingText');
                     if (trainingText) {
-                        trainingText.textContent = parts.length > 1
-                            ? parts.join(' ')
-                            : 'training…';
+                        if (t.phase === 'merging') {
+                            trainingText.textContent = 'merging…';
+                        } else {
+                            const parts = ['training'];
+                            if (t.progress_pct != null) parts.push(t.progress_pct + '%');
+                            if (t.current_epoch != null && t.total_epochs != null) {
+                                parts.push(`${t.current_epoch}/${t.total_epochs}`);
+                            }
+                            trainingText.textContent = parts.length > 1
+                                ? parts.join(' ')
+                                : 'training…';
+                        }
                     }
                     // Title for hover detail (helps on mobile via long-press).
-                    if (t.current_loss != null) {
+                    if (t.phase === 'merging') {
+                        tEl.title = 'merging LoRA adapter into base model';
+                    } else if (t.current_loss != null) {
                         tEl.title = `training — loss ${t.current_loss.toFixed(3)}`;
                     } else {
                         tEl.title = 'training in progress';
