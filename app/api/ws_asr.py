@@ -710,6 +710,36 @@ async def websocket_endpoint(websocket: WebSocket):
                                 f"(server uses active version)"
                             )
 
+                        # Activate the TTS model for this persona NOW, not
+                        # on the first TTS-stream call. Without this, the
+                        # status bar (which polls /api/system/status every
+                        # 5s) keeps showing the previous persona's active
+                        # version until the user speaks at least once and
+                        # _stream_tts_sentence eagerly activates. User
+                        # observation 2026-05-21: "switching persona in
+                        # chat doesn't flash the status bar".
+                        cfg_persona = payload.get("persona_id")
+                        if cfg_persona:
+                            try:
+                                from app.services.tts import get_tts_engine
+                                from app.services.training_service.repository import JsonTrainingRepository
+                                from app import config as _cfg
+                                _engine = get_tts_engine()
+                                _repo = JsonTrainingRepository(_cfg.models_dir())
+                                _active = _repo.get_active(cfg_persona)
+                                if _active is not None:
+                                    _v = _repo.get_or_none(_active.version_id)
+                                    if _v and _v.status.value == "ready" and _v.merged_path:
+                                        _engine.activate_version(_v.version_id)
+                                        log.info(
+                                            f"[{session_id}] Pre-activated v{_v.version_id} "
+                                            f"for persona {cfg_persona} on config receipt"
+                                        )
+                            except Exception as _e:
+                                log.warning(
+                                    f"[{session_id}] Eager activation failed for {cfg_persona}: {_e}"
+                                )
+
                         if not success:
                             await websocket.close(code=1003, reason="Failed to apply config")
                             return

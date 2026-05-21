@@ -120,6 +120,12 @@
         return false;
     };
 
+    // Expose a manual-poll hook so pages can trigger an immediate refresh
+    // after an action that's expected to change status (e.g. chat persona
+    // switch → server eagerly activates a new TTS model; user shouldn't
+    // wait up to 5s to see it land in the status bar).
+    window.SYS_FORCE_POLL = pollSystemStatus;
+
     setInterval(pollSystemStatus, 5000);
     pollSystemStatus();
 })();

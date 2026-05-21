@@ -895,6 +895,13 @@ personaEl.addEventListener('change', () => {
     // when persona changes.
     resendConfig('persona changed');
     loadVersions();
+    // Server's eager-activation on config receipt swaps the model
+    // synchronously, so a quick /api/system/status hit ~500ms later
+    // will reflect the new active_version. The status bar normally
+    // polls every 5s; this just shortens the apparent latency.
+    setTimeout(() => {
+        if (window.SYS_FORCE_POLL) window.SYS_FORCE_POLL();
+    }, 500);
 });
 
 listenerEl.addEventListener('change', () => {
