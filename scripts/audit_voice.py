@@ -167,7 +167,7 @@ def resolve_from_version(version_id: str) -> list[Path]:
         for seg_id in v.segment_ids_used:
             rec_id, _, spk_id = seg_id.partition("_")
             # Look in raw/{folder_name}/speakers/{spk_id}.wav
-            for folder in (cfg.recordings_root() / "raw").iterdir():
+            for folder in (cfg.recordings_dir() / "raw").iterdir():
                 wav = folder / "speakers" / f"{spk_id}.wav"
                 if wav.exists():
                     paths.append(wav)
@@ -178,7 +178,7 @@ def resolve_from_version(version_id: str) -> list[Path]:
 def resolve_from_recording(recording_id: str) -> list[Path]:
     sys.path.insert(0, str(REPO_ROOT))
     from app import config as cfg
-    root = cfg.recordings_root() / "raw"
+    root = cfg.recordings_dir() / "raw"
     out = []
     for folder in root.iterdir():
         meta_file = folder / "metadata.json"
@@ -192,12 +192,109 @@ def resolve_from_recording(recording_id: str) -> list[Path]:
     return out
 
 
+def audit_pipeline_stages(recording_id: str) -> None:
+    """Compare raw → denoised → enhanced → speakers/* across pipeline stages.
+
+    Answers two questions:
+    1. Did the pipeline degrade the source? (each stage's effective bandwidth
+       should be ≥ the previous stage's, with maybe a small drop from the
+       denoise noise floor.)
+    2. Is enhance actually doing anything? (output identical to denoised
+       means the Sepformer fallback fired silently.)
+    """
+    sys.path.insert(0, str(REPO_ROOT))
+    from app import config as cfg
+
+    folder = None
+    for f in cfg.raw_dir().iterdir():
+        meta_file = f / "metadata.json"
+        if not meta_file.exists():
+            continue
+        meta = json.loads(meta_file.read_text())
+        if meta.get("recording_id") == recording_id or f.name == recording_id:
+            folder = f
+            break
+    if folder is None:
+        print(red(f"Recording {recording_id!r} not found."))
+        return
+
+    stages = [
+        ("raw", cfg.raw_dir() / folder.name / "audio.wav"),
+        ("denoised", cfg.denoised_dir() / folder.name / "audio.wav"),
+        ("enhanced", cfg.enhanced_dir() / folder.name / "audio.wav"),
+    ]
+    speakers = list((folder / "speakers").glob("*.wav"))
+
+    print()
+    print(bold(f"  Pipeline stages for {folder.name}:"))
+    print()
+    print(f"  {'STAGE':18} {'SR':>5}  {'PEAK':>5}  {'RMS dB':>7}  {'SILENT':>6}  {'EFF.BW':>9}  {'>4 kHz':>8}  {'>8 kHz':>8}")
+    print(f"  {'-'*18} {'-'*5}  {'-'*5}  {'-'*7}  {'-'*6}  {'-'*9}  {'-'*8}  {'-'*8}")
+
+    prev_hash = None
+    for label, path in stages + [(f"speakers/{w.stem}", w) for w in speakers]:
+        if not path.exists():
+            print(f"  {label:18} {red('(missing)')}")
+            continue
+        m = audit_wav(path)
+        # Detect bit-identical stage (silent-noop fallback)
+        import hashlib
+        h = hashlib.md5(path.read_bytes()).hexdigest()[:8]
+        marker = ""
+        if prev_hash and prev_hash == h:
+            marker = red("  ← identical to previous stage (enhance no-op)")
+        prev_hash = h
+        print(
+            f"  {label:18} {m['sample_rate']:>5}  "
+            f"{m['peak']:>5.2f}  {m['rms_dbfs']:>7.1f}  "
+            f"{m['silent_pct']:>5.1f}%  "
+            f"{m['effective_bandwidth_hz']:>7.0f}Hz  "
+            f"{m['energy_4_8khz_pct']:>7.1f}%  "
+            f"{m['energy_8_12khz_pct']:>7.1f}%"
+            f"{marker}"
+        )
+
+    # Read metadata.json for stage status + errors
+    meta_file = folder / "metadata.json"
+    if meta_file.exists():
+        meta = json.loads(meta_file.read_text())
+        ps = meta.get("processing_steps", {})
+        print()
+        print(bold(f"  Pipeline step status:"))
+        for step in ("denoise", "enhance", "diarize", "transcribe"):
+            entry = ps.get(step, {})
+            status = entry.get("status", "?")
+            err = entry.get("error_message")
+            line = f"  {step:12} {status:8}"
+            if err:
+                line += f"  {red(err[:80])}"
+            print(line)
+
+    # Final read on the file that training would consume
+    if speakers:
+        print()
+        print(bold("  Training input audit (the file the trainer reads):"))
+        m = audit_wav(speakers[0])
+        warns = warnings_for(m)
+        if warns:
+            for w in warns:
+                print(f"  ⚠️  {w}")
+        else:
+            print(f"  {green('No quality warnings — source is suitable for training.')}")
+    print()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("path", nargs="?", help="Path to a .wav file to audit.")
     ap.add_argument("--version", help="Audit the source audio used by a trained version.")
     ap.add_argument("--recording", help="Audit all speakers in a recording (by recording_id).")
+    ap.add_argument("--pipeline", help="Compare raw / denoised / enhanced / speakers stages of a recording (by folder name or recording_id).")
     args = ap.parse_args()
+
+    if args.pipeline:
+        audit_pipeline_stages(args.pipeline)
+        return
 
     if args.path:
         files = [Path(args.path)]

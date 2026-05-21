@@ -396,7 +396,7 @@ class AudioProcessingPipeline:
 
                 elapsed_ms = int((time.time() - start_time) * 1000)
                 self.metadata.update_processing_step(
-                    "diarize", "done",
+                    "enhance", "done",
                     progress=100,
                     duration_ms=elapsed_ms
                 )
@@ -417,20 +417,31 @@ class AudioProcessingPipeline:
                         self.paths.enhanced_folder.mkdir(parents=True, exist_ok=True)
                         shutil.copy2(str(audio_path), str(self.paths.enhanced_audio_path))
                         elapsed_ms = int((time.time() - start_time) * 1000)
+                        # Mark step done but record the underlying failure so
+                        # the metadata.json + UI shows "enhance copied (Sepformer
+                        # error)". Without this, on-disk enhanced/audio.wav is
+                        # bit-identical to denoised/audio.wav, with
+                        # status=done + error_message=None — looks like the
+                        # enhance worked but it was a silent passthrough.
+                        # Fail-loud preference (see memory/feedback_fail_loud.md).
                         self.metadata.update_processing_step(
-                            "diarize", "done",
+                            "enhance", "done",
                             progress=100,
-                            duration_ms=elapsed_ms
+                            duration_ms=elapsed_ms,
+                            error_message=f"Sepformer failed, copied denoised as fallback: {type(e).__name__}: {e}",
                         )
-                        self._log(f"Enhance fallback: copied audio")
+                        self._log(f"Enhance fallback: copied audio (Sepformer error: {type(e).__name__})")
                         break
                     except Exception as fallback_error:
                         self._log(f"Enhance fallback also failed: {fallback_error}", "ERROR")
                         raise
 
         elapsed_ms = int((time.time() - start_time) * 1000)
+        # The trailing step-status writes inside _run_enhance() used to
+        # set "diarize" → done (a copy-paste bug — diarize hadn't run yet).
+        # Now correctly reports "enhance" done after retry+fallback loop.
         self.metadata.update_processing_step(
-            "diarize", "done",
+            "enhance", "done",
             progress=100,
             duration_ms=elapsed_ms
         )
