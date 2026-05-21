@@ -147,8 +147,16 @@
         // ==================== TREE VIEW RENDERING ====================
         function renderTree() {
             const listenerId = listenerFilter.value;
+            const personaId = personaSelect && personaSelect.value;  // top-level "選擇人格"
 
             let filtered = allRecordings;
+            // Persona filter (user-reported 2026-05-21): the top-level
+            // 人格 selector picks WHICH persona to train; the recordings
+            // list must show only recordings tagged with that persona so
+            // the user can't accidentally mix personas in a training run.
+            if (personaId) {
+                filtered = filtered.filter(r => r.persona_id === personaId);
+            }
             if (listenerId) {
                 filtered = filtered.filter(r => r.listener_id === listenerId);
             }
@@ -157,13 +165,20 @@
             filtered = filtered.filter(r => r.status === 'processed');
 
             if (filtered.length === 0) {
-                treeView.innerHTML = '<div class="empty-state">沒有處理的錄音</div>';
+                const conds = [];
+                if (personaId) conds.push('人格: ' + getPersonaName(personaId));
+                if (listenerId) conds.push('聆聽者: ' + getListenerName(listenerId));
+                const suffix = conds.length ? `（${conds.join('、')}）` : '';
+                treeView.innerHTML = `<div class="empty-state">沒有符合條件的錄音${suffix}</div>`;
                 document.getElementById('recordingsCount').textContent = '';
                 return;
             }
 
+            const labelBits = [];
+            if (personaId) labelBits.push('人格: ' + getPersonaName(personaId));
+            if (listenerId) labelBits.push('聆聽者: ' + getListenerName(listenerId));
             document.getElementById('recordingsCount').textContent =
-                `共 ${filtered.length} 個錄音${listenerId ? ' (聆聽者: ' + getListenerName(listenerId) + ')' : ''}`;
+                `共 ${filtered.length} 個錄音${labelBits.length ? ' (' + labelBits.join('、') + ')' : ''}`;
 
             treeView.innerHTML = filtered.map(r => renderRecordingFolder(r)).join('');
 
