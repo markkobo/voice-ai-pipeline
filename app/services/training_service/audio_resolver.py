@@ -86,18 +86,31 @@ class RecordingsAudioResolver:
                     details={"segment_id": seg_id, "expected_path": str(audio_path)},
                 )
 
-            # Duration must be present on the matching SpeakerSegment.
-            duration: float | None = None
-            for seg in recording.speaker_segments:
-                if seg.speaker_id == speaker_id:
-                    duration = seg.duration_seconds
-                    break
-            if duration is None:
+            # Sum the duration across ALL segments for this speaker.
+            # The on-disk `speakers/{speaker_id}.wav` is the concatenation
+            # of every turn this speaker took (pipeline.py:705-709), so
+            # the training-relevant duration is the SUM of all
+            # SpeakerSegment.duration_seconds with matching speaker_id —
+            # not just the first one. Previously the loop `break`ed
+            # after the first match, which on a 18-minute podcast with
+            # 190 alternating turns reported only the first 4.4s and
+            # tripped the trainer's "Total audio duration too short:
+            # 4.4s (minimum 10.0s)" guard (user-reported 2026-05-21).
+            durations = [
+                seg.duration_seconds
+                for seg in recording.speaker_segments
+                if seg.speaker_id == speaker_id
+                and seg.duration_seconds is not None
+            ]
+            if not durations:
                 raise NoTrainingAudioError(
-                    f"Duration unknown for segment {seg_id!r}; refuse to train on "
-                    "data with unknown duration (old code silently defaulted to 30s)",
+                    f"No segments with known duration for speaker "
+                    f"{speaker_id!r} in recording {recording_id!r}; refuse "
+                    "to train on data with unknown duration (old code "
+                    "silently defaulted to 30s)",
                     details={"segment_id": seg_id},
                 )
+            duration = sum(durations)
 
             resolved.append(
                 ResolvedSegment(

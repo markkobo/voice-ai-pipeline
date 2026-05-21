@@ -441,6 +441,49 @@ class TestRecordingsToAudioResolverHandoff:
             resolver.resolve_segments(["rec_phantom_SPEAKER_00"])
         assert "Speaker audio missing" in str(exc.value)
 
+    def test_resolver_sums_duration_across_multi_turn_speaker(
+        self, isolated_data, production_like_recordings
+    ):
+        """A multi-turn speaker (e.g. podcast host with 50+ alternating
+        turns) must report the SUM of all segment durations, not just
+        the first. Previously the loop `break`ed after the first match,
+        which on a 18-minute recording returned 4.4s and tripped the
+        trainer's `Total audio duration too short` guard (user-reported
+        2026-05-21)."""
+        raw_root = isolated_data / "recordings" / "raw"
+        folder = raw_root / "child_test_multiturn"
+        # 5 turns × 200s each = 1000s for SPEAKER_00; 3 turns × 1s for SPEAKER_01.
+        turns = (
+            [_seg_payload("SPEAKER_00", duration=200.0)] * 5
+            + [_seg_payload("SPEAKER_01", duration=1.0)] * 3
+        )
+        meta = {
+            "recording_id": "rec_multiturn",
+            "folder_name": folder.name,
+            "listener_id": "child",
+            "persona_id": "test",
+            "duration_seconds": 1003.0,
+            "file_size_bytes": 100_000_000,
+            "speaker_segments": turns,
+            "speaker_labels": {},
+            "status": "processed",
+            "created_at": "2026-05-21T02:03:34+00:00",
+            "updated_at": "2026-05-21T02:51:00+00:00",
+        }
+        _write_metadata_json(folder, meta)
+        _add_to_index(isolated_data / "recordings", "rec_multiturn", folder.name)
+        _make_wav(folder / "speakers" / "SPEAKER_00.wav", duration_seconds=1000.0)
+        _make_wav(folder / "speakers" / "SPEAKER_01.wav", duration_seconds=3.0)
+
+        rs = make_recordings_service_for_testing(isolated_data)
+        resolver = RecordingsAudioResolver(
+            recordings_service=rs,
+            audio_root=raw_root,
+        )
+        resolved = resolver.resolve_segments(["rec_multiturn_SPEAKER_00"])
+        assert len(resolved) == 1
+        assert resolved[0].duration_seconds == pytest.approx(1000.0)
+
     def test_resolver_raises_when_speaker_wav_missing_but_dir_exists(
         self, isolated_data, production_like_recordings
     ):
