@@ -320,3 +320,217 @@ class TestCoerceNaiveDatetimesToUtc:
         )
         _coerce_naive_datetimes_to_utc(recording)
         assert recording.created_at == aware  # unchanged
+
+
+# ---------------------------------------------------------------------------
+# Regression — orphan recovery and save() atomicity.
+#
+# Production incident c9518df8 (2026-05-21): a 18-min upload landed
+# metadata.json on disk but the matching index.json entry never
+# appeared, so the recording was invisible to GET / LIST. Root cause was
+# a silent half-write between repository.save()'s two writes. These
+# tests pin the two defenses:
+#   (1) list() finds folders-without-index-entry, returns them, and
+#       self-heals the index (so the next call hits the fast path).
+#   (2) save() is all-or-nothing — if _index_set fails after the
+#       metadata write, the metadata write is rolled back so we never
+#       leave an orphan again.
+# ---------------------------------------------------------------------------
+class TestOrphanRecovery:
+    """Defense-in-depth against the c9518df8 silent half-write incident."""
+
+    def test_list_includes_metadata_only_recording(self, repo):
+        """A folder with metadata.json but no index entry MUST appear in
+        list() and the index MUST be self-healed."""
+        import json
+
+        # Plant a folder on disk with metadata.json — but DON'T touch the
+        # index. This simulates the post-incident state of c9518df8.
+        folder = "child_xiao_s_orphan_20260521_020334"
+        folder_path = repo.raw_root / folder
+        folder_path.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "recording_id": "orphan-rid-1",
+            "folder_name": folder,
+            "listener_id": "child",
+            "persona_id": "xiao_s",
+            "created_at": "2026-05-21T02:03:34+00:00",
+            "updated_at": "2026-05-21T02:03:34+00:00",
+            "status": "processing",
+        }
+        (folder_path / "metadata.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        # Sanity: orphan is NOT in the index pre-list().
+        assert "orphan-rid-1" not in repo._read_index()
+
+        results = repo.list()
+
+        # The orphan came back.
+        rids = [r.recording_id for r in results]
+        assert "orphan-rid-1" in rids, (
+            "list() must surface folders that have metadata.json but no index entry"
+        )
+
+        # Self-heal: the index now contains the entry, so the next call
+        # hits the fast path (no orphan scan needed for this rid).
+        healed_index = repo._read_index()
+        assert healed_index.get("orphan-rid-1") == folder, (
+            f"list() must self-heal the index — expected entry for orphan-rid-1, "
+            f"got index {healed_index!r}"
+        )
+
+    def test_list_mixed_indexed_and_orphans(self, repo):
+        """A normal indexed recording + an orphan: list() returns both, in
+        sorted order, and self-heals the orphan."""
+        _write_recording_on_disk(
+            repo,
+            recording_id="indexed",
+            folder_name="child_xiao_s_indexed_20260520",
+            created_at_iso="2026-05-20T00:00:00+00:00",
+        )
+        # Plant an orphan with a newer timestamp so we can verify ordering.
+        import json
+        folder = "child_xiao_s_orphan_20260521"
+        folder_path = repo.raw_root / folder
+        folder_path.mkdir(parents=True, exist_ok=True)
+        (folder_path / "metadata.json").write_text(
+            json.dumps({
+                "recording_id": "orphan",
+                "folder_name": folder,
+                "listener_id": "child",
+                "persona_id": "xiao_s",
+                "created_at": "2026-05-21T00:00:00+00:00",
+                "updated_at": "2026-05-21T00:00:00+00:00",
+            }, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        results = repo.list()
+
+        assert [r.recording_id for r in results] == ["orphan", "indexed"], (
+            "Results must be newest-first regardless of orphan vs indexed"
+        )
+        # Both now in the index.
+        idx = repo._read_index()
+        assert idx.get("orphan") == folder
+        assert idx.get("indexed") == "child_xiao_s_indexed_20260520"
+
+    def test_list_skips_orphan_folders_without_metadata(self, repo):
+        """A bare directory with no metadata.json is NOT a recording — skip it.
+        (e.g., the speakers/ subfolder or stray tmp dirs.)"""
+        (repo.raw_root / "stray_folder").mkdir(parents=True, exist_ok=True)
+        results = repo.list()
+        assert results == []
+        # And no spurious index entry was created.
+        assert repo._read_index() == {}
+
+    def test_list_skips_orphans_with_corrupt_metadata(self, repo):
+        """If metadata.json is unparseable, log + skip — don't crash list()."""
+        bad = repo.raw_root / "bad_folder"
+        bad.mkdir(parents=True, exist_ok=True)
+        (bad / "metadata.json").write_text("not valid json {[", encoding="utf-8")
+        results = repo.list()
+        assert results == []
+
+
+class TestSaveAtomicity:
+    """save() must be all-or-nothing — either both metadata and index land,
+    or neither does. Pins the c9518df8 fix."""
+
+    def test_save_rolls_back_metadata_when_index_set_fails(self, repo, monkeypatch):
+        """If _index_set raises, save() MUST clean up the metadata it just
+        wrote. Otherwise we recreate the c9518df8 orphan-recording bug.
+
+        Note: the rollback policy is "remove only what *we* created" — a
+        pre-existing audio.wav next to a freshly-failed save() is NOT
+        deleted (would be a destructive surprise). This test exercises
+        the fresh-folder path."""
+        from app.services.recordings.models import Recording
+
+        recording = Recording.new(
+            recording_id="atomic-rid-1",
+            folder_name="child_xiao_s_atomic_20260521",
+            listener_id="child",
+            persona_id="xiao_s",
+        )
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("simulated index write failure")
+
+        monkeypatch.setattr(repo, "_index_set", _boom)
+
+        with pytest.raises(RuntimeError, match="simulated index write failure"):
+            repo.save(recording)
+
+        # Atomicity: neither metadata nor index entry exists.
+        assert "atomic-rid-1" not in repo._read_index(), (
+            "Failed save() must not leave a partial index entry"
+        )
+        folder_path = repo.raw_root / "child_xiao_s_atomic_20260521"
+        # The folder should also be gone (we created it; cleanup unlinks it
+        # since it was empty after the metadata rollback).
+        assert not folder_path.exists() or not (folder_path / "metadata.json").exists(), (
+            "Failed save() must roll back the metadata write"
+        )
+
+    def test_save_preserves_audio_when_index_set_fails(self, repo, monkeypatch):
+        """If the caller (upload path) pre-populated audio.wav in the folder
+        BEFORE calling save(), a failed save() must NOT delete that audio.
+        Otherwise we'd lose the user's recorded data on a transient index
+        write failure. The orphan-recovery in list() will catch the case
+        next time."""
+        from app.services.recordings.models import Recording
+
+        # Pre-populate the folder with the user's audio (mirrors upload flow:
+        # service.upload writes audio.wav, THEN calls repository.save).
+        folder_name = "child_xiao_s_preexisting_20260521"
+        folder_path = repo.raw_root / folder_name
+        folder_path.mkdir(parents=True, exist_ok=True)
+        audio_path = folder_path / "audio.wav"
+        audio_path.write_bytes(b"RIFF....WAVE sentinel audio bytes")
+
+        recording = Recording.new(
+            recording_id="atomic-rid-2",
+            folder_name=folder_name,
+            listener_id="child",
+            persona_id="xiao_s",
+        )
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("simulated index failure")
+
+        monkeypatch.setattr(repo, "_index_set", _boom)
+        with pytest.raises(RuntimeError):
+            repo.save(recording)
+
+        # Audio is preserved — caller's bytes are not collateral damage.
+        assert audio_path.exists(), (
+            "Pre-existing audio.wav must survive a failed save() — losing it "
+            "would destroy the upload"
+        )
+        # Metadata may or may not be present (we wrote it then attempted
+        # rollback; current implementation unlinks the metadata file that we
+        # wrote, but leaves the folder because audio.wav is still there).
+        # The orphan-recovery sweep will catch the case if metadata survived.
+
+    def test_save_happy_path_writes_both(self, repo):
+        """Sanity: a successful save() lands BOTH metadata and index."""
+        from app.services.recordings.models import Recording
+
+        recording = Recording.new(
+            recording_id="happy-rid",
+            folder_name="child_xiao_s_happy_20260521",
+            listener_id="child",
+            persona_id="xiao_s",
+        )
+        repo.save(recording)
+
+        assert repo._read_index().get("happy-rid") == "child_xiao_s_happy_20260521"
+        metadata_path = repo.raw_root / "child_xiao_s_happy_20260521" / "metadata.json"
+        assert metadata_path.exists()
+        # And we can round-trip it.
+        loaded = repo.get("happy-rid")
+        assert loaded.recording_id == "happy-rid"

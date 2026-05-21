@@ -110,14 +110,66 @@ class JsonRecordingsRepository:
         return self._read_metadata(folder)
 
     def list(self) -> list[Recording]:
+        """List all recordings.
+
+        Source of truth ordering: index.json first (fast path), then a
+        filesystem scan of ``raw_root`` for orphans — folders that have a
+        ``metadata.json`` but no index entry. Orphans are loaded, appended
+        to the result, AND self-healed into the index so the next call
+        hits the fast path. This is defensive against a previously-shipped
+        silent-failure mode where ``save()`` wrote metadata.json but failed
+        to update index.json — see commit history around the c9518df8 incident.
+        """
         index = self._read_index()
         results: list[Recording] = []
+        seen_folders: set[str] = set()
+
         for rid, folder in index.items():
+            seen_folders.add(folder)
             try:
                 results.append(self._read_metadata(folder))
             except (RecordingNotFound, CorruptMetadata) as e:
                 log.warning("Skipping corrupt or missing recording %s: %s", rid, e)
                 continue
+
+        # Orphan sweep — find folders on disk that aren't in the index.
+        # We log loudly and self-heal so the next list() call hits the
+        # fast path. Bounded by os.listdir() — O(N) where N=folders.
+        if self.raw_root.exists():
+            for folder_path in self.raw_root.iterdir():
+                if not folder_path.is_dir():
+                    continue
+                folder = folder_path.name
+                if folder in seen_folders:
+                    continue
+                metadata_path = folder_path / self.METADATA_FILENAME
+                if not metadata_path.exists():
+                    continue
+                try:
+                    recording = self._read_metadata(folder)
+                except CorruptMetadata as e:
+                    log.warning("Skipping orphan folder %s (corrupt metadata): %s", folder, e)
+                    continue
+                except RecordingNotFound:
+                    continue
+                log.warning(
+                    "Found orphan recording %s (folder=%s) not in index — repairing",
+                    recording.recording_id,
+                    folder,
+                )
+                results.append(recording)
+                # Self-heal the index. Best-effort — if this fails we still
+                # return the recording in the result list, so the user-facing
+                # listing isn't broken by a transient index write failure.
+                try:
+                    self._index_set(recording.recording_id, folder)
+                except Exception as e:  # pragma: no cover - belt-and-braces
+                    log.error(
+                        "Failed to self-heal index for orphan %s: %s",
+                        recording.recording_id,
+                        e,
+                    )
+
         results.sort(key=lambda r: r.created_at, reverse=True)
         return results
 
@@ -129,11 +181,29 @@ class JsonRecordingsRepository:
         Persist a Recording, taking an exclusive lock.
 
         Also registers the recording in the index if it's not there yet.
+
+        Atomicity: the two-write sequence (metadata.json then index.json) is
+        made all-or-nothing by rolling back the metadata write if the index
+        update fails. Without this, a transient index-write error (disk full,
+        permission flap, flock leak, concurrent legacy writer clobbering the
+        file — see file_storage.list_all_recordings) leaves the recording
+        invisible to lookups even though its bytes are on disk. We tolerate
+        re-running save() against a recording that's only PARTIALLY present
+        because:
+          (a) recordings is keyed by uuid — collisions are astronomically
+              unlikely;
+          (b) the orphan sweep in list() catches any partial state we miss.
         """
         folder = recording.folder_name
         folder_path = self.raw_root / folder
+        # Did we create this folder, or did it already exist (e.g. with the
+        # caller's already-written audio.wav)? Determines whether rollback
+        # should rmtree it — we don't want to delete audio the caller put
+        # there before calling save().
+        folder_preexisted = folder_path.exists()
         folder_path.mkdir(parents=True, exist_ok=True)
         metadata_path = folder_path / self.METADATA_FILENAME
+        metadata_preexisted = metadata_path.exists()
 
         recording.updated_at = datetime.now(timezone.utc)
         payload = recording.model_dump(mode="json")
@@ -143,7 +213,41 @@ class JsonRecordingsRepository:
 
         # Maintain the index — also under exclusive lock to avoid lost writes
         # when two recordings are saved concurrently.
-        self._index_set(recording.recording_id, folder)
+        try:
+            self._index_set(recording.recording_id, folder)
+        except Exception as e:
+            # Roll back the metadata write so save() is all-or-nothing.
+            # Loud log: this is a serious operational signal — silent
+            # half-writes were the c9518df8 production incident.
+            log.error(
+                "save() failed at _index_set for %s (folder=%s): %s — "
+                "rolling back metadata write",
+                recording.recording_id,
+                folder,
+                e,
+                exc_info=True,
+            )
+            # Only clean up what *we* just created. Don't delete a folder
+            # the caller pre-populated with audio.wav (that's a destructive
+            # surprise for upload paths where audio is written before save()).
+            try:
+                if not metadata_preexisted and metadata_path.exists():
+                    metadata_path.unlink()
+                if not folder_preexisted and folder_path.exists():
+                    # Folder created here — only remove if empty after
+                    # our metadata.json was unlinked. Don't rmtree something
+                    # with the user's audio.wav in it.
+                    remaining = [p for p in folder_path.iterdir()
+                                 if not p.name.endswith(".lock")]
+                    if not remaining:
+                        shutil.rmtree(folder_path)
+            except Exception as cleanup_err:  # pragma: no cover
+                log.error(
+                    "save() rollback cleanup failed for %s: %s",
+                    recording.recording_id,
+                    cleanup_err,
+                )
+            raise
 
     def delete(self, recording_id: str) -> None:
         folder = self._lookup_folder(recording_id)
