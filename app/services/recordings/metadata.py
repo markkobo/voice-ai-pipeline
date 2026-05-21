@@ -226,6 +226,8 @@ class RecordingMetadata:
                     seg["audio_path"] = sd.get("audio_path")
                     seg["transcription"] = sd.get("transcription")
                     seg["transcription_confidence"] = sd.get("transcription_confidence")
+                    if sd.get("voice_audit") is not None:
+                        seg["voice_audit"] = sd["voice_audit"]
                     # Inherit from recording-level metadata initially
                     if "persona_id" not in seg or seg.get("persona_id") is None:
                         seg["persona_id"] = self._data.get("persona_id")

@@ -485,6 +485,20 @@
             background: #ff444433;
             color: #ff4444;
         }
+        /* Voice-cloning training audit (separate verdict from segment SNR) */
+        .voice-audit-badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.72rem;
+            font-weight: 500;
+            cursor: help;
+            margin-left: 4px;
+        }
+        .voice-audit-badge.va-good { background: #11331f; color: #6fe2a4; }
+        .voice-audit-badge.va-marginal { background: #3a2f10; color: #f4c66a; }
+        .voice-audit-badge.va-bad { background: #3a1010; color: #ff7a7a; }
         .quality-flags {
             display: flex;
             gap: 4px;

@@ -284,16 +284,65 @@ def audit_pipeline_stages(recording_id: str) -> None:
     print()
 
 
+def backfill_all_recordings() -> None:
+    """Re-audit every recording's speakers/*.wav and write voice_audit into
+    metadata.json. Idempotent: re-running just overwrites with fresh metrics.
+    """
+    sys.path.insert(0, str(REPO_ROOT))
+    from app import config as cfg
+    from app.services.recordings.quality import audit_voice_training_quality
+
+    n = 0
+    for folder in cfg.raw_dir().iterdir():
+        meta_file = folder / "metadata.json"
+        if not meta_file.exists():
+            continue
+        try:
+            meta = json.loads(meta_file.read_text())
+        except Exception:
+            print(red(f"Skipping {folder.name}: corrupt metadata.json"))
+            continue
+        segs = meta.get("speaker_segments") or []
+        if not segs:
+            continue
+        # Build per-speaker audits (one per unique speaker_id, since speakers/
+        # is per-speaker not per-segment).
+        speaker_audits = {}
+        for spk_wav in (folder / "speakers").glob("*.wav"):
+            try:
+                speaker_audits[spk_wav.stem] = audit_voice_training_quality(spk_wav)
+            except Exception as e:
+                print(red(f"Audit failed for {spk_wav}: {e}"))
+        if not speaker_audits:
+            continue
+        # Stamp every segment for that speaker with the audit
+        for seg in segs:
+            sid = seg.get("speaker_id")
+            if sid in speaker_audits:
+                seg["voice_audit"] = speaker_audits[sid]
+        meta_file.write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+        n += 1
+        summary = ", ".join(f"{k}={v['level']}" for k, v in speaker_audits.items())
+        print(f"  {folder.name}: audited {len(speaker_audits)} speakers — {summary}")
+    print()
+    print(green(f"Backfilled {n} recordings."))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("path", nargs="?", help="Path to a .wav file to audit.")
     ap.add_argument("--version", help="Audit the source audio used by a trained version.")
     ap.add_argument("--recording", help="Audit all speakers in a recording (by recording_id).")
     ap.add_argument("--pipeline", help="Compare raw / denoised / enhanced / speakers stages of a recording (by folder name or recording_id).")
+    ap.add_argument("--backfill-all", action="store_true", help="Run voice_audit on every existing recording's speakers and write into metadata.json.")
     args = ap.parse_args()
 
     if args.pipeline:
         audit_pipeline_stages(args.pipeline)
+        return
+
+    if args.backfill_all:
+        backfill_all_recordings()
         return
 
     if args.path:

@@ -439,6 +439,7 @@
                         persona_id: seg.persona_id || null,
                         listener_id: seg.listener_id || null,
                         audio_path: seg.audio_path || null,
+                        voice_audit: null,
                     };
                 }
                 speakerGroups[sid].total_duration += seg.duration_seconds || 0;
@@ -448,6 +449,10 @@
                 }
                 if (seg.quality_score !== null && seg.quality_score !== undefined) {
                     speakerGroups[sid].quality_scores.push(seg.quality_score);
+                }
+                // voice_audit is per-speaker (same on every segment); first non-null wins.
+                if (!speakerGroups[sid].voice_audit && seg.voice_audit) {
+                    speakerGroups[sid].voice_audit = seg.voice_audit;
                 }
                 // Use first non-null persona/listener
                 if (!speakerGroups[sid].persona_id && seg.persona_id) {
@@ -526,6 +531,27 @@
                 ? `<span class="quality-badge ${qualityClass}">${qualityLabel} ${(quality * 100).toFixed(0)}%</span>`
                 : '';
 
+            // Voice-cloning audit badge — separate from the segment SNR/clarity
+            // quality_badge above. Tells the user if this speaker's audio is
+            // broadband enough to train a non-muffled clone. Tooltip shows the
+            // plain-language warnings and key metrics.
+            const va = speakerGroup.voice_audit;
+            let voiceAuditBadge = '';
+            if (va && va.level) {
+                const level = va.level;
+                const label = level === 'good' ? '✓ 音質良好' : level === 'marginal' ? '⚠ 音質勉強' : level === 'bad' ? '✕ 不適合訓練' : '?';
+                const cls = level === 'good' ? 'va-good' : level === 'marginal' ? 'va-marginal' : 'va-bad';
+                const m = va.metrics || {};
+                const warns = (va.warnings || []).join('\n');
+                const tooltip = (warns ? warns + '\n\n' : '') +
+                    `effective_bw: ${(m.effective_bandwidth_hz || 0).toFixed(0)} Hz\n` +
+                    `peak_dbfs: ${(m.peak_dbfs || 0).toFixed(1)}\n` +
+                    `rms_dbfs: ${(m.rms_dbfs || 0).toFixed(1)}\n` +
+                    `silent_pct: ${(m.silent_pct || 0).toFixed(1)}%\n` +
+                    `>4kHz: ${(m.energy_4_8khz_pct || 0).toFixed(1)}%, >8kHz: ${(m.energy_8_12khz_pct || 0).toFixed(2)}%`;
+                voiceAuditBadge = `<span class="voice-audit-badge ${cls}" title="${escapeHtml(tooltip)}">${label}</span>`;
+            }
+
             return `
                 <div class="segment-row" id="seg-${r.recording_id}-${speakerId}">
                     <span class="speaker-icon">👤</span>
@@ -533,6 +559,7 @@
                         <span class="speaker-name">${speakerId}</span>
                         <span class="speaker-segments-count">${segmentCount} 段</span>
                         ${qualityBadge}
+                        ${voiceAuditBadge}
                         ${transcript ? `<span class="speaker-transcript">${transcript}${transcript.length >= 100 ? '...' : ''}</span>` : ''}
                     </div>
                     <div class="segment-dropdowns">

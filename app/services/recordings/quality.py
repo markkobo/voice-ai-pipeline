@@ -384,3 +384,135 @@ def analyze_audio(audio_path: Path) -> dict:
     """
     analyzer = AudioQualityAnalyzer(audio_path)
     return analyzer.analyze()
+
+
+# ---------------------------------------------------------------------------
+# Voice-cloning training audit
+#
+# Separate from the SNR/clarity scoring above — this answers "is this
+# audio broadband enough that TTS training won't produce a muffled
+# clone?". Surfaces effective bandwidth, clipping, low-level energy
+# distribution. Used by both the recordings pipeline (per-speaker after
+# diarize) and scripts/audit_voice.py (developer-side diagnostics).
+# ---------------------------------------------------------------------------
+def audit_voice_training_quality(audio_path: Path) -> dict:
+    """Analyze a per-speaker wav for voice-cloning suitability.
+
+    Returns a dict with:
+      level:    "good" | "marginal" | "bad"
+      warnings: list[str]   — plain-language reasons (Chinese)
+      metrics:  dict        — raw numbers (sample_rate, peak_dbfs,
+                              effective_bandwidth_hz, energy_*_pct,
+                              silent_pct, clipped_samples)
+
+    Garbage in → garbage out: telephone-grade input produces a muffled
+    clone no matter how the training pipeline runs.
+    """
+    try:
+        import soundfile as sf
+    except ImportError as e:
+        logger.warning(f"soundfile not available for audit: {e}")
+        return {"level": "unknown", "warnings": [], "metrics": {}}
+
+    try:
+        audio, sr = sf.read(str(audio_path))
+    except Exception as e:
+        logger.warning(f"Failed to read {audio_path} for audit: {e}")
+        return {"level": "unknown", "warnings": [f"無法讀取音檔: {e}"], "metrics": {}}
+
+    audio = np.asarray(audio, dtype=np.float32)
+    if audio.ndim > 1:
+        audio = audio.mean(axis=1)
+
+    peak = float(np.abs(audio).max()) if audio.size else 0.0
+    rms = float(np.sqrt((audio ** 2).mean())) if audio.size else 0.0
+    clipped = int((np.abs(audio) > 0.999).sum())
+
+    # 100ms framing for silence detection
+    frame_size = max(int(0.1 * sr), 1)
+    n_frames = len(audio) // frame_size
+    if n_frames > 0:
+        frame_peaks = np.array([
+            np.abs(audio[i*frame_size:(i+1)*frame_size]).max()
+            for i in range(n_frames)
+        ])
+        silent_pct = float((frame_peaks < 0.005).mean() * 100)
+        voiced_idx = np.where(frame_peaks > 0.02)[0]
+    else:
+        silent_pct = 0.0
+        voiced_idx = np.array([], dtype=int)
+
+    # Spectrum on first ~10s of voiced content (or first 10s if no voice detected)
+    if len(voiced_idx) > 0:
+        chunks = [
+            audio[i*frame_size:(i+1)*frame_size]
+            for i in voiced_idx[:max(int(10 * sr / frame_size), 1)]
+        ]
+        sample = np.concatenate(chunks) if chunks else audio[:sr*10]
+    else:
+        sample = audio[:sr*10]
+    sample = sample[:sr*10] if sample.size else sample
+    if sample.size < 32:
+        return {
+            "level": "bad",
+            "warnings": ["音檔太短或為空"],
+            "metrics": {"duration_seconds": float(len(audio) / max(sr, 1))},
+        }
+
+    spec = np.abs(np.fft.rfft(sample * np.hanning(len(sample))))
+    freqs = np.fft.rfftfreq(len(sample), 1/sr)
+    power = spec ** 2
+    total_power = max(float(power.sum()), 1e-12)
+
+    def band_pct(lo, hi):
+        m = (freqs >= lo) & (freqs < hi)
+        return float(power[m].sum() / total_power * 100)
+
+    e_low = band_pct(0, 4000)
+    e_mid = band_pct(4000, 8000)
+    e_high = band_pct(8000, 12000)
+    cumul = power.cumsum() / total_power
+    idx_95 = int(np.searchsorted(cumul, 0.95))
+    eff_bw = float(freqs[min(idx_95, len(freqs) - 1)])
+
+    metrics = {
+        "sample_rate": int(sr),
+        "duration_seconds": float(len(audio) / sr),
+        "peak": peak,
+        "peak_dbfs": float(20 * np.log10(max(peak, 1e-9))),
+        "rms": rms,
+        "rms_dbfs": float(20 * np.log10(max(rms, 1e-9))),
+        "clipped_samples": clipped,
+        "silent_pct": silent_pct,
+        "effective_bandwidth_hz": eff_bw,
+        "energy_0_4khz_pct": e_low,
+        "energy_4_8khz_pct": e_mid,
+        "energy_8_12khz_pct": e_high,
+    }
+
+    # Plain-language warnings (Chinese) for the UI tooltip.
+    warns = []
+    if sr < 24000:
+        warns.append(f"取樣率僅 {sr} Hz（低於 TTS 原生 24 kHz）— 訓練無法還原失去的頻寬")
+    if clipped > 100 or peak > 0.999:
+        warns.append(f"音量過大造成削波（{clipped} 個樣本）— 失真會傳遞到複製出的聲音")
+    elif peak < 0.2:
+        warns.append(f"錄音音量過低（峰值 {peak:.2f}）— 聲音特徵不夠突出")
+    if silent_pct > 30:
+        warns.append(f"靜音比例 {silent_pct:.0f}% 偏高")
+    if eff_bw < 4000:
+        warns.append(f"有效頻寬僅 {eff_bw:.0f} Hz — 電話等級音質，複製出的聲音會悶悶的")
+    elif eff_bw < 6500:
+        warns.append(f"有效頻寬 {eff_bw:.0f} Hz 偏窄 — 高頻細節不足")
+    if e_high < 0.5 and sr >= 24000:
+        warns.append(f"8 kHz 以上能量僅 {e_high:.2f}% — 高頻成分嚴重缺失")
+
+    # Verdict ladder
+    if eff_bw < 4000 or (clipped > 100 and peak > 0.999):
+        level = "bad"
+    elif warns:
+        level = "marginal"
+    else:
+        level = "good"
+
+    return {"level": level, "warnings": warns, "metrics": metrics}

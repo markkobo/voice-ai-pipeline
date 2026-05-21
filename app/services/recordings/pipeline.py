@@ -757,10 +757,27 @@ class AudioProcessingPipeline:
                 # Speaker-level duration (combined)
                 duration_sec = len(speaker_audio_combined) / sample_rate
 
+                # Voice-cloning audit: bandwidth, clipping, levels. Runs on the
+                # concatenated speaker wav (the file the trainer reads). Stored
+                # per-segment so the recordings tree can badge each speaker.
+                # Cheap (<1s for 15min wav) — no GPU.
+                voice_audit = None
+                try:
+                    from .quality import audit_voice_training_quality
+                    voice_audit = audit_voice_training_quality(speaker_path)
+                    self._log(
+                        f"Voice audit for {speaker_id}: level={voice_audit['level']} "
+                        f"eff_bw={voice_audit['metrics'].get('effective_bandwidth_hz', 0):.0f}Hz "
+                        f"warnings={len(voice_audit['warnings'])}"
+                    )
+                except Exception as audit_err:
+                    self._log(f"Voice audit failed for {speaker_id}: {audit_err}", "WARNING")
+
                 speaker_audio_data.append({
                     "speaker_id": speaker_id,
                     "duration_seconds": duration_sec,
                     "audio_path": str(speaker_path),
+                    "voice_audit": voice_audit,
                     "transcription": self.metadata._data.get("transcription", {}).get("text", ""),
                     "transcription_confidence": self.metadata._data.get("transcription", {}).get("confidence", 0.0),
                 })

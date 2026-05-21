@@ -157,6 +157,13 @@ class SpeakerSegment(BaseModel):
     clarity_score: Optional[float] = None
     training_ready: Optional[bool] = None
 
+    # Voice-cloning training audit (effective bandwidth, clipping, etc.) —
+    # written once at end of diarize by audit_voice_training_quality().
+    # Shape: {"level": "good"|"marginal"|"bad", "warnings": [...], "metrics": {...}}.
+    # `dict` not a sub-model so the Chinese warning strings + raw metrics
+    # round-trip without forced schema rigidity.
+    voice_audit: Optional[dict] = None
+
     # Routing identity (set explicitly or inherited from the recording).
     persona_id: Optional[str] = None
     listener_id: Optional[str] = None
