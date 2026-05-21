@@ -570,10 +570,20 @@ def main():
                 if first_emb is not None:
                     # speaker_embeddings_cache stores (1, hidden); squeeze
                     # to (hidden,) for the parent's bake step.
+                    # Save at OUTPUT_DIR (version_dir) — NOT inside the
+                    # adapter/ subdir — so the parent's merge_lora() can
+                    # find it at lora_dir / "speaker_embedding.pt". The
+                    # 2026-05-21 first iteration of this fix saved into
+                    # the adapter/ subdir; merge_lora() looked at the
+                    # parent and missed it, so the bake silently didn't
+                    # happen and the merged model stayed at
+                    # tts_model_type=base (root cause of "preview voice
+                    # doesn't match the source recording").
                     emb_to_save = first_emb.squeeze(0).cpu()
-                    torch.save(emb_to_save, lora_path / "speaker_embedding.pt")
+                    emb_save_path = Path(OUTPUT_DIR) / "speaker_embedding.pt"
+                    torch.save(emb_to_save, emb_save_path)
                     logger.info(
-                        f"[LORA] Saved speaker_embedding shape={tuple(emb_to_save.shape)} → {lora_path / 'speaker_embedding.pt'}"
+                        f"[LORA] Saved speaker_embedding shape={tuple(emb_to_save.shape)} → {emb_save_path}"
                     )
                 else:
                     logger.warning(
@@ -941,29 +951,48 @@ if __name__ == "__main__":
                             with open(tracker_file, "w") as f:
                                 json.dump(prog, f)
 
-                        # Update version manager status to "ready" in index.json
+                        # Persist merged_path + ready status in index.json.
+                        # Previously this went through the legacy
+                        # VersionManager (`get_version_manager()`) and matched
+                        # by `v.lora_path == self.version_dir`. That path
+                        # comparison silently failed when lora_path was
+                        # stored as `/workspace/...` (project moved between
+                        # hosts) and the runtime resolved to `/home/rding/...`
+                        # → matching was always empty → merged_path never
+                        # landed in the index → TTS engine couldn't find
+                        # the model and fell back to base
+                        # (root cause of 2026-05-21 v1_20260521_171008
+                        # "female voice instead of trained child").
+                        # Use the new JsonTrainingRepository which keys by
+                        # version_id directly.
                         try:
-                            from app.services.training import get_version_manager
-                            vm = get_version_manager()
-                            # Extract version_id from version_dir name (e.g., "test_v1_20260424_005711")
-                            # The version_id in index.json is like "v1_20260424_005711"
-                            # We need to find by lora_path
-                            matching = [v for v in vm.list_versions() if v.lora_path and Path(v.lora_path) == self.version_dir]
-                            if matching:
-                                latest = matching[0]
-                                # Persist merged_path so activate_version()
-                                # doesn't have to re-derive it from persona_id
-                                # underscore-counts (demo-readiness #4).
-                                vm.update_version_status(
-                                    latest.version_id,
-                                    "ready",
-                                    final_loss=self._result.final_loss if hasattr(self._result, 'final_loss') else None,
-                                    training_time_seconds=self._result.training_time_seconds if hasattr(self._result, 'training_time_seconds') else None,
-                                    merged_path=str(merged_path.resolve()),
-                                )
-                                logger.info(f"[TRAINING:{self.version_id[:8]}] Updated index.json status to ready for {latest.version_id}")
+                            from app import config as _cfg
+                            from app.services.training_service.repository import JsonTrainingRepository
+                            from app.services.training_service.models import VersionStatus as _VS
+                            from datetime import datetime, timezone
+                            repo = JsonTrainingRepository(_cfg.models_dir())
+                            final_loss = getattr(self._result, 'final_loss', None)
+                            ttime = getattr(self._result, 'training_time_seconds', None)
+                            resolved_merged = str(merged_path.resolve())
+
+                            def _mutate(v):
+                                v.status = _VS.ready
+                                v.merged_path = resolved_merged
+                                if final_loss is not None:
+                                    v.final_loss = float(final_loss)
+                                if ttime is not None:
+                                    v.training_time_seconds = int(ttime)
+                                v.completed_at = datetime.now(timezone.utc)
+
+                            repo.update(self.version_id, _mutate)
+                            logger.info(
+                                f"[TRAINING:{self.version_id[:8]}] Updated index.json: "
+                                f"status=ready, merged_path={resolved_merged}"
+                            )
                         except Exception as vm_err:
-                            logger.warning(f"[TRAINING:{self.version_id[:8]}] Failed to update version manager: {vm_err}")
+                            logger.exception(
+                                f"[TRAINING:{self.version_id[:8]}] Failed to update repository: {vm_err}"
+                            )
 
                         # Auto-activate the new merged model
                         try:
@@ -1218,7 +1247,19 @@ def merge_lora(lora_dir: Path, base_model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
     )
     persona_id = '_'.join(name_parts[:v_idx]) if v_idx and v_idx > 0 else name_parts[0]
 
+    # Canonical location: version_dir/speaker_embedding.pt. Fall back to
+    # adapter/speaker_embedding.pt for runs that pre-date the 2026-05-21
+    # location-fix commit (the first iteration of the bake landed there
+    # by accident — diagnosed when the v1_20260521_171008 preview came
+    # back as base-default female voice instead of the trained child).
     speaker_emb_path = lora_dir / "speaker_embedding.pt"
+    if not speaker_emb_path.exists():
+        legacy = lora_dir / "adapter" / "speaker_embedding.pt"
+        if legacy.exists():
+            speaker_emb_path = legacy
+            logger.info(
+                f"[MERGE] Using legacy adapter/-nested speaker_embedding.pt: {legacy}"
+            )
     merged_config_path = merged_path / "config.json"
 
     if speaker_emb_path.exists() and merged_config_path.exists():
