@@ -35,19 +35,27 @@ class EnergyVAD(BaseVAD):
     """
 
     # Sensitivity presets: (energy_threshold, silence_duration_to_commit, min_speech_duration)
+    # 2026-05-21: thresholds shifted down ~3x for phone-via-cloudflared use.
+    # Mobile Chrome's getUserMedia AGC targets a lower output level than
+    # desktop, so RMS peaks during normal speech are ~0.005-0.012 on a phone
+    # vs ~0.05+ on a laptop with the same speech. The previous medium
+    # threshold (0.02) was tuned for the laptop case and silently ignored
+    # all phone speech, leaving the user thinking VAD was broken. New
+    # values are above the typical mobile noise floor (~0.001) but below
+    # phone-speech peaks. Laptop speech sits well above all three thresholds.
     PRESETS = {
         "low": {
-            "energy_threshold": 0.005,
+            "energy_threshold": 0.003,
             "silence_duration_to_commit": 2.0,
             "min_speech_duration": 0.5,
         },
         "medium": {
-            "energy_threshold": 0.02,
+            "energy_threshold": 0.008,
             "silence_duration_to_commit": 1.5,
             "min_speech_duration": 0.3,
         },
         "high": {
-            "energy_threshold": 0.05,
+            "energy_threshold": 0.02,
             "silence_duration_to_commit": 1.0,
             "min_speech_duration": 0.2,
         },
