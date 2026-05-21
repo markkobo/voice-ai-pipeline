@@ -496,14 +496,24 @@ async def preview_version(
 
     preview_text = (body.text or "你好，這是我的聲音測試。").strip()
 
-    async def audio_stream():
-        import io
-        import wave
+    # Generate the full WAV synchronously instead of streaming — this lets
+    # us raise an explicit HTTP 500 with a real error body when the
+    # engine produces zero audio chunks. The legacy StreamingResponse
+    # variant returned HTTP 200 with a 0-byte body in that case, which
+    # the browser silently played as nothing (root cause of the
+    # 2026-05-21 "v2_20260521_144817_303063 preview silent" report —
+    # merge_lora produced a Base-arch model that the engine couldn't
+    # drive, so chunk_producer raised inside the generator and audio_chunks
+    # stayed empty).
+    import io
+    import wave
 
-        sample_rate = 24000
-        lock = get_tts_generation_lock()
-        async with lock:
-            audio_chunks: list[bytes] = []
+    sample_rate = 24000
+    lock = get_tts_generation_lock()
+    async with lock:
+        audio_chunks: list[bytes] = []
+        last_error: Optional[str] = None
+        try:
             async for event in engine.generate_streaming(
                 text=preview_text,
                 instruct=None,
@@ -511,16 +521,35 @@ async def preview_version(
             ):
                 if event.event == "audio_chunk" and event.audio_data:
                     audio_chunks.append(event.audio_data)
-            if audio_chunks:
-                full_audio = b"".join(audio_chunks)
-                wav_io = io.BytesIO()
-                with wave.open(wav_io, "wb") as wav_file:
-                    wav_file.setnchannels(1)
-                    wav_file.setsampwidth(2)
-                    wav_file.setframerate(sample_rate)
-                    wav_file.writeframes(full_audio)
-                wav_io.seek(0)
-                yield wav_io.read()
+                elif event.event == "error" and getattr(event, "error", None):
+                    last_error = str(event.error)
+        except Exception as gen_err:
+            last_error = f"{type(gen_err).__name__}: {gen_err}"
+
+    if not audio_chunks:
+        from fastapi import HTTPException
+        detail = (
+            f"TTS engine produced no audio for version {version_id!r}. "
+            f"Likely cause: merged model is Base-architecture without "
+            f"a baked speaker embedding (tts_model_type=base), or LoRA "
+            f"merge failed. Check server logs for [TTS] / [MERGE] errors."
+        )
+        if last_error:
+            detail += f" Engine reported: {last_error}"
+        raise HTTPException(status_code=500, detail=detail)
+
+    full_audio = b"".join(audio_chunks)
+    wav_io = io.BytesIO()
+    with wave.open(wav_io, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(full_audio)
+    wav_io.seek(0)
+    wav_bytes = wav_io.read()
+
+    async def audio_stream():
+        yield wav_bytes
 
     return StreamingResponse(
         audio_stream(),

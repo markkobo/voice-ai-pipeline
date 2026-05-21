@@ -530,6 +530,39 @@ def main():
             with open(lora_path / "adapter_config.json", "w") as f:
                 json_module.dump(adapter_config, f)
 
+            # Persist the trained speaker embedding so the parent's
+            # merge_lora() can bake it into the merged model's
+            # talker.model.codec_embedding[spk_id]. Without this the
+            # merged model has the LoRA delta on attention weights but
+            # no per-persona timbre, and the engine has to fall back to
+            # VoiceDesign mode — which Base-architecture doesn't support
+            # through the standard `generate_voice_design_streaming()`
+            # path, producing a silent preview (root cause of the
+            # 2026-05-21 "no audio on v2_20260521_144817_303063" report).
+            try:
+                # Use the first non-None cached embedding — there's one
+                # per training audio file; for single-file training (the
+                # common case) there's just one.
+                first_emb = next(
+                    (e for e in speaker_embeddings_cache if e is not None),
+                    None,
+                )
+                if first_emb is not None:
+                    # speaker_embeddings_cache stores (1, hidden); squeeze
+                    # to (hidden,) for the parent's bake step.
+                    emb_to_save = first_emb.squeeze(0).cpu()
+                    torch.save(emb_to_save, lora_path / "speaker_embedding.pt")
+                    logger.info(
+                        f"[LORA] Saved speaker_embedding shape={tuple(emb_to_save.shape)} → {lora_path / 'speaker_embedding.pt'}"
+                    )
+                else:
+                    logger.warning(
+                        "[LORA] No speaker embedding to save — merge will produce a "
+                        "Base-arch model that the TTS engine cannot drive (silent preview)."
+                    )
+            except Exception as emb_err:
+                logger.exception(f"[LORA] Failed to save speaker_embedding: {emb_err}")
+
             logger.info(f"LoRA saved to: {lora_path}")
             result = {
                 "success": True,
@@ -1135,6 +1168,115 @@ def merge_lora(lora_dir: Path, base_model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
             shutil.copytree(item, dest, dirs_exist_ok=True)
         else:
             shutil.copy2(item, dest)
+
+    # ---------------------------------------------------------------------
+    # CustomVoice conversion — bake the per-persona speaker embedding into
+    # talker.model.codec_embedding[spk_id] and rewrite config to
+    # `tts_model_type=custom_voice`, mirroring the SFT path. Without this
+    # the merged model has the LoRA delta applied but still presents as
+    # `tts_model_type=base`, which the TTS engine treats as "VoiceDesign"
+    # mode → `generate_voice_design_streaming()` raises "Loaded model does
+    # not support voice design generation" → preview emits 0 bytes
+    # (silent). Root cause of the 2026-05-21
+    # "v2_20260521_144817_303063 preview silent" report.
+    #
+    # The training subprocess saves speaker_embedding.pt alongside the
+    # adapter; we load it here. If it's missing (legacy LoRA runs from
+    # before this fix), fall back to a no-bake save with a loud warning
+    # — the merged model will be Base-arch and the preview will be
+    # silent, but we don't crash on the merge.
+    # ---------------------------------------------------------------------
+    # Extract persona_id from lora_dir.name. Layout is
+    # `{persona_id}_v{N}_{date}_{time}_{rand}`, so persona_id is
+    # everything up to (but not including) the first part starting with
+    # 'v' followed by a digit (e.g. 'v2'). Handles multi-underscore
+    # persona names like 'xiao_s'.
+    name_parts = lora_dir.name.split('_')
+    v_idx = next(
+        (i for i, p in enumerate(name_parts) if re.fullmatch(r'v\d+', p)),
+        None,
+    )
+    persona_id = '_'.join(name_parts[:v_idx]) if v_idx and v_idx > 0 else name_parts[0]
+
+    speaker_emb_path = lora_dir / "speaker_embedding.pt"
+    merged_config_path = merged_path / "config.json"
+
+    if speaker_emb_path.exists() and merged_config_path.exists():
+        try:
+            speaker_embedding = torch.load(speaker_emb_path, map_location="cpu")
+            with open(merged_config_path) as f:
+                merged_config = json.load(f)
+
+            # Assign or reuse spk_id for this persona.
+            spk_id_dict = merged_config.get("talker_config", {}).get("spk_id", {})
+            if persona_id.lower() in spk_id_dict:
+                spk_id = spk_id_dict[persona_id.lower()]
+            else:
+                max_id = max(spk_id_dict.values()) if spk_id_dict else 0
+                spk_id = max_id + 1
+                spk_id_dict[persona_id.lower()] = spk_id
+            if "talker_config" not in merged_config:
+                merged_config["talker_config"] = {}
+            merged_config["talker_config"]["spk_id"] = spk_id_dict
+
+            # Mark as Chinese dialect (preserves accent in inference).
+            spk_is_dialect = merged_config.get("talker_config", {}).get("spk_is_dialect", {})
+            spk_is_dialect[persona_id.lower()] = "chinese"
+            merged_config["talker_config"]["spk_is_dialect"] = spk_is_dialect
+
+            # Switch architecture so the engine routes to
+            # generate_custom_voice_streaming() instead of
+            # generate_voice_design_streaming().
+            merged_config["tts_model_type"] = "custom_voice"
+            merged_config.pop("speaker_encoder_config", None)
+
+            # Bake speaker embedding into talker.model.codec_embedding[spk_id].
+            codec_embed_key = "talker.model.codec_embedding.weight"
+            if codec_embed_key in merged_state:
+                embed_weight = merged_state[codec_embed_key]
+                hidden_size = embed_weight.shape[1]
+                if speaker_embedding.shape[0] != hidden_size:
+                    logger.warning(
+                        f"[MERGE] Speaker embedding size mismatch: "
+                        f"{speaker_embedding.shape[0]} vs {hidden_size}; truncating/padding."
+                    )
+                    if speaker_embedding.shape[0] > hidden_size:
+                        speaker_embedding = speaker_embedding[:hidden_size]
+                    else:
+                        padding = torch.zeros(hidden_size - speaker_embedding.shape[0])
+                        speaker_embedding = torch.cat([speaker_embedding, padding])
+                embed_weight[spk_id] = speaker_embedding.to(embed_weight.dtype)
+                merged_state[codec_embed_key] = embed_weight
+                logger.info(
+                    f"[MERGE] Baked speaker embedding into {codec_embed_key} at spk_id={spk_id} for persona={persona_id}"
+                )
+            else:
+                logger.warning(
+                    f"[MERGE] {codec_embed_key} not in merged_state — bake skipped; preview will be silent."
+                )
+
+            # Strip speaker_encoder.* — CustomVoice models don't carry it.
+            stripped = [k for k in list(merged_state.keys()) if 'speaker_encoder' in k]
+            for k in stripped:
+                del merged_state[k]
+            if stripped:
+                logger.info(f"[MERGE] Removed {len(stripped)} speaker_encoder.* keys")
+
+            # Write updated config back.
+            with open(merged_config_path, "w") as f:
+                json.dump(merged_config, f, indent=2)
+            logger.info(f"[MERGE] Rewrote config → tts_model_type=custom_voice, spk_id={spk_id}")
+        except Exception as bake_err:
+            logger.exception(
+                f"[MERGE] CustomVoice bake failed: {bake_err} — preview will be silent."
+            )
+    else:
+        logger.warning(
+            f"[MERGE] speaker_embedding.pt missing at {speaker_emb_path} "
+            f"or config missing at {merged_config_path}. "
+            f"Merged model will stay as tts_model_type=base; preview will be silent. "
+            f"(This happens for LoRA runs from before the 2026-05-21 fix.)"
+        )
 
     # Save merged safetensor
     logger.info(f"[MERGE] Saving merged model to {merged_path}")
