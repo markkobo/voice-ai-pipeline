@@ -105,25 +105,72 @@ async def _stream_tts_sentence(
 
     log.info(f"[{session_id}] TTS _stream_tts_sentence: model_size={model_size}, emotion={emotion}, text='{text[:30]}...' enhanced='{enhanced_text_content[:30]}...' engine={type(engine).__name__ if engine else None}")
 
-    # Look up reference audio for voice clone (optional — pass None if unavailable)
+    # Resolve which TTS model the chat should use for this persona.
+    #
+    # Two distinct modes coexist:
+    #
+    #   (a) custom_voice mode — engine.activate_version(version_id) loads
+    #       a merged Qwen3-TTS model with the persona's speaker embedding
+    #       baked into talker.codec_embedding[spk_id]. This is the path
+    #       the training-page Preview uses, and what the user expects
+    #       when they "switch model" in the chat dropdown.
+    #
+    #   (b) voice_clone mode — engine.activate_voice_clone(persona_id,
+    #       ref_audio) uses the BASE model + a reference wav at
+    #       inference time. No training required, but quality is lower
+    #       and the voice is decided by whatever ref_audio is found.
+    #
+    # The old code always took path (b) for chat, which silently
+    # OVERWROTE whatever the user had activated via the training page
+    # (e.g. v9 with the trained child's voice baked in). Result: preview
+    # sounded like the trained voice, chat sounded like base + ref
+    # audio — observed as "v9 sounds female in chat but male in preview"
+    # on 2026-05-21.
+    #
+    # Now: if the persona has an active READY version with a merged_path
+    # on disk, use path (a). Otherwise fall back to (b).
     reference_audio = None
     if persona_id:
         try:
-            # First try version-based reference audio
-            from app.api.tts_stream import _get_persona_reference_audio
-            reference_audio = _get_persona_reference_audio(persona_id)
-            if reference_audio:
-                log.info(f"[{session_id}] Using voice clone for persona {persona_id}: {reference_audio}")
+            from app.services.training_service.repository import JsonTrainingRepository
+            from app import config as _cfg
+            repo = JsonTrainingRepository(_cfg.models_dir())
+            active = repo.get_active(persona_id)
+            chosen_version = None
+            if active is not None:
+                v = repo.get_or_none(active.version_id)
+                if v and v.status.value == "ready" and v.merged_path:
+                    chosen_version = v
+            if chosen_version is not None:
+                engine.activate_version(chosen_version.version_id)
+                log.info(
+                    f"[{session_id}] Activated custom_voice model for persona "
+                    f"{persona_id}: {chosen_version.version_id} "
+                    f"(merged_path={chosen_version.merged_path})"
+                )
             else:
-                # Fall back to TTS engine's auto-find for voice_clone mode
+                # No active merged model — fall back to voice_clone with a
+                # reference wav. Keeps personas that have NEVER been trained
+                # working (uses the base model timbre as a starting point).
+                from app.api.tts_stream import _get_persona_reference_audio
                 from app.services.tts.qwen_tts_engine import FasterQwenTTSEngine
-                reference_audio = FasterQwenTTSEngine.find_reference_audio(persona_id)
+                reference_audio = (
+                    _get_persona_reference_audio(persona_id)
+                    or FasterQwenTTSEngine.find_reference_audio(persona_id)
+                )
                 if reference_audio:
-                    # Activate voice_clone mode on the engine
                     engine.activate_voice_clone(persona_id, reference_audio)
-                    log.info(f"[{session_id}] Activated voice clone mode for persona {persona_id}: {reference_audio}")
+                    log.info(
+                        f"[{session_id}] No active version for {persona_id}; "
+                        f"using voice_clone mode with reference: {reference_audio}"
+                    )
+                else:
+                    log.info(
+                        f"[{session_id}] No active version and no reference "
+                        f"audio for persona {persona_id} — base model voice."
+                    )
         except Exception as e:
-            log.warning(f"[{session_id}] Could not set up voice clone for persona {persona_id}: {e}")
+            log.warning(f"[{session_id}] TTS model resolution failed for {persona_id}: {e}", exc_info=True)
 
     stream_start = time.perf_counter()
 
