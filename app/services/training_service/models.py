@@ -93,6 +93,11 @@ class TrainingVersion(BaseModel):
     segment_ids_used: list[str] = Field(default_factory=list)
     created_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+    # Populated when the version transitions to `failed` — either by the
+    # subprocess via progress.json["error_message"], or by sweep_stranded
+    # when reconciling a version whose subprocess died without writing a
+    # terminal state.
+    error_message: Optional[str] = None
 
     def to_legacy_dict(self) -> dict:
         """Match the legacy `to_dict()` shape that UI clients consume.

@@ -6,22 +6,33 @@
    Per RFC_M6 Phase 0-pre review #28: this partial replaces the prior
    3× duplicated markup, which had already drifted (recordings.html was
    missing title= attrs and `id="sysVoice"` / `id="sysDisk"` that the
-   shared JS expected). #}
+   shared JS expected).
+
+   Layout (2026-05-21): wrapping flex row so pills break onto a second
+   row on narrow viewports (≤375px iPhone) instead of triggering a
+   horizontal scrollbar. Nav links sit in their own group that wraps
+   together. The previous `<span style="flex:1">` spacer was removed —
+   it forced single-row layout. CSS handles right-alignment of the nav
+   group via `margin-left: auto` on the last group on wide screens, and
+   simply lets it wrap naturally on narrow ones. #}
 <div id="sysStatusBar">
-    <span class="pill" id="sysVram" title="GPU VRAM">VRAM
-        <div class="vram-bar"><div class="vram-fill" id="sysVramFill" style="width:0%"></div></div>
-        <span id="sysVramText">— / —</span>
-    </span>
-    <span class="pill" id="sysVoice" title="Active TTS voice">🎙️ <span id="sysVoiceText">—</span></span>
-    <span class="pill" id="sysAsr">ASR: <span id="sysAsrText">—</span></span>
-    <span class="pill busy" id="sysTraining" style="display:none">
-        <span class="spinner"></span>
-        <span id="sysTrainingText">training…</span>
-    </span>
-    <span style="flex:1"></span>
-    <span class="pill" id="sysDisk">💾 <span id="sysDiskText">—</span> GB</span>
-    <span style="color:#445">·</span>
-    <a href="/ui" style="color:#7aa4ff">chat</a>
-    <a href="/ui/recordings" style="color:#7aa4ff">recordings</a>
-    <a href="/ui/training" style="color:#7aa4ff">training</a>
+    <div class="sys-pills">
+        <span class="pill" id="sysVram" title="GPU VRAM">
+            <span class="pill-label">VRAM</span>
+            <div class="vram-bar"><div class="vram-fill" id="sysVramFill" style="width:0%"></div></div>
+            <span id="sysVramText">— / —</span>
+        </span>
+        <span class="pill" id="sysVoice" title="Active TTS voice">🎙️ <span id="sysVoiceText">—</span></span>
+        <span class="pill" id="sysAsr" title="ASR engine state"><span class="pill-label">ASR:</span> <span id="sysAsrText">—</span></span>
+        <span class="pill busy" id="sysTraining" style="display:none" title="Training in progress">
+            <span class="spinner"></span>
+            <span id="sysTrainingText">training…</span>
+        </span>
+        <span class="pill" id="sysDisk" title="Free disk space (GB)">💾 <span id="sysDiskText">—</span><span class="pill-suffix"> GB</span></span>
+    </div>
+    <nav class="sys-nav">
+        <a href="/ui">chat</a>
+        <a href="/ui/recordings">recordings</a>
+        <a href="/ui/training">training</a>
+    </nav>
 </div>

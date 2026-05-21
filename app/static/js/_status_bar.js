@@ -57,17 +57,33 @@
             // Disk pill
             const diskText = document.getElementById('sysDiskText');
             if (diskText) diskText.textContent = s.disk_free_gb;
-            // Training pill
+            // Training pill — formats:
+            //   pct only           → "training 23%"
+            //   epoch only         → "training 7/30"
+            //   both               → "training 23% 7/30"
+            //   neither            → "training…"          (fallback)
+            // The pill uses `white-space: nowrap`; on narrow viewports the
+            // whole pill wraps to a new row rather than being clipped.
             const tEl = document.getElementById('sysTraining');
             if (tEl) {
                 if (window.SYS.trainingActive) {
-                    const t = s.training;
-                    const pct = t.progress_pct != null ? t.progress_pct + '%' : '';
-                    const ep = (t.current_epoch != null && t.total_epochs != null)
-                        ? ` ${t.current_epoch}/${t.total_epochs}` : '';
+                    const t = s.training || {};
+                    const parts = ['training'];
+                    if (t.progress_pct != null) parts.push(t.progress_pct + '%');
+                    if (t.current_epoch != null && t.total_epochs != null) {
+                        parts.push(`${t.current_epoch}/${t.total_epochs}`);
+                    }
                     const trainingText = document.getElementById('sysTrainingText');
                     if (trainingText) {
-                        trainingText.textContent = `training ${pct}${ep}`.trim();
+                        trainingText.textContent = parts.length > 1
+                            ? parts.join(' ')
+                            : 'training…';
+                    }
+                    // Title for hover detail (helps on mobile via long-press).
+                    if (t.current_loss != null) {
+                        tEl.title = `training — loss ${t.current_loss.toFixed(3)}`;
+                    } else {
+                        tEl.title = 'training in progress';
                     }
                     tEl.style.display = '';
                 } else {

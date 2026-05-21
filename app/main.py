@@ -218,6 +218,21 @@ async def startup_event():
     except Exception as e:
         logger.exception(f"Recordings sweep_stranded failed: {e}")
 
+    # Reconcile training versions stuck in `training` from a previous
+    # run — the subprocess may have completed (progress.json says
+    # ready/failed) but its parent died before flipping index.json,
+    # or the subprocess itself died without writing a terminal state.
+    # Without this sweep the version sits in "訓練中" forever (observed
+    # for v1_20260521_104108_618646).
+    try:
+        from app.api._dependencies import _get_or_create_training_service
+        trn_svc = _get_or_create_training_service(app.state)
+        n = trn_svc.sweep_stranded()
+        if n:
+            logger.warning(f"Reconciled {n} stranded training versions on startup")
+    except Exception as e:
+        logger.exception(f"Training sweep_stranded failed: {e}")
+
 
 if __name__ == "__main__":
     import uvicorn

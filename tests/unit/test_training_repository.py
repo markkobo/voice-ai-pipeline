@@ -195,6 +195,38 @@ class TestManifestAndProgress:
         progress_path.write_text("not json")
         assert repo.read_progress("v1_x") is None
 
+    def test_progress_missing_version_id_is_injected_from_path(self, repo, tmp_path):
+        """The training_job subprocess historically wrote progress.json
+        without `version_id`; the reader must inject it from the path
+        rather than silently failing validation. Regression for the
+        2026-05-21 "v1_20260521_104108_618646 stuck in training" bug:
+        subprocess wrote `{"status":"ready",...}` (no version_id),
+        TrainingProgressSnapshot rejected it as missing-field, and the
+        index entry never flipped from training → ready.
+        """
+        v = _make_version("v1_x", lora_root=tmp_path)
+        repo.save(v)
+        progress_path = Path(v.lora_path) / "progress.json"
+        progress_path.write_text(
+            json.dumps(
+                {
+                    # NOTE: no "version_id" — matches the bad on-disk format.
+                    "status": "ready",
+                    "current_epoch": 10,
+                    "progress_pct": 100,
+                    "persona_id": "test",
+                    "training_type": "lora",
+                    "current_loss": 0.0,
+                    "best_loss": 0.0,
+                }
+            )
+        )
+        snap = repo.read_progress("v1_x")
+        assert snap is not None
+        assert snap.version_id == "v1_x"
+        assert snap.status.value == "ready"
+        assert snap.progress_pct == 100
+
 
 class TestConcurrency:
     """The whole point of this repository over the legacy VersionManager."""
@@ -250,3 +282,109 @@ class TestConcurrency:
         assert len(all_versions) == N, (
             f"Expected {N} versions, got {len(all_versions)}. Index may have lost writes."
         )
+
+
+class TestSweepStranded:
+    """TrainingService.sweep_stranded() — reconcile orphaned `training` versions
+    on startup. Regression for the 2026-05-21 "stuck in training" bug.
+    """
+
+    def _service(self, repo, tmp_path):
+        from app.services.training_service.audio_resolver import AudioResolver
+        from app.services.training_service.service import TrainingService
+
+        class _AcceptingValidator:
+            def is_valid(self, _): return True
+            def list_ids(self): return set()
+
+        class _NullResolver(AudioResolver):
+            def resolve_segments(self, segment_ids): return []
+
+        return TrainingService(
+            repository=repo,
+            persona_validator=_AcceptingValidator(),
+            audio_resolver=_NullResolver(),
+            models_dir=tmp_path / "models",
+        )
+
+    def test_sweep_flips_terminal_progress_to_ready(self, repo, tmp_path):
+        """progress.json says ready → index entry gets flipped to ready
+        (the exact path the v1_20260521_104108_618646 bug took: training
+        actually finished but the parent never updated index.json).
+        """
+        v = _make_version("v1_x", lora_root=tmp_path)
+        v.status = VersionStatus.training
+        repo.save(v)
+        # Subprocess-style progress.json *without* version_id — the bad
+        # on-disk format the reader-side fix now tolerates.
+        progress_path = Path(v.lora_path) / "progress.json"
+        progress_path.write_text(
+            json.dumps(
+                {
+                    "status": "ready",
+                    "current_epoch": 10,
+                    "progress_pct": 100,
+                    "persona_id": "xiao_s",
+                    "training_type": "lora",
+                    "current_loss": 0.5,
+                    "best_loss": 0.5,
+                }
+            )
+        )
+        svc = self._service(repo, tmp_path)
+        n = svc.sweep_stranded()
+        assert n == 1
+        assert repo.get("v1_x").status == VersionStatus.ready
+
+    def test_sweep_flips_no_progress_to_failed(self, repo, tmp_path):
+        """No progress.json + status=training → subprocess died before
+        writing terminal state; the sweep should flip to failed so the
+        UI shows "失敗 (interrupted)" instead of "訓練中" forever.
+        """
+        v = _make_version("v1_x", lora_root=tmp_path)
+        v.status = VersionStatus.training
+        repo.save(v)
+        svc = self._service(repo, tmp_path)
+        n = svc.sweep_stranded()
+        assert n == 1
+        got = repo.get("v1_x")
+        assert got.status == VersionStatus.failed
+        assert got.error_message and "interrupted" in got.error_message
+
+    def test_sweep_leaves_ready_alone(self, repo, tmp_path):
+        v = _make_version("v1_x", lora_root=tmp_path)
+        v.status = VersionStatus.ready
+        repo.save(v)
+        svc = self._service(repo, tmp_path)
+        assert svc.sweep_stranded() == 0
+        assert repo.get("v1_x").status == VersionStatus.ready
+
+    def test_sweep_backfills_merged_path_when_dir_exists(self, repo, tmp_path):
+        """When the merged model directory is on disk but the index entry
+        has no `merged_path` (parent died after subprocess merged but
+        before updating the index), the sweep should record it.
+        Activation can't find the model otherwise.
+        """
+        # Create a lora_path with the canonical naming pattern.
+        v = _make_version("v1_x", persona_id="test", lora_root=tmp_path)
+        # _make_version sets lora_path to {lora_root}/{persona}_{version_id}.
+        # merge_lora() derives the merged dir from the first 3 underscore
+        # parts of that directory name → here 'test_v1_x' has only 2 parts,
+        # so we need a directory that splits into ≥3 parts to mirror real
+        # life (e.g. test_v1_20260521).
+        lora_dir = tmp_path / "test_v1_20260521"
+        lora_dir.mkdir()
+        merged_dir = tmp_path / "merged_qwen3_tts_test_v1_20260521"
+        merged_dir.mkdir()
+        v.lora_path = str(lora_dir)
+        v.status = VersionStatus.training
+        # Subprocess-style progress.json (no version_id, status=ready).
+        (lora_dir / "progress.json").write_text(
+            json.dumps({"status": "ready", "current_epoch": 10, "progress_pct": 100})
+        )
+        repo.save(v)
+        svc = self._service(repo, tmp_path)
+        assert svc.sweep_stranded() == 1
+        got = repo.get("v1_x")
+        assert got.status == VersionStatus.ready
+        assert got.merged_path == str(merged_dir.resolve())

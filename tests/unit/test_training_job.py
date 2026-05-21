@@ -203,6 +203,57 @@ class TestTrainingResultSchema:
         result = TrainingResult(success=True, lora_path="/x")
         assert result.sft_path is None
 
+
+class TestTrainingTemplateSilentNoOpFix:
+    """Regression tests for the 2026-05-21 silent-no-op LoRA bug
+    (v1_20260521_104108_618646). The generated train_lora.py used to:
+      1. Build talker_hidden as a 3D tensor (3D mean(keepdim=True)) → trip
+         qwen3_tts's `len(shape)==2` assert on every batch.
+      2. Catch the AssertionError in a bare `except: continue`, logging
+         only `{e}` — which for AssertionError("") is empty.
+      3. Report success=true with final_loss=0.0 after 0 gradient updates.
+      4. Merge an all-zero adapter → merged model = base model.
+
+    These tests read the template *source* (not run it) so they execute
+    without GPU / 1.7B-model downloads.
+    """
+
+    def _src(self):
+        return Path("app/services/training_service/training_job.py").read_text()
+
+    def test_talker_hidden_uses_cached_speaker_embedding_not_3d_mean(self):
+        src = self._src()
+        # The buggy fallback that built audio_embeds via 3D mean is gone.
+        assert "audio_embeds.mean(dim=0, keepdim=True)" not in src, (
+            "The 3D mean(keepdim=True) fallback that violates "
+            "forward_sub_talker_finetune's 2D assert must be removed."
+        )
+        # The cache lookup is unconditional (no `if not USE_LORA` guard).
+        assert "speaker_embeddings_cache[audio_file_idx]" in src
+        assert "if not USE_LORA and speaker_embeddings_cache" not in src
+
+    def test_batch_error_uses_logger_exception(self):
+        src = self._src()
+        # logger.exception preserves stacktrace even for AssertionError("")
+        # whose str(e) is empty. The legacy logger.error(f"...: {e}")
+        # produced uninformative `Batch error at step 0:` lines.
+        assert 'logger.error(f"Batch error at step {num_steps}: {e}")' not in src
+        assert "logger.exception" in src
+
+    def test_post_loop_fail_fast_when_zero_batches(self):
+        src = self._src()
+        # If every batch errored, refuse to write success=true.
+        assert "if total_batches == 0:" in src
+        assert "produced 0 gradient updates" in src
+
+    def test_template_still_compiles_as_python_source(self):
+        """Smoke check — the template module itself must remain valid
+        Python (the heredoc edits could break this)."""
+        import py_compile
+        py_compile.compile(
+            "app/services/training_service/training_job.py", doraise=True
+        )
+
     def test_training_result_round_trip_from_subprocess_json(self):
         """
         Mirrors the production subprocess output for a successful SFT run

@@ -1,23 +1,52 @@
 /* System status bar — shared across all dev UI pages.
    Loaded via <link rel="stylesheet" href="/static/css/_status_bar.css">
-   in each page's <head>. RFC_M6 Phase 0-pre review #28. */
+   in each page's <head>. RFC_M6 Phase 0-pre review #28.
+
+   Layout (2026-05-21): pills + nav use a wrapping flex row so the bar
+   reflows onto a second line on narrow viewports (e.g. 375px iPhone)
+   instead of producing a horizontal scrollbar. The `.sys-pills` group
+   keeps all status pills together; `.sys-nav` is right-aligned via
+   `margin-left: auto` on wide screens and wraps below the pills when
+   the row no longer fits. No information is hidden on mobile — only
+   the chrome (paddings, gaps, VRAM-bar width, " GB" suffix) shrinks.
+*/
 
 #sysStatusBar {
     position: sticky; top: 0; z-index: 100;
     background: #0b1220; border-bottom: 1px solid #1a2438;
-    font-size: 12px; padding: 6px 16px;
-    display: flex; gap: 18px; align-items: center;
+    font-size: 12px; padding: 6px 12px;
+    display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center;
     color: #aab2c5;
+    /* Never let inline content force a horizontal scrollbar. */
+    max-width: 100%; box-sizing: border-box;
 }
+#sysStatusBar .sys-pills {
+    display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center;
+    min-width: 0;            /* allow children to shrink below intrinsic size */
+}
+#sysStatusBar .sys-nav {
+    display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center;
+    margin-left: auto;       /* pushes nav to the right on wide screens */
+}
+#sysStatusBar .sys-nav a {
+    color: #7aa4ff; text-decoration: none;
+}
+#sysStatusBar .sys-nav a:hover { text-decoration: underline; }
+
 #sysStatusBar .pill {
     display: inline-flex; align-items: center; gap: 6px;
     padding: 2px 8px; border-radius: 10px;
     background: #182338; color: #c5cbdc;
+    white-space: nowrap;     /* keep each pill's content on one line */
+    max-width: 100%;
 }
 #sysStatusBar .pill.ok    { background: #11331f; color: #6fe2a4; }
 #sysStatusBar .pill.warn  { background: #3a2f10; color: #f4c66a; }
 #sysStatusBar .pill.busy  { background: #2a1d3a; color: #c89efa; }
-#sysStatusBar .vram-bar { width: 80px; height: 6px; background: #1f2a44; border-radius: 3px; overflow: hidden; }
+#sysStatusBar .vram-bar {
+    width: 80px; height: 6px; background: #1f2a44;
+    border-radius: 3px; overflow: hidden; flex-shrink: 0;
+}
 #sysStatusBar .vram-fill { height: 100%; background: #6fe2a4; transition: width .3s, background-color .3s; }
 #sysStatusBar .vram-fill.warn { background: #f4c66a; }
 #sysStatusBar .vram-fill.high { background: #ff7a7a; }
@@ -28,3 +57,22 @@
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 .gated[disabled] { opacity: 0.4; cursor: not-allowed; }
+
+/* Narrow viewports (phones, ≤480px): shrink chrome to keep every pill
+   visible on one or two rows without horizontal scroll. */
+@media (max-width: 480px) {
+    #sysStatusBar {
+        font-size: 11px; padding: 5px 8px; gap: 4px 8px;
+    }
+    #sysStatusBar .sys-pills { gap: 4px 6px; }
+    #sysStatusBar .sys-nav { gap: 2px 8px; margin-left: 0; width: 100%; }
+    #sysStatusBar .pill { padding: 1px 6px; gap: 4px; border-radius: 8px; }
+    /* Drop the inline "VRAM" / "ASR:" labels — the icon/bar/text carry
+       enough meaning; the pill's `title=` attribute still describes it. */
+    #sysStatusBar .pill-label { display: none; }
+    /* Drop the trailing " GB" suffix on the disk pill — the digits + 💾
+       icon are unambiguous. */
+    #sysStatusBar .pill-suffix { display: none; }
+    /* Smaller VRAM bar so the pill fits beside the text on iPhone widths. */
+    #sysStatusBar .vram-bar { width: 48px; height: 5px; }
+}

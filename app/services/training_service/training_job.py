@@ -119,10 +119,12 @@ NUM_EPOCHS = ''' + str(self.config.num_epochs) + '''
 BATCH_SIZE = ''' + str(self.config.batch_size) + '''
 TRACKER_PATH = Path(OUTPUT_DIR) / "progress.json"
 PERSONA_ID = "''' + self.persona_id + '''"
+VERSION_ID = "''' + self.version_id + '''"
 
 # Initialize progress.json before training starts
 def init_progress():
     prog = {
+        "version_id": VERSION_ID,
         "status": "training",
         "current_epoch": 0,
         "progress_pct": 0,
@@ -281,13 +283,19 @@ def main():
         logger.info(f"[DATASET] Total chunks: {len(dataset)}, Total frames: {total_frames}, Avg chunk len: {avg_chunk_len:.1f}")
         logger.info(f"[DATASET] Chunk size: {chunk_size}, Hop size: {hop_size}, Min chunk: {min_chunk_size}")
 
-        # For SFT: extract and cache speaker embeddings BEFORE training
-        # We need one embedding per ORIGINAL audio file, not per chunk
-        # Since dataset is now chunked, we need to map chunk -> audio file
+        # Extract + cache one speaker embedding per ORIGINAL audio file,
+        # for BOTH LoRA and SFT. Previously this was gated `if not USE_LORA`
+        # and the LoRA path fell into a buggy fallback that built a 3D
+        # talker_hidden via mean(dim=0, keepdim=True) over a stacked
+        # audio-codes embedding — qwen3_tts asserts 2D, every batch raised
+        # AssertionError, the bare except below swallowed it, and 10
+        # "successful" epochs produced 0 gradient updates (observed for
+        # v1_20260521_104108_618646). The cached embedding has shape
+        # (1, hidden) which is what forward_sub_talker_finetune expects.
         audio_for_speaker_embeds = []
         TARGET_SR = 24000  # Qwen3-TTS requires 24kHz
-        if not USE_LORA:
-            logger.info("SFT mode: pre-extracting speaker embeddings...")
+        if True:
+            logger.info("Pre-extracting speaker embeddings (LoRA + SFT)...")
             # First load all audio for speaker embedding extraction
             for path in AUDIO_PATHS:
                 p = Path(path)
@@ -367,33 +375,13 @@ def main():
 
         start_time = time.time()
 
-        # For SFT with Base model, load audio files once for speaker embedding extraction
-        audio_for_speaker_embeds = []
-        TARGET_SR = 24000  # Qwen3-TTS requires 24kHz
-        if not USE_LORA:
-            logger.info("SFT mode: loading audio for speaker embedding extraction...")
-            for path in AUDIO_PATHS:
-                p = Path(path)
-                if p.exists():
-                    audio_data, sr = sf.read(str(p))
-                    if audio_data.dtype != np.float32:
-                        audio_data = audio_data.astype(np.float32)
-                    # Resample to 24kHz if needed (Qwen3-TTS only supports 24kHz)
-                    if sr != TARGET_SR:
-                        logger.info(f"Resampling {path} from {sr}Hz to {TARGET_SR}Hz for speaker embedding")
-                        from scipy import signal
-                        num_samples = int(len(audio_data) * TARGET_SR / sr)
-                        audio_data = signal.resample(audio_data, num_samples)
-                        sr = TARGET_SR
-                    # Normalize audio
-                    max_val = np.abs(audio_data).max()
-                    if max_val > 0:
-                        audio_data = audio_data / max_val
-                    audio_for_speaker_embeds.append((audio_data, sr))
-                    logger.info(f"Loaded audio for speaker embedding: {path}, {len(audio_data)/sr:.1f}s")
-                else:
-                    audio_for_speaker_embeds.append((None, None))
-                    logger.warning(f"Audio file not found for speaker embedding: {path}")
+        # NOTE: the duplicate `if not USE_LORA` audio-loading block that
+        # used to live here was removed when speaker_embeddings_cache was
+        # made unconditional above. The cache populated earlier covers
+        # both modes; no second load needed.
+
+        # Cross-epoch batch counter — used by the post-loop fail-fast.
+        total_batches = 0
 
         for epoch in range(NUM_EPOCHS):
             epoch_loss = 0.0
@@ -419,31 +407,23 @@ def main():
                 seq_len = sample_codes.shape[0]
                 device = next(model.parameters()).device
 
-                # For SFT: use cached speaker embedding from the audio file this chunk came from
-                # For LoRA: use code embedding averaging
-                if not USE_LORA and speaker_embeddings_cache and speaker_embeddings_cache[audio_file_idx] is not None:
-                    # Use cached speaker embedding from pre-extracted list
-                    talker_hidden = speaker_embeddings_cache[audio_file_idx]
-                    logger.debug(f"Chunk {sample_idx} from audio {audio_file_idx}: using cached speaker embedding")
-                else:
-                    # Fallback: use code embedding averaging
-                    with torch.no_grad():
-                        audio_embeds = []
-                        # First code group uses talker's embeddings
-                        embed = model.talker.get_input_embeddings()(
-                            sample_codes[0].unsqueeze(0).to(device)
-                        )
-                        audio_embeds.append(embed)
-                        # Remaining code groups use code_predictor's embeddings
-                        for g in range(1, num_code_groups):
-                            embed = model.talker.code_predictor.get_input_embeddings()[g-1](
-                                sample_codes[g].unsqueeze(0).to(device)
-                            )
-                            audio_embeds.append(embed)
-                        audio_embeds = torch.stack(audio_embeds, dim=1).squeeze(0)
-
-                        # Average as speaker representation
-                        talker_hidden = audio_embeds.mean(dim=0, keepdim=True)
+                # Use the cached per-audio-file speaker embedding for both
+                # LoRA and SFT. The shape is (1, hidden_size), matching
+                # forward_sub_talker_finetune's `len(talker_hidden_states.shape) == 2`
+                # assertion. The legacy "code embedding averaging" fallback
+                # produced a 3D tensor and tripped the assertion silently.
+                cached = (
+                    speaker_embeddings_cache[audio_file_idx]
+                    if speaker_embeddings_cache and audio_file_idx < len(speaker_embeddings_cache)
+                    else None
+                )
+                if cached is None:
+                    logger.error(
+                        f"No cached speaker embedding for audio_file_idx={audio_file_idx} "
+                        f"(chunk {sample_idx}); skipping"
+                    )
+                    continue
+                talker_hidden = cached
 
                 # Process each time step
                 for step in range(min(seq_len - 1, 50)):
@@ -465,6 +445,7 @@ def main():
                             epoch_loss += loss.item()
                             num_batches += 1
                             num_steps += 1
+                            total_batches += 1
 
                             if num_steps % 10 == 0:
                                 logger.info(f"Epoch {epoch+1} step {num_steps}: loss={loss.item():.6f}")
@@ -472,7 +453,14 @@ def main():
                             logger.warning(f"Skipping step {num_steps}: loss is None or NaN")
 
                     except Exception as e:
-                        logger.error(f"Batch error at step {num_steps}: {e}")
+                        # logger.exception (not .error(str(e))) so empty-message
+                        # AssertionErrors still produce a stacktrace.
+                        # Previously this swallowed AssertionError(""), 0
+                        # gradient updates happened across 10 epochs, and the
+                        # job still reported success=true.
+                        logger.exception(
+                            f"Batch error at step {num_steps} (type={type(e).__name__})"
+                        )
                         continue
 
             avg_loss = epoch_loss / max(num_batches, 1)
@@ -494,6 +482,21 @@ def main():
                 logger.error(f"Progress save error: {e}")
 
         training_time = int(time.time() - start_time)
+
+        # Fail-fast: if zero gradient updates happened across all epochs,
+        # the produced LoRA adapter is identically zero and the merged
+        # model equals the base — the user's preview would sound like
+        # generic Qwen3-TTS, not the cloned voice. Refuse to write a
+        # "success" result in that case so the merge step never runs and
+        # the UI surfaces a real failure. Regression for the 2026-05-21
+        # v1_20260521_104108_618646 silent-no-op bug.
+        if total_batches == 0:
+            raise RuntimeError(
+                f"Training produced 0 gradient updates across {NUM_EPOCHS} epochs "
+                f"(every batch raised an exception that was caught by the "
+                f"per-step except handler). The model has not been trained. "
+                f"See the per-batch ERROR logs above for the underlying cause."
+            )
 
         if USE_LORA:
             # Save LoRA adapter weights

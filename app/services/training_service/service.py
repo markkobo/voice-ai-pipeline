@@ -236,6 +236,91 @@ class TrainingService:
         return {"is_training": False}
 
     # ------------------------------------------------------------------
+    # Startup sweep — reconcile stranded `training` versions.
+    # ------------------------------------------------------------------
+    def sweep_stranded(self) -> int:
+        """Reconcile any version stuck in `status=training` with on-disk truth.
+
+        Run at server startup so a training job that already finished (or
+        died) on a previous run doesn't stay stuck in the "訓練中" UI state.
+        Mirrors `RecordingsService.sweep_stranded` and the corpus
+        ingestion sweep.
+
+        Two cases per stranded version:
+        1. progress.json says `ready` / `failed` → call
+           refresh_status_from_progress to sync index.json.
+        2. progress.json is absent or still says `training` → the
+           subprocess died without writing a terminal state; flip to
+           failed with an `interrupted` message.
+
+        Returns the number of versions reconciled.
+        """
+        count = 0
+        for v in self.repository.list():
+            if v.status != VersionStatus.training:
+                continue
+            progress = self.repository.read_progress(v.version_id)
+            terminal = progress is not None and progress.status.value in (
+                "ready",
+                "failed",
+            )
+            try:
+                if terminal:
+                    self.refresh_status_from_progress(v.version_id)
+                    # Backfill merged_path if the merged model directory is
+                    # already on disk but the index never recorded it
+                    # (parent died after subprocess finished merging but
+                    # before index update). Without this, activation can't
+                    # locate the model. Naming convention matches
+                    # training_job.merge_lora() — see line ~1022.
+                    self._backfill_merged_path(v.version_id)
+                else:
+                    def _flip(ver: TrainingVersion) -> None:
+                        ver.status = VersionStatus.failed
+                        ver.error_message = (
+                            "interrupted (server restarted mid-training)"
+                        )
+                        ver.completed_at = datetime.now(timezone.utc)
+                    self.repository.update(v.version_id, _flip)
+                count += 1
+                log.warning(
+                    "Reconciled stranded training version: id=%s persona=%s terminal=%s",
+                    v.version_id, v.persona_id, terminal,
+                )
+            except Exception as e:
+                log.exception(
+                    "Failed to reconcile stranded training version %s: %s",
+                    v.version_id, e,
+                )
+        return count
+
+    def _backfill_merged_path(self, version_id: str) -> None:
+        """If a merged model directory exists on disk but the index entry
+        has no `merged_path`, record it. Idempotent — no-op when the path
+        is already set or the directory is absent.
+        """
+        v = self.repository.get_or_none(version_id)
+        if v is None or v.merged_path or not v.lora_path:
+            return
+        lora_dir = Path(v.lora_path)
+        parts = lora_dir.name.split("_")
+        if len(parts) < 3:
+            return
+        version_base = "_".join(parts[:3])
+        merged_dir = lora_dir.parent / f"merged_qwen3_tts_{version_base}"
+        if not merged_dir.exists():
+            return
+
+        def _set(ver: TrainingVersion) -> None:
+            ver.merged_path = str(merged_dir.resolve())
+
+        try:
+            self.repository.update(version_id, _set)
+            log.info("Backfilled merged_path for %s → %s", version_id, merged_dir)
+        except TrainingVersionNotFound:
+            pass
+
+    # ------------------------------------------------------------------
     # Mutate — small/safe ops
     # ------------------------------------------------------------------
     def set_nickname(self, version_id: str, nickname: Optional[str]) -> TrainingVersion:

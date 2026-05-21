@@ -168,13 +168,33 @@ class JsonTrainingRepository:
 
         Returns None if the file does not exist or fails to parse — the SSE
         generator treats those cases as "no update available yet".
+
+        Resilience: `version.lora_path` is an absolute path captured at job
+        creation time, so it can go stale if the project is moved between
+        hosts (observed: a version created with cwd `/workspace/...` now
+        running under `/home/rding/...`). When the stored path's
+        progress.json is missing, fall back to the canonical layout
+        `{models_dir}/{persona}_{version_id}/progress.json` — the
+        repository's own root — before giving up. Otherwise the status-bar
+        training pill loses its epoch/% indicators after a directory move.
         """
         version = self.get_or_none(version_id)
         if version is None or not version.lora_path:
             return None
         progress_path = Path(version.lora_path) / self.PROGRESS_FILENAME
         if not progress_path.exists():
-            return None
+            # Fallback: derive from this repository's models_dir + the
+            # standard `{persona}_{version_id}` directory name.
+            fallback_dir = self.models_dir / f"{version.persona_id}_{version_id}"
+            fallback_path = fallback_dir / self.PROGRESS_FILENAME
+            if fallback_path.exists():
+                log.debug(
+                    "read_progress: stored lora_path %s stale; using fallback %s",
+                    version.lora_path, fallback_dir,
+                )
+                progress_path = fallback_path
+            else:
+                return None
         with self._shared_lock(progress_path):
             try:
                 with open(progress_path, "r", encoding="utf-8") as f:
@@ -182,6 +202,19 @@ class JsonTrainingRepository:
             except json.JSONDecodeError as e:
                 log.warning("progress.json for %s is corrupt: %s", version_id, e)
                 return None
+        # The training subprocess (training_job.py) historically wrote a
+        # sparse progress.json that did not include `version_id`, while
+        # `TrainingProgressSnapshot` requires it. The path already encodes
+        # the version_id (we read it from {version_dir}/progress.json), so
+        # inject it as a defensive fallback. Without this, validation
+        # silently fails → refresh_status_from_progress() returns None →
+        # the index entry stays in `status=training` forever even after
+        # the subprocess writes `status=ready` to progress.json
+        # (observed for v1_20260521_104108_618646 on 2026-05-21).
+        if not isinstance(data, dict):
+            log.warning("progress.json for %s is not an object: %r", version_id, type(data))
+            return None
+        data.setdefault("version_id", version_id)
         try:
             return TrainingProgressSnapshot.model_validate(data)
         except Exception as e:
