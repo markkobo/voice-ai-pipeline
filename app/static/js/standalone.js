@@ -907,6 +907,62 @@ window.onVadChange = onVadChange;
 window.loadVersions = loadVersions;
 window.onVersionChange = onVersionChange;
 
+// Persona + listener dropdowns were originally hardcoded in
+// standalone.html with the legacy defaults. New personas / listeners
+// created from the recordings page (e.g. "test" persona for a child's
+// voice) never appeared in the chat dropdowns. Fetch + populate from
+// the same APIs the recordings page uses so the chat sees everything.
+async function loadPersonasIntoSelect() {
+    try {
+        const res = await fetch('/api/personas/');
+        if (!res.ok) return;
+        const data = await res.json();
+        const personas = data.personas || [];
+        if (personas.length === 0) return;
+        const prev = personaEl.value || 'xiao_s';
+        personaEl.innerHTML = '';
+        for (const p of personas) {
+            const opt = document.createElement('option');
+            opt.value = p.persona_id;
+            opt.textContent = p.name || p.persona_id;
+            personaEl.appendChild(opt);
+        }
+        // Restore previous selection if it still exists, else default to xiao_s, else first.
+        const has = (id) => personas.some(p => p.persona_id === id);
+        personaEl.value = has(prev) ? prev : (has('xiao_s') ? 'xiao_s' : personas[0].persona_id);
+        log(`Loaded ${personas.length} personas into dropdown`);
+    } catch (e) {
+        log('Failed to load personas: ' + e.message);
+    }
+}
+
+async function loadListenersIntoSelect() {
+    try {
+        const res = await fetch('/api/listeners/');
+        if (!res.ok) return;
+        const data = await res.json();
+        const listeners = data.listeners || [];
+        if (listeners.length === 0) return;
+        const prev = listenerEl.value || 'default';
+        listenerEl.innerHTML = '';
+        for (const l of listeners) {
+            const opt = document.createElement('option');
+            opt.value = l.listener_id;
+            opt.textContent = l.name || l.listener_id;
+            listenerEl.appendChild(opt);
+        }
+        const has = (id) => listeners.some(l => l.listener_id === id);
+        listenerEl.value = has(prev) ? prev : (has('default') ? 'default' : listeners[0].listener_id);
+        log(`Loaded ${listeners.length} listeners into dropdown`);
+    } catch (e) {
+        log('Failed to load listeners: ' + e.message);
+    }
+}
+
 renderUI();
 connect();
-loadVersions();
+// Populate dropdowns first so loadVersions sees the right persona.
+(async () => {
+    await Promise.all([loadPersonasIntoSelect(), loadListenersIntoSelect()]);
+    loadVersions();
+})();
