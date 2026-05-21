@@ -254,6 +254,26 @@ class TestTrainingTemplateSilentNoOpFix:
             "app/services/training_service/training_job.py", doraise=True
         )
 
+    def test_lora_wraps_only_code_predictor_not_full_talker(self):
+        """Regression: 2026-05-21 gradient-coverage bug.
+
+        The previous template wrapped both `talker.model` AND
+        `code_predictor` with PEFT. But the training loop only invokes
+        `forward_sub_talker_finetune`, which exclusively exercises
+        code_predictor — so the 112 lora modules on talker.model never
+        received gradients (20/132 lora_B updated). The merge regex
+        also only matches `codec_lora`, so any `talker_lora` output
+        would be dropped anyway. Honest single-wrap fixes both.
+        """
+        src = self._src()
+        # talker.model wrap removed; only code_predictor remains.
+        assert "get_peft_model(model.talker.model" not in src
+        assert "get_peft_model(model.talker.code_predictor" in src
+        assert 'adapter_name="codec_lora"' in src
+        # Saved adapter_config records the actual scope.
+        assert "lora_target_scope" in src
+        assert "talker.code_predictor" in src
+
     def test_training_result_round_trip_from_subprocess_json(self):
         """
         Mirrors the production subprocess output for a successful SFT run

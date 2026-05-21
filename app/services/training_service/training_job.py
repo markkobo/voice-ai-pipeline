@@ -163,9 +163,22 @@ def main():
                 target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
                 lora_dropout=0.05, bias="none",
             )
-            # LoRA on the talker model (text + speaker encoding)
-            model.talker.model = get_peft_model(model.talker.model, lora_config, adapter_name="talker_lora")
-            # LoRA on the code_predictor
+            # IMPORTANT: only wrap `code_predictor`. The training loop uses
+            # `forward_sub_talker_finetune` which calls
+            # `code_predictor.forward_finetune` exclusively (see qwen_tts
+            # modeling_qwen3_tts.py:1612). It never touches
+            # `talker.model.layers.*`, so wrapping it would produce 112
+            # extra `lora_B` tensors that never receive gradients —
+            # diagnosed 2026-05-21 as "20/132 lora_B updated" after the
+            # silent-no-op fix. The merge regex in merge_lora() also only
+            # matches `codec_lora` adapter keys, so any `talker_lora`
+            # output would be dropped at merge time anyway. Voice timbre
+            # comes from the baked speaker_embedding at custom_voice
+            # conversion (see merge_lora line ~1140), not from the LoRA
+            # delta on attention weights. Wrapping talker.model would
+            # require a different training forward (a real
+            # `forward_talker_finetune` that hits talker.model.layers.*)
+            # — out of scope for this fix.
             model.talker.code_predictor = get_peft_model(model.talker.code_predictor, lora_config, adapter_name="codec_lora")
 
             # Only train LoRA parameters
@@ -515,12 +528,19 @@ def main():
             # Save as safetensors
             save_file(state_dict, lora_path / "adapter_model.safetensors")
 
-            # Save adapter config with proper PEFT format
+            # Save adapter config with proper PEFT format.
+            # Scope note: LoRA is only applied to the `code_predictor`
+            # subtree (5 layers × 4 projections = 20 modules), not the
+            # full talker (which would add 112 untrained modules — see
+            # the comment near get_peft_model above). The
+            # `q/k/v/o_proj` suffix list is interpreted relative to the
+            # code_predictor.
             adapter_config = {
                 "base_model_name_or_path": BASE_MODEL,
                 "peft_type": "LORA",
                 "task_type": "CAUSAL_LM",
                 "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"],
+                "lora_target_scope": "talker.code_predictor",
                 "r": RANK,
                 "lora_alpha": RANK * 2,
                 "lora_dropout": 0.05,
