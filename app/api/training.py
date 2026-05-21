@@ -48,7 +48,7 @@ router = APIRouter(prefix="/api/training", tags=["training"])
 # ---------------------------------------------------------------------------
 # Tunables
 # ---------------------------------------------------------------------------
-SSE_POLL_INTERVAL_SECONDS = 2
+SSE_POLL_INTERVAL_SECONDS = 1
 SSE_MAX_WAIT_SECONDS = 30 * 60  # 30 min before declaring the writer stuck
 
 
@@ -197,6 +197,15 @@ async def _sse_progress_generator(
         yield f"data: {json.dumps({'event': 'error', 'error': 'Version not found'})}\n\n"
         return
 
+    # Emit an immediate `connected` heartbeat so the client sees data on
+    # the stream before the first poll cycle. Useful through cloudflared:
+    # some proxies buffer SSE until the first bytes arrive, which can
+    # delay the EventSource `open` event on mobile clients. Padded with a
+    # large comment line (SSE lines starting with `:` are ignored) to
+    # bust ~4 KB buffering in intermediate proxies.
+    yield ":" + (" " * 2048) + "\n\n"
+    yield f"data: {json.dumps({'event': 'connected', 'version_id': version_id})}\n\n"
+
     last_snapshot: Optional[dict] = None
     waited = 0.0
     while waited < SSE_MAX_WAIT_SECONDS:
@@ -244,6 +253,16 @@ async def stream_training_progress(
     return StreamingResponse(
         _sse_progress_generator(service, version_id),
         media_type="text/event-stream",
+        # Anti-buffer headers — cloudflared + some intermediate proxies
+        # will hold SSE responses until they hit a buffer threshold,
+        # delaying the user-visible widget update. X-Accel-Buffering
+        # disables nginx buffering; no-cache/no-transform stops other
+        # proxies from cumulating chunks.
+        headers={
+            "Cache-Control": "no-cache, no-store, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
     )
 
 
