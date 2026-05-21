@@ -65,6 +65,31 @@
             buildPersonaDropdown();
             buildListenerFilter();
             log('Training page loaded');
+            await resumeInFlightTraining();
+        }
+
+        // If a training is already running when the page loads (user
+        // refreshed mid-training, or opened from another tab), reattach
+        // the progress SSE so the widget shows live state instead of
+        // leaving "Epoch 0/0, Loss —, ETA —" as if nothing was happening.
+        // Without this, the only way to see progress was to be on the page
+        // continuously from before the start button was pressed.
+        async function resumeInFlightTraining() {
+            try {
+                const res = await fetch('/api/training/versions');
+                if (!res.ok) return;
+                const data = await res.json();
+                const active = (data.versions || []).find(v => v.status === 'training');
+                if (!active) return;
+                log(`Resuming progress for in-flight training: ${active.version_id}`);
+                currentTraining = active.version_id;
+                progressSection.classList.add('visible');
+                startBtn.disabled = true;
+                startBtn.textContent = '訓練中...';
+                connectProgress(active.version_id);
+            } catch (e) {
+                log(`Failed to resume in-flight training: ${e.message}`, 'warning');
+            }
         }
 
         async function loadPersonas() {
