@@ -781,6 +781,11 @@
                                     ${v.status === 'training' ? '🔄 訓練中' : v.status === 'merging' ? '⚙️ 合併中' : v.status === 'ready' ? '✓ 就緒' : '✕ 失敗'} |
                                     完成: ${completedDate}
                                 </div>
+                                ${v.status === 'failed' && v.error_message ? `
+                                    <div class="version-error" title="${String(v.error_message).replace(/"/g, '&quot;')}">
+                                        失敗原因: ${String(v.error_message).slice(0, 140)}${String(v.error_message).length > 140 ? '…' : ''}
+                                    </div>
+                                ` : ''}
                                 <div class="version-stats">
                                     <span title="Loss 數值單獨看沒意義 — 按右側 ▶ 預覽 聽實際音質才是真正的判斷依據">Loss: ${lossStr}</span> | Epochs: ${v.num_epochs} | LR: ${lrStr} ${batchInfo}
                                 </div>

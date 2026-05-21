@@ -18,6 +18,7 @@ documented in audit #3.
 """
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from dataclasses import dataclass
@@ -213,6 +214,24 @@ class TrainingService:
             if progress.status.value == "ready":
                 v.final_loss = progress.current_loss
                 v.training_time_seconds = progress.elapsed_seconds
+                v.completed_at = datetime.now(timezone.utc)
+            elif progress.status.value == "failed":
+                # Surface the subprocess's reason in the index so the UI
+                # can show "失敗 (NVML driver mismatch)" instead of a
+                # bare "✕ 失敗" with no clue. Falls back to a
+                # training_result.json read for cases where the
+                # subprocess died before writing to progress.json (e.g.
+                # python crashed pre-init) but did write a result file.
+                err = progress.error_message
+                if not err and v.lora_path:
+                    try:
+                        result_file = Path(v.lora_path) / "training_result.json"
+                        if result_file.exists():
+                            with open(result_file) as f:
+                                err = json.load(f).get("error")
+                    except Exception:
+                        pass
+                v.error_message = err or "training failed (no error message captured)"
                 v.completed_at = datetime.now(timezone.utc)
 
         try:

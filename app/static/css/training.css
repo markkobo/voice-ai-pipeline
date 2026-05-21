@@ -471,6 +471,14 @@
             color: #888;
             margin-top: 5px;
         }
+        .version-error {
+            font-size: 0.8rem;
+            color: #f4c66a;
+            margin-top: 4px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            word-break: break-word;
+            cursor: help;
+        }
         .version-stats {
             font-size: 0.85rem;
             color: #aaa;
