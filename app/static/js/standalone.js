@@ -868,8 +868,37 @@ listenerEl.addEventListener('change', () => {
     loadVersions();
 });
 
+function resendConfig(reason) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const ttsModelEl = document.getElementById('tts_model');
+    ws.send(JSON.stringify({
+        type: 'config',
+        audio: { sample_rate: 24000, channels: 1, format: 'pcm' },
+        persona_id: personaEl.value,
+        listener_id: listenerEl.value,
+        model: 'gpt-4o-mini',
+        vad: document.getElementById('vad').value,
+        tts_model: ttsModelEl ? ttsModelEl.value : '1.7B'
+    }));
+    log('Config resent (' + reason + '): persona=' + personaEl.value + ' listener=' + listenerEl.value);
+}
+
 personaEl.addEventListener('change', () => {
+    // The server uses persona_id from the LAST config message to resolve
+    // which TTS model to activate (custom_voice vs voice_clone). Without
+    // resending, picking "Test" in the dropdown leaves the server still
+    // synthesizing for "xiao_s" — the user hears the wrong voice no
+    // matter how many times they re-activate the version. Observed
+    // 2026-05-21 as "v9 sounds female in chat" after the activate_version
+    // path fix landed. The fix here is the second half: server-side
+    // routing uses the right persona, client-side notifies the server
+    // when persona changes.
+    resendConfig('persona changed');
     loadVersions();
+});
+
+listenerEl.addEventListener('change', () => {
+    resendConfig('listener changed');
 });
 
 document.addEventListener('keydown', (e) => {
