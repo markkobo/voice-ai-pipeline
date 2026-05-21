@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-from .file_storage import RecordingPaths, list_all_recordings
+from .file_storage import RecordingPaths
 
 
 # Default processing expires in 3 days
@@ -268,27 +268,32 @@ class RecordingMetadata:
 
 
 def load_recording_metadata(folder_name: str) -> Optional[RecordingMetadata]:
-    """Load metadata from a recording folder."""
-    # Parse folder name to get RecordingPaths
-    from .file_storage import get_recording_by_folder
+    """Load metadata from a recording folder.
 
-    paths = get_recording_by_folder(folder_name)
-    if paths is None:
-        return None
-
+    Pure path-helper wrapper — constructs a :class:`RecordingPaths` from the
+    folder name and reads ``metadata.json`` if present. No indexing, no UUID
+    assignment. New code should prefer the
+    :class:`~app.services.recordings.repository.JsonRecordingsRepository`.
+    """
+    paths = RecordingPaths(folder_name=folder_name)
     if not paths.metadata_path.exists():
         return None
-
     return RecordingMetadata(paths)
 
 
 def list_recordings_metadata() -> list[dict]:
-    """List metadata for all recordings."""
-    recordings = []
-    for paths in list_all_recordings():
-        metadata = RecordingMetadata(paths)
-        recordings.append(metadata.data)
+    """List metadata for all recordings.
 
-    # Sort by created_at descending
-    recordings.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+    Delegates to the canonical :class:`JsonRecordingsRepository` (which uses
+    ``index.json`` as the source of truth plus an orphan sweep) and returns
+    the result as dicts for back-compat with callers that pre-date the
+    Pydantic ``Recording`` model. New code should call the repository
+    directly.
+    """
+    from app import config as _cfg
+    from .repository import JsonRecordingsRepository
+
+    repo = JsonRecordingsRepository(_cfg.data_root())
+    recordings = [rec.model_dump(mode="json") for rec in repo.list()]
+    # Repository already sorts by created_at desc; keep that order.
     return recordings

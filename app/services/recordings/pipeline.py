@@ -22,6 +22,7 @@ import numpy as np
 from .file_storage import RecordingPaths
 from .metadata import RecordingMetadata
 from .quality import AudioQualityAnalyzer
+from .repository import JsonRecordingsRepository, RecordingsRepository
 
 logger = logging.getLogger(__name__)
 
@@ -46,21 +47,54 @@ class ProcessingResult:
 class AudioProcessingPipeline:
     """Processes audio recordings through the pipeline."""
 
-    def __init__(self, recording_id: str):
+    def __init__(
+        self,
+        recording_id: str,
+        repository: Optional[RecordingsRepository] = None,
+    ):
+        """Create a pipeline for one recording.
+
+        ``repository`` is the canonical source of truth for "where is this
+        recording_id on disk". When omitted, falls back to a fresh
+        :class:`JsonRecordingsRepository` pointing at the configured data
+        root — matches how the FastAPI ``BackgroundTasks`` entrypoint
+        invokes the pipeline (``run_processing_pipeline(recording_id)``)
+        from `app/api/recordings.py`.
+
+        Tests can inject a stub repository to assert lookup behavior in
+        isolation. Direct construction of ``RecordingPaths`` here is now
+        forbidden — that path used to assign fresh random UUIDs to every
+        folder it scanned and silently broke ``_find_recording`` (the
+        e0ae9b0 incident).
+        """
         self.recording_id = recording_id
+        if repository is None:
+            from app import config as _cfg
+            repository = JsonRecordingsRepository(_cfg.data_root())
+        self.repository: RecordingsRepository = repository
         self.paths: Optional[RecordingPaths] = None
         self.metadata: Optional[RecordingMetadata] = None
 
     def _find_recording(self) -> bool:
-        """Find the recording by ID."""
-        from .file_storage import list_all_recordings
+        """Resolve recording_id → on-disk paths via the repository.
 
-        for paths in list_all_recordings():
-            if paths.recording_id == self.recording_id:
-                self.paths = paths
-                self.metadata = RecordingMetadata(paths)
-                return True
-        return False
+        Repository ``get_or_none`` is keyed by recording_id (the index is
+        the source of truth, with an orphan sweep fallback for folders
+        that lost their index entry). When found, we build a pure
+        :class:`RecordingPaths` from the recording's ``folder_name`` —
+        no UUID assignment, no FS scan, no cache.
+        """
+        recording = self.repository.get_or_none(self.recording_id)
+        if recording is None:
+            return False
+        self.paths = RecordingPaths(
+            folder_name=recording.folder_name,
+            listener_id=recording.listener_id,
+            persona_id=recording.persona_id,
+            recording_id=recording.recording_id,
+        )
+        self.metadata = RecordingMetadata(self.paths)
+        return True
 
     def _log(self, message: str, level: str = "INFO"):
         """Log a message with component identifier."""
@@ -840,15 +874,20 @@ class AudioProcessingPipeline:
                     raise
 
 
-def run_processing_pipeline(recording_id: str) -> ProcessingResult:
+def run_processing_pipeline(
+    recording_id: str,
+    repository: Optional[RecordingsRepository] = None,
+) -> ProcessingResult:
     """
     Convenience function to run processing pipeline.
 
     Args:
         recording_id: ID of the recording to process
+        repository: optional injected repository (defaults to a fresh
+            ``JsonRecordingsRepository`` rooted at ``app.config.data_root()``).
 
     Returns:
         ProcessingResult with success status and metrics
     """
-    pipeline = AudioProcessingPipeline(recording_id)
+    pipeline = AudioProcessingPipeline(recording_id, repository=repository)
     return pipeline.run()

@@ -1,14 +1,17 @@
-"""Unit tests for recording file storage."""
+"""Unit tests for recording file storage path helpers.
+
+Note: the legacy index/cache (``list_all_recordings``,
+``get_recording_by_folder``, ``register_recording_in_cache`` ...) has been
+removed in favor of :class:`JsonRecordingsRepository`. Tests for those
+behaviors now live in ``tests/unit/test_recordings_repository.py``. This
+file only covers the pure path-math + folder-conventions parts of
+``RecordingPaths``.
+"""
 
 import pytest
-import json
-from pathlib import Path
-from datetime import datetime
 
 from app.services.recordings.file_storage import (
     RecordingPaths,
-    get_recording_by_folder,
-    list_all_recordings,
     get_storage_stats,
 )
 
@@ -71,31 +74,40 @@ class TestRecordingPaths:
         assert rp.transcription_path.name == "transcription.txt"
 
 
-class TestGetRecordingByFolder:
-    """Test get_recording_by_folder function."""
+class TestRecordingPathsFolderNameAPI:
+    """Test the preferred ``folder_name=`` construction form.
 
-    def test_parse_valid_folder_name(self):
-        """Test parsing valid folder name."""
-        rp = get_recording_by_folder("child_xiao_s_20260329_120000")
-        assert rp is not None
+    This is the path production code should use. It does NOT assign a fresh
+    random UUID — ``recording_id`` defaults to ``None`` unless the caller
+    passes it explicitly. The historical landmine (UUID drift in
+    ``list_all_recordings``) is now structurally impossible from this API.
+    """
+
+    def test_construct_from_folder_name_parses_parts(self):
+        rp = RecordingPaths(folder_name="child_xiao_s_20260329_120000")
         assert rp.listener_id == "child"
         assert rp.persona_id == "xiao_s"
         assert rp.timestamp == "20260329_120000"
+        assert rp.folder_name == "child_xiao_s_20260329_120000"
 
-    def test_parse_mom_recording(self):
-        """Test parsing mom recording."""
-        rp = get_recording_by_folder("mom_xiao_s_20260328")
-        assert rp is not None
-        assert rp.listener_id == "mom"
-        assert rp.persona_id == "xiao_s"
+    def test_folder_name_api_does_not_assign_uuid(self):
+        """The new API does NOT generate a UUID — that's the whole point."""
+        rp = RecordingPaths(folder_name="child_xiao_s_20260329_120000")
+        assert rp.recording_id is None
 
-    def test_parse_invalid_folder(self):
-        """Test parsing invalid folder name returns None."""
-        assert get_recording_by_folder("invalid_folder") is None
+    def test_folder_name_api_accepts_explicit_recording_id(self):
+        rp = RecordingPaths(
+            folder_name="child_xiao_s_20260329_120000",
+            recording_id="explicit-id-from-repo",
+        )
+        assert rp.recording_id == "explicit-id-from-repo"
 
-    def test_parse_missing_timestamp(self):
-        """Test parsing folder with missing timestamp."""
-        assert get_recording_by_folder("child_xiao_s") is None
+    def test_opaque_folder_name_is_tolerated(self):
+        """Folders that don't parse should not raise — pure path math."""
+        rp = RecordingPaths(folder_name="totally-opaque-folder")
+        assert rp.folder_name == "totally-opaque-folder"
+        assert rp.listener_id is None
+        assert rp.persona_id is None
 
 
 class TestStorageStats:

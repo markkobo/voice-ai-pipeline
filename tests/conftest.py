@@ -129,8 +129,11 @@ def isolated_data(tmp_path, monkeypatch, app) -> Path:
     monkeypatch.setattr(fs, "ENHANCED_DIR", enhanced_dir, raising=True)
     monkeypatch.setattr(fs, "VOICE_PROFILES_DIR", voice_profiles_dir, raising=True)
     monkeypatch.setattr(fs, "MODELS_DIR", models_dir, raising=True)
-    monkeypatch.setattr(fs, "RECORDINGS_INDEX_FILE", recordings_root / "index.json", raising=True)
-    monkeypatch.setattr(fs, "_recordings_cache", None, raising=True)
+    # RECORDINGS_INDEX_FILE + _recordings_cache used to live on the file_storage
+    # module — they were removed when the legacy index/cache was deleted in
+    # favor of JsonRecordingsRepository. No replacement needed: tests that need
+    # an isolated index use the repository injected via dependency_overrides
+    # below.
 
     # Inject fresh services into the FastAPI app via dependency_overrides so
     # the cached singletons on app.state can't leak across tests.

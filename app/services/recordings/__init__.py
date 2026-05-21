@@ -2,12 +2,7 @@
 
 from .file_storage import (
     RecordingPaths,
-    list_all_recordings,
-    get_recording_by_folder,
     get_storage_stats,
-    register_recording_in_cache,
-    unregister_recording_from_cache,
-    invalidate_recordings_cache,
     VALID_LISTENER_IDS,
     VALID_PERSONA_IDS,
 )
@@ -17,12 +12,9 @@ from .pipeline import AudioProcessingPipeline, run_processing_pipeline
 
 __all__ = [
     "RecordingPaths",
-    "list_all_recordings",
-    "get_recording_by_folder",
     "get_storage_stats",
-    "register_recording_in_cache",
-    "unregister_recording_from_cache",
-    "invalidate_recordings_cache",
+    "VALID_LISTENER_IDS",
+    "VALID_PERSONA_IDS",
     "RecordingMetadata",
     "list_recordings_metadata",
     "load_recording_metadata",

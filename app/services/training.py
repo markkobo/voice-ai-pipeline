@@ -364,7 +364,7 @@ def get_training_audio_for_persona(
     Returns:
         List of (audio_path, duration_seconds, recording_id)
     """
-    from app.services.recordings import get_recording_by_folder, RecordingMetadata
+    from app.services.recordings import RecordingMetadata, RecordingPaths
 
     # Build recording lookup by rec_id
     rec_by_id = {rec["recording_id"]: rec for rec in selected_recordings}
@@ -392,10 +392,13 @@ def get_training_audio_for_persona(
             continue
 
         folder_name = rec.get("folder_name", "")
-        paths = get_recording_by_folder(folder_name)
-        if not paths:
-            logger.warning(f"[TRAINING] Could not find recording folder: {folder_name}")
+        if not folder_name:
+            logger.warning(f"[TRAINING] Recording missing folder_name: {rec_id}")
             continue
+        # Pure path helper — no UUID assignment, no FS indexing. The
+        # recording's existence in selected_recordings is the caller's
+        # contract; we just resolve the on-disk layout from folder_name.
+        paths = RecordingPaths(folder_name=folder_name)
 
         # Get speaker audio path
         speaker_audio = paths.speakers_folder / f"{speaker_id}.wav"
