@@ -276,16 +276,22 @@ def main():
 
         # Validate dataset before training
         total_chunks = len(dataset)
-        MIN_CHUNKS = 30  # Minimum for meaningful SFT training
+        # LoRA needs fewer samples than SFT — only code_predictor's 20
+        # attention modules train (per the 2026-05-21 scope fix), so
+        # the parameter count is two orders of magnitude smaller and
+        # 10 chunks is enough to fit. SFT trains the full model and
+        # genuinely needs the original 30-chunk floor.
+        MIN_CHUNKS = 10 if USE_LORA else 30
+        mode_label = "LoRA" if USE_LORA else "SFT"
 
-        logger.info(f"[VALIDATION] Training dataset: {total_chunks} chunks from {len(AUDIO_PATHS)} audio files")
+        logger.info(f"[VALIDATION] Training dataset: {total_chunks} chunks from {len(AUDIO_PATHS)} audio files ({mode_label} mode, min={MIN_CHUNKS})")
         logger.info(f"[VALIDATION] Expected chunks per file: ~{total_chunks // max(len(AUDIO_PATHS), 1)}")
 
         if total_chunks < MIN_CHUNKS:
-            logger.error(f"[VALIDATION] FAILED: Insufficient training samples! {total_chunks} < {MIN_CHUNKS} minimum required")
-            raise ValueError(f"Insufficient training samples for SFT: {total_chunks} < {MIN_CHUNKS}. Need more/longer audio.")
+            logger.error(f"[VALIDATION] FAILED: Insufficient training samples! {total_chunks} < {MIN_CHUNKS} minimum required for {mode_label}")
+            raise ValueError(f"Insufficient training samples for {mode_label}: {total_chunks} < {MIN_CHUNKS}. Need more/longer audio (each chunk = ~5-10s).")
 
-        logger.info(f"[VALIDATION] PASSED: {total_chunks} chunks >= {MIN_CHUNKS} minimum")
+        logger.info(f"[VALIDATION] PASSED: {total_chunks} chunks >= {MIN_CHUNKS} minimum ({mode_label})")
 
         # Log dataset statistics
         chunk_size = 300  # Frames per chunk
