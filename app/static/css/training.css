@@ -511,6 +511,53 @@
             min-height: 36px;
         }
         .btn-preview:hover { background: #00aadd; }
+        .btn-details {
+            background: #4a5568;
+            color: #fff;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            min-height: 36px;
+        }
+        .btn-details:hover { background: #2d3748; }
+        .version-details {
+            margin-top: 10px;
+            padding: 10px 12px;
+            background: #0c1320;
+            border: 1px solid #1a2438;
+            border-radius: 6px;
+            font-size: 0.8rem;
+        }
+        .version-details .detail-row {
+            display: flex;
+            gap: 10px;
+            padding: 3px 0;
+            border-bottom: 1px dashed #1a2438;
+            align-items: baseline;
+        }
+        .version-details .detail-row:last-child { border-bottom: none; }
+        .version-details .detail-label {
+            color: #889;
+            flex: 0 0 140px;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .version-details .detail-value {
+            color: #c5cbdc;
+            flex: 1;
+            word-break: break-word;
+        }
+        .version-details .detail-value.mono {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 0.78rem;
+        }
+        .version-details .detail-error {
+            color: #f4c66a;
+            white-space: pre-wrap;
+        }
         .btn-delete {
             background: #ff4444;
             color: #fff;

@@ -793,10 +793,14 @@
                                     片段: ${recordingCount} 個錄音, ${segmentCount} 個片段
                                 </div>
                                 ${trainingSummary}
+                                <div class="version-details" id="details-${v.version_id}" style="display: none;">
+                                    ${renderVersionDetails(v, manifest)}
+                                </div>
                             </div>
                             <div class="version-actions">
                                 ${v.status === 'ready' && !isActive ? `<button class="btn-activate" onclick="activateVersion('${v.version_id}')">啟用</button>` : ''}
                                 ${v.status === 'ready' ? `<button class="btn-preview" title="試聽此版本的音色 (Loss 不能反映音質，請以此為準)" onclick="previewVersion('${v.version_id}')">▶ 預覽</button>` : ''}
+                                <button class="btn-details" onclick="toggleDetails('${v.version_id}')" title="顯示完整 metadata (路徑、IDs、時間戳)">詳細</button>
                                 ${v.status !== 'training' ? `
                                     <button class="btn-delete" id="delbtn-${v.version_id}" onclick="confirmDelete('${v.version_id}')">✕</button>
                                     <span id="delcfm-${v.version_id}" class="delete-confirm" style="display: none;">
@@ -866,6 +870,71 @@
             displayEl.replaceWith(input);
             input.focus();
             input.select();
+        }
+
+        // ==================== VERSION DETAILS ====================
+        function fmtDate(iso) {
+            if (!iso) return '—';
+            try { return new Date(iso).toLocaleString('zh-TW'); }
+            catch (e) { return iso; }
+        }
+        function fmtDuration(seconds) {
+            if (seconds == null) return '—';
+            const s = Math.round(seconds);
+            if (s < 60) return `${s}s`;
+            const m = Math.floor(s / 60);
+            const rem = s % 60;
+            if (m < 60) return `${m}m ${rem}s`;
+            const h = Math.floor(m / 60);
+            return `${h}h ${m % 60}m`;
+        }
+        function escapeHtml(str) {
+            if (str == null) return '';
+            return String(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
+        }
+        function renderVersionDetails(v, manifest) {
+            const rows = [];
+            const add = (label, value, mono = false) => {
+                if (value === undefined || value === null || value === '' || (Array.isArray(value) && value.length === 0)) return;
+                const display = Array.isArray(value) ? value.join(', ') : value;
+                rows.push(`<div class="detail-row"><span class="detail-label">${label}</span><span class="detail-value${mono ? ' mono' : ''}">${escapeHtml(display)}</span></div>`);
+            };
+            add('Version ID', v.version_id, true);
+            add('Persona', v.persona_id);
+            add('Status', v.status);
+            add('Training type', v.training_type);
+            add('Model type (runtime)', v.model_type);
+            add('Base model', v.base_model, true);
+            add('Created', fmtDate(v.created_at));
+            add('Completed', fmtDate(v.completed_at));
+            add('Training time', fmtDuration(v.training_time_seconds));
+            add('Final loss', v.final_loss != null ? v.final_loss.toFixed(6) : null);
+            if (v.training_type === 'lora') add('LoRA rank', v.rank);
+            add('Learning rate', v.learning_rate);
+            add('Epochs', v.num_epochs);
+            add('Batch size', v.batch_size);
+            add('LoRA path', v.lora_path, true);
+            add('Merged path', v.merged_path, true);
+            const recIds = v.recording_ids_used || (manifest.recordings || []).map(r => r.recording_id);
+            add(`Recording IDs (${recIds.length})`, recIds, true);
+            const segIds = v.segment_ids_used || manifest.segment_ids || [];
+            add(`Segment IDs (${segIds.length})`, segIds, true);
+            if (manifest.total_duration_seconds != null) {
+                add('Total audio', fmtDuration(manifest.total_duration_seconds));
+            }
+            if (v.status === 'failed' && v.error_message) {
+                rows.push(`<div class="detail-row"><span class="detail-label">Error</span><span class="detail-value mono detail-error">${escapeHtml(v.error_message)}</span></div>`);
+            }
+            return rows.join('');
+        }
+        function toggleDetails(versionId) {
+            const el = document.getElementById(`details-${versionId}`);
+            if (!el) return;
+            el.style.display = el.style.display === 'none' ? 'block' : 'none';
         }
 
         // ==================== VERSION ACTIONS ====================
