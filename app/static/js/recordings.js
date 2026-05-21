@@ -1188,8 +1188,31 @@
         async function startRecording() {
             log('Starting WebRTC recording...', 'info', 'RECORDING');
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                // Disable browser's voice-processing chain for TRAINING-DATA
+                // capture. Chrome's default getUserMedia({audio:true}) enables
+                // echoCancellation, autoGainControl, and noiseSuppression —
+                // EC in particular applies a ~3.5–4 kHz lowpass that narrows
+                // the captured signal to telephone band even on a 48 kHz mic.
+                // For chat (the /ui page) those features make sense; for
+                // training data they destroy the bandwidth we need for a
+                // non-muffled clone.
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        echoCancellation: false,
+                        autoGainControl: false,
+                        noiseSuppression: false,
+                        sampleRate: 48000,
+                        channelCount: 1,
+                    }
+                });
                 currentStream = stream;
+
+                // Log the actual settings the browser applied — some browsers
+                // ignore constraints silently and fall back to defaults.
+                const track = stream.getAudioTracks()[0];
+                if (track) {
+                    log(`Mic settings: ${JSON.stringify(track.getSettings())}`, 'info', 'RECORDING');
+                }
 
                 audioContext = new AudioContext();
                 analyser = audioContext.createAnalyser();
@@ -1197,7 +1220,10 @@
                 source.connect(analyser);
                 analyser.fftSize = 256;
 
-                mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+                mediaRecorder = new MediaRecorder(stream, {
+                    mimeType: 'audio/webm',
+                    audioBitsPerSecond: 128000,  // 128 kbps Opus — broadband; browser default can be 32 kbps voice-mode
+                });
                 audioChunks = [];
 
                 mediaRecorder.ondataavailable = (e) => {
