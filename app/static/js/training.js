@@ -2,15 +2,34 @@
         // (RFC_M6 Phase 0-pre review #28). Register a SYS_ON_UPDATE hook
         // for training-page-specific gating (disable startTrainingBtn).
         window.SYS_ON_UPDATE = window.SYS_ON_UPDATE || [];
-        window.SYS_ON_UPDATE.push(function () {
+        window.SYS_ON_UPDATE.push(function (status) {
             const startBtn = document.getElementById('startTrainingBtn');
-            if (!startBtn) return;
-            if (window.SYS.trainingActive) {
-                startBtn.disabled = true;
-                startBtn.classList.add('gated');
-            } else {
-                startBtn.disabled = false;
-                startBtn.classList.remove('gated');
+            if (startBtn) {
+                if (window.SYS.trainingActive) {
+                    startBtn.disabled = true;
+                    startBtn.classList.add('gated');
+                } else {
+                    startBtn.disabled = false;
+                    startBtn.classList.remove('gated');
+                }
+            }
+            // If the active TTS version changed elsewhere (e.g. user
+            // activated a version from the chat page, or the chat's
+            // eager activation on persona change), refresh the versions
+            // tab so the "當前啟用" badge moves to the right row instead
+            // of waiting until the user navigates away and back. User
+            // observation 2026-05-21: "training page doesn't update
+            // like the status bar does".
+            const newActive = status && status.tts && status.tts.active_version || null;
+            if (newActive !== window._lastSeenActiveVersion) {
+                window._lastSeenActiveVersion = newActive;
+                // Only refresh if we're on the versions tab and have
+                // already loaded once — avoids racing with initial load.
+                const versionsTab = document.getElementById('versions-tab');
+                const onVersionsTab = versionsTab && versionsTab.style.display !== 'none';
+                if (typeof loadVersions === 'function' && onVersionsTab) {
+                    loadVersions();
+                }
             }
         });
         // ----------------------------------------
