@@ -742,11 +742,22 @@
                     const recordingCount = v.recording_ids_used?.length || manifest.recordings?.length || 0;
 
                     const displayName = v.nickname ? `${v.version_id}: ${v.nickname}` : v.version_id;
-                    const modelType = v.model_type || (v.rank ? 'lora' : 'sft');
-                    const modelTypeBadge = modelType === 'sft' || modelType === 'custom_voice'
-                        ? '<span class="version-badge" style="background: #9c27b0;">SFT</span>'
-                        : modelType === 'voicedesign'
-                        ? '<span class="version-badge" style="background: #2196f3;">VoiceDesign</span>'
+                    // Prefer the explicit training_type written by the
+                    // backend (TrainingVersion.training_type). model_type
+                    // is the post-merge runtime descriptor ('custom_voice'
+                    // for SFT-converted models) which doesn't distinguish
+                    // LoRA from SFT once LoRA is also baked into a
+                    // custom_voice config (per the 2026-05-21 merge fix).
+                    const tType = v.training_type
+                        || v.model_type
+                        || (v.rank ? 'lora' : 'sft');
+                    const modelTypeBadge =
+                        tType === 'lora'
+                            ? '<span class="version-badge" style="background: #ff9800; color: #000;">LoRA</span>'
+                        : (tType === 'sft' || tType === 'custom_voice')
+                            ? '<span class="version-badge" style="background: #9c27b0;">SFT</span>'
+                        : tType === 'voicedesign'
+                            ? '<span class="version-badge" style="background: #2196f3;">VoiceDesign</span>'
                         : '';
                     const lrStr = v.learning_rate ? (v.learning_rate < 0.001 ? `${v.learning_rate * 1000}μ` : v.learning_rate) : '-';
                     const batchInfo = v.batch_size ? `BS:${v.batch_size}` : '';
