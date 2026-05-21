@@ -490,25 +490,35 @@ def audit_voice_training_quality(audio_path: Path) -> dict:
         "energy_8_12khz_pct": e_high,
     }
 
-    # Plain-language warnings (Chinese) for the UI tooltip.
+    # Thresholds re-tuned 2026-05-21 against real broadband phone-mic
+    # recordings. The primary band-limiting indicator is energy above 4
+    # kHz (the telephone cutoff): clean recordings have ≥ 1.5% in 4-8
+    # kHz, telephone audio has ≪ 0.5%. The 95th-percentile effective
+    # bandwidth metric is a secondary signal — for real speech most
+    # power lives in F0+F1 (below 1 kHz), so a high "eff_bw" floor
+    # would reject clean wideband recordings as well as muffled ones.
     warns = []
     if sr < 24000:
         warns.append(f"取樣率僅 {sr} Hz（低於 TTS 原生 24 kHz）— 訓練無法還原失去的頻寬")
     if clipped > 100 or peak > 0.999:
         warns.append(f"音量過大造成削波（{clipped} 個樣本）— 失真會傳遞到複製出的聲音")
-    elif peak < 0.2:
+    elif peak < 0.15:
         warns.append(f"錄音音量過低（峰值 {peak:.2f}）— 聲音特徵不夠突出")
-    if silent_pct > 30:
+    if silent_pct > 40:
         warns.append(f"靜音比例 {silent_pct:.0f}% 偏高")
-    if eff_bw < 4000:
-        warns.append(f"有效頻寬僅 {eff_bw:.0f} Hz — 電話等級音質，複製出的聲音會悶悶的")
-    elif eff_bw < 6500:
-        warns.append(f"有效頻寬 {eff_bw:.0f} Hz 偏窄 — 高頻細節不足")
-    if e_high < 0.5 and sr >= 24000:
-        warns.append(f"8 kHz 以上能量僅 {e_high:.2f}% — 高頻成分嚴重缺失")
+    # Telephone-band lowpass signature: vanishing energy above 4 kHz.
+    if e_mid < 0.5:
+        warns.append(f"4-8 kHz 能量僅 {e_mid:.2f}% — 電話等級音質（聲音被低通切掉了），複製出的聲音會悶悶的")
+    elif e_mid < 1.5:
+        warns.append(f"4-8 kHz 能量 {e_mid:.1f}% 偏低 — 高頻細節不足，聲音可能略悶")
 
-    # Verdict ladder
-    if eff_bw < 4000 or (clipped > 100 and peak > 0.999):
+    # Verdict ladder (primary driver: energy above 4 kHz)
+    bad_signal = (
+        e_mid < 0.5
+        or (clipped > 100 and peak > 0.999)
+        or sr < 16000
+    )
+    if bad_signal:
         level = "bad"
     elif warns:
         level = "marginal"
