@@ -97,8 +97,33 @@ class FasterQwenTTSEngine:
 
     def _ensure_loaded_locked(self):
         """Internal: assumes the caller holds self._load_lock."""
+        import gc
         import torch
         from faster_qwen3_tts import FasterQwen3TTS
+
+        # Free the previous model BEFORE allocating the new one. Without
+        # this, FasterQwen3TTS.from_pretrained allocates another
+        # ~3.1 GiB while the old model is still resident — observed
+        # 2026-05-22 as VRAM filling up to 21.5 GiB and TTS dying with
+        # "CUDA out of memory" after the user switched personas a few
+        # times. activate_version is now eager on every config message,
+        # so a few dropdown changes was enough to OOM.
+        if getattr(self, '_model', None) is not None:
+            try:
+                self._model.to("cpu")
+            except Exception:
+                pass
+            self._model = None
+        if getattr(self, '_raw_model', None) is not None:
+            try:
+                self._raw_model.to("cpu")
+            except Exception:
+                pass
+            self._raw_model = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
 
         # Check for merged model path first
         if hasattr(self, '_merged_model_path') and self._merged_model_path:
