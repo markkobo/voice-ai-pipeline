@@ -34,6 +34,73 @@ _cuda_lock = threading.Semaphore(1)
 MAX_RETRIES = 3
 RETRY_BACKOFF_BASE = 2  # seconds, exponential backoff
 
+# DeepFilterNet — modern DNN denoiser, single-speaker, 48 kHz native.
+# Replaced noisereduce (spectral-gating) which was over-aggressive:
+# observed 33% peak loss + bandwidth-shaped artifacts on user recordings
+# from 2026-05-22. DF is loaded once per process and reused; cost is
+# ~0.6s/30s audio on cuda, ~3s/30s on cpu. Threadsafe; uses _cuda_lock.
+_df_model = None
+_df_state = None
+_df_lock = threading.Lock()
+
+
+def _get_df_denoiser():
+    """Lazy-init DeepFilterNet model. Returns (model, df_state) or (None, None)."""
+    global _df_model, _df_state
+    if _df_model is not None:
+        return _df_model, _df_state
+    with _df_lock:
+        if _df_model is not None:
+            return _df_model, _df_state
+        try:
+            from df.enhance import init_df
+            m, s, _ = init_df()
+            _df_model, _df_state = m, s
+            logger.info(f"[DENOISE] DeepFilterNet ready (sr={s.sr()})")
+            return _df_model, _df_state
+        except Exception as e:
+            logger.warning(f"[DENOISE] DeepFilterNet init failed: {e}; will fall back to noisereduce")
+            return None, None
+
+
+def _loudness_normalize(audio: np.ndarray, sr: int, target_lufs: float = -16.0, peak_limit_dbfs: float = -1.0) -> np.ndarray:
+    """LUFS-normalize then peak-limit. Speech-broadcast standard (-16 LUFS).
+
+    Without the peak limit, normalize.loudness() can push dynamic speech
+    samples beyond ±1.0 (clipping) — observed 2026-05-23 with raw peak
+    1.475 on a quiet input. After LUFS normalization we hard-limit any
+    samples above the peak ceiling to prevent that.
+    """
+    try:
+        import pyloudnorm as pyln
+        # pyloudnorm needs at least 400ms of audio for integrated loudness
+        if len(audio) / sr < 0.4:
+            # Too short — just peak-normalize
+            peak = float(np.abs(audio).max())
+            if peak > 0:
+                limit = 10 ** (peak_limit_dbfs / 20)  # -1 dBFS = 0.891
+                return audio * (limit / peak)
+            return audio
+        meter = pyln.Meter(sr)
+        loudness = meter.integrated_loudness(audio)
+        if loudness == float("-inf") or np.isnan(loudness):
+            # Silent input — return as-is
+            return audio
+        normalized = pyln.normalize.loudness(audio, loudness, target_lufs)
+        # Peak limit (hard clip at -1 dBFS to be safe; mostly inaudible for speech)
+        limit = 10 ** (peak_limit_dbfs / 20)
+        peak = float(np.abs(normalized).max())
+        if peak > limit:
+            normalized = normalized * (limit / peak)
+        return normalized
+    except Exception as e:
+        logger.warning(f"[NORM] LUFS normalize failed: {e}; falling back to peak-norm")
+        peak = float(np.abs(audio).max())
+        if peak > 0:
+            limit = 10 ** (peak_limit_dbfs / 20)
+            return audio * (limit / peak)
+        return audio
+
 
 @dataclass
 class ProcessingResult:
@@ -228,24 +295,73 @@ class AudioProcessingPipeline:
             )
 
     def _run_denoise(self):
-        """Run noise reduction using noisereduce.
+        """Run noise reduction using DeepFilterNet (DNN-based, 48 kHz native).
 
-        Falls back to copying raw audio if processing fails.
+        Falls back to noisereduce (spectral-gating) if DF init fails, then
+        to copying raw audio if even that fails.
+
+        Step-name fix 2026-05-23: writes to "denoise" not "enhance"
+        (previous code path mis-targeted "enhance" — left "denoise" step
+        permanently in_progress in the UI).
         """
-        self._log("Step 2: Noise Reduction (noisereduce)")
-        self.metadata.update_processing_step("enhance", "in_progress", progress=0)
+        self._log("Step 2: Noise Reduction (DeepFilterNet)")
+        self.metadata.update_processing_step("denoise", "in_progress", progress=0)
 
         start_time = time.time()
-        last_error = None
 
+        # Try DeepFilterNet first (modern DNN, single-speaker, 48 kHz)
+        df_model, df_state = _get_df_denoiser()
+        if df_model is not None:
+            try:
+                import soundfile as sf
+                import torch
+                import torchaudio
+                from df.enhance import enhance
+
+                audio, sample_rate = sf.read(str(self.paths.raw_audio_path))
+                audio_np = np.asarray(audio, dtype=np.float32)
+                if audio_np.ndim > 1:
+                    audio_np = audio_np.mean(axis=1)
+                audio_t = torch.from_numpy(audio_np).unsqueeze(0)
+
+                df_sr = df_state.sr()
+                if sample_rate != df_sr:
+                    self._log(f"Resampling {sample_rate} → {df_sr} Hz for DF")
+                    audio_t = torchaudio.functional.resample(audio_t, sample_rate, df_sr)
+
+                with _cuda_lock:
+                    self._log(f"Denoising with DeepFilterNet ({df_sr} Hz, {audio_t.shape[1]/df_sr:.1f}s)...")
+                    enhanced = enhance(df_model, df_state, audio_t)
+
+                # If we resampled, send back to original SR so downstream
+                # stages and the manifest see consistent rates.
+                if sample_rate != df_sr:
+                    enhanced = torchaudio.functional.resample(enhanced, df_sr, sample_rate)
+
+                enhanced_np = enhanced.squeeze(0).cpu().numpy()
+
+                self.paths.denoised_folder.mkdir(parents=True, exist_ok=True)
+                sf.write(str(self.paths.denoised_audio_path), enhanced_np, sample_rate)
+
+                elapsed_ms = int((time.time() - start_time) * 1000)
+                self.metadata.update_processing_step(
+                    "denoise", "done",
+                    progress=100,
+                    duration_ms=elapsed_ms,
+                )
+                self._log(f"DeepFilterNet denoise complete: {elapsed_ms}ms")
+                return
+            except Exception as e:
+                self._log(f"DeepFilterNet failed: {e}; falling back to noisereduce", "WARNING")
+                # fall through to noisereduce attempt below
+
+        last_error = None
         for attempt in range(MAX_RETRIES):
             try:
                 import soundfile as sf
                 import noisereduce as nr
-                import numpy as np
                 import torch
 
-                # Read audio
                 audio, sample_rate = sf.read(str(self.paths.raw_audio_path))
 
                 # Use stationary noise reduction (better for speech)
@@ -261,49 +377,41 @@ class AudioProcessingPipeline:
                 # Use the quietest 20% of frames as noise estimate
                 energy_threshold = np.percentile(energies, 20)
                 noise_frames = energies <= energy_threshold
-                # Collect all quiet frames and concatenate
                 noise_audio = np.concatenate([
                     audio[start:start + frame_length]
                     for i, (start, is_quiet) in enumerate(zip(range(0, len(audio) - frame_length, hop), noise_frames))
                     if is_quiet
                 ])
-                # Limit to 3 seconds of noise samples max to avoid dilution
                 max_noise_samples = int(3.0 * sample_rate)
                 if len(noise_audio) > max_noise_samples:
-                    # Uniformly sample 3 seconds from the noise collection
                     indices = np.linspace(0, len(noise_audio) - 1, max_noise_samples).astype(int)
                     noise_clip = noise_audio[indices]
                 else:
                     noise_clip = noise_audio
 
-                # Denoise using noisereduce
-                # Use GPU if available
                 device = 'cuda' if torch.cuda.is_available() else 'cpu'
                 self._log(f"Denoising with noisereduce on {device}...")
 
-                # Non-stationary noise reduction (Wiener filtering)
-                # Better at reducing musical noise artifacts common in vocal-separated audio
                 reduced_noise = nr.reduce_noise(
                     y=audio,
                     sr=sample_rate,
                     y_noise=noise_clip,
-                    stationary=False,  # Use non-stationary for less musical noise
+                    stationary=False,
                     n_fft=2048,
-                    prop_decrease=0.8,  # Balance between noise reduction and voice quality
-                    device=device
+                    prop_decrease=0.8,
+                    device=device,
                 )
 
-                # Create denoised folder and save
                 self.paths.denoised_folder.mkdir(parents=True, exist_ok=True)
                 sf.write(str(self.paths.denoised_audio_path), reduced_noise, sample_rate)
 
                 elapsed_ms = int((time.time() - start_time) * 1000)
                 self.metadata.update_processing_step(
-                    "enhance", "done",
+                    "denoise", "done",
                     progress=100,
-                    duration_ms=elapsed_ms
+                    duration_ms=elapsed_ms,
                 )
-                self._log(f"Denoise complete: {elapsed_ms}ms, saved to {self.paths.denoised_audio_path}")
+                self._log(f"noisereduce fallback complete: {elapsed_ms}ms")
                 break
 
             except Exception as e:
@@ -321,9 +429,10 @@ class AudioProcessingPipeline:
                         shutil.copy2(str(self.paths.raw_audio_path), str(self.paths.denoised_audio_path))
                         elapsed_ms = int((time.time() - start_time) * 1000)
                         self.metadata.update_processing_step(
-                            "enhance", "done",
+                            "denoise", "done",
                             progress=100,
-                            duration_ms=elapsed_ms
+                            duration_ms=elapsed_ms,
+                            error_message=f"All denoise paths failed: {type(e).__name__}: {e}",
                         )
                         self._log(f"Denoise fallback: copied raw audio")
                         break
@@ -332,121 +441,49 @@ class AudioProcessingPipeline:
                         raise
 
     def _run_enhance(self):
-        """Run voice enhancement using speechbrain Sepformer.
+        """Enhance stage — now a passthrough copy of denoised → enhanced.
 
-        Falls back to copying denoised audio if processing fails.
+        Sepformer-wsj02mix (the previous implementation) is a 2-speaker
+        SEPARATION model trained on WSJ0-2Mix, not a denoiser. On
+        single-speaker recordings it either passed audio through
+        unchanged or silently fell back to copying denoised when the
+        forward errored — bit-identical output either way (verified
+        2026-05-22). With DeepFilterNet handling the actual denoising
+        upstream, there's nothing meaningful for an additional
+        "enhance" stage to do, so we just propagate the denoised file
+        forward. Keeping the stage + on-disk folder structure preserves
+        downstream callers (diarize reads enhanced > denoised > raw).
         """
-        self._log("Step 3: Voice Enhancement (speechbrain Sepformer)")
-        self.metadata.update_processing_step("diarize", "in_progress", progress=0)
+        self._log("Step 3: Enhance (passthrough — Sepformer dropped 2026-05-23)")
+        self.metadata.update_processing_step("enhance", "in_progress", progress=0)
 
         start_time = time.time()
-        last_error = None
 
-        # Use denoised audio if available, otherwise use raw
         audio_path = self.paths.denoised_audio_path
         if not audio_path.exists():
             audio_path = self.paths.raw_audio_path
-            self._log("Denoised audio not found, using raw audio for enhancement")
+            self._log("Denoised audio not found, using raw audio for enhance passthrough")
 
-        for attempt in range(MAX_RETRIES):
-            try:
-                import soundfile as sf
-                import torch
-                from speechbrain.pretrained import SepformerSeparation
-
-                # Acquire CUDA lock to serialize GPU operations
-                with _cuda_lock:
-                    # Load Sepformer model
-                    self._log("Loading speechbrain Sepformer model...")
-                    # sepformer-wsj02mix is trained on WSJ0-2Mix (2-speaker clean speech separation)
-                    # This is the right model for voice enhancement/denoising of speech.
-                    # sepformer-wham-enhancement was wrong — trained on environmental noise datasets.
-                    model = SepformerSeparation.from_hparams(
-                        source="speechbrain/sepformer-wsj02mix",
-                        savedir="pretrained_models/sepformer-wsj02mix",
-                        run_opts={"device": "cuda" if torch.cuda.is_available() else "cpu"}
-                    )
-
-                    # Load audio
-                    audio, sample_rate = sf.read(str(audio_path))
-                    audio_tensor = torch.from_numpy(audio).float()
-
-                    # Ensure mono for Sepformer (convert stereo [samples,2] -> [samples])
-                    if audio_tensor.ndim == 2 and audio_tensor.shape[1] == 2:
-                        audio_tensor = audio_tensor.mean(dim=1)  # stereo to mono
-
-                    # Separate (enhance)
-                    self._log("Running speech enhancement...")
-                    with torch.no_grad():
-                        enhanced = model(audio_tensor.unsqueeze(0))
-                        enhanced = enhanced.squeeze(0).cpu().numpy()
-
-                    # Create enhanced folder and save
-                    self.paths.enhanced_folder.mkdir(parents=True, exist_ok=True)
-                    sf.write(str(self.paths.enhanced_audio_path), enhanced, sample_rate)
-
-                    # Free GPU memory after enhancement
-                    del model
-                    del audio_tensor
-                    del enhanced
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                    import gc
-                    gc.collect()
-
-                elapsed_ms = int((time.time() - start_time) * 1000)
-                self.metadata.update_processing_step(
-                    "enhance", "done",
-                    progress=100,
-                    duration_ms=elapsed_ms
-                )
-                self._log(f"Enhance complete: {elapsed_ms}ms, saved to {self.paths.enhanced_audio_path}")
-                break
-
-            except Exception as e:
-                last_error = e
-                if attempt < MAX_RETRIES - 1:
-                    sleep_time = RETRY_BACKOFF_BASE ** attempt
-                    self._log(f"Enhance attempt {attempt + 1} failed, retrying in {sleep_time}s: {e}", "WARNING")
-                    time.sleep(sleep_time)
-                else:
-                    # Fallback: copy denoised as enhanced
-                    self._log(f"Enhance failed, falling back to denoised audio: {e}", "WARNING")
-                    try:
-                        import shutil
-                        self.paths.enhanced_folder.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(str(audio_path), str(self.paths.enhanced_audio_path))
-                        elapsed_ms = int((time.time() - start_time) * 1000)
-                        # Mark step done but record the underlying failure so
-                        # the metadata.json + UI shows "enhance copied (Sepformer
-                        # error)". Without this, on-disk enhanced/audio.wav is
-                        # bit-identical to denoised/audio.wav, with
-                        # status=done + error_message=None — looks like the
-                        # enhance worked but it was a silent passthrough.
-                        # Fail-loud preference (see memory/feedback_fail_loud.md).
-                        self.metadata.update_processing_step(
-                            "enhance", "done",
-                            progress=100,
-                            duration_ms=elapsed_ms,
-                            error_message=f"Sepformer failed, copied denoised as fallback: {type(e).__name__}: {e}",
-                        )
-                        self._log(f"Enhance fallback: copied audio (Sepformer error: {type(e).__name__})")
-                        break
-                    except Exception as fallback_error:
-                        self._log(f"Enhance fallback also failed: {fallback_error}", "ERROR")
-                        raise
-
-        elapsed_ms = int((time.time() - start_time) * 1000)
-        # The trailing step-status writes inside _run_enhance() used to
-        # set "diarize" → done (a copy-paste bug — diarize hadn't run yet).
-        # Now correctly reports "enhance" done after retry+fallback loop.
-        self.metadata.update_processing_step(
-            "enhance", "done",
-            progress=100,
-            duration_ms=elapsed_ms
-        )
-
-        self._log(f"Enhance complete: {elapsed_ms}ms")
+        try:
+            import shutil
+            self.paths.enhanced_folder.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(audio_path), str(self.paths.enhanced_audio_path))
+            elapsed_ms = int((time.time() - start_time) * 1000)
+            self.metadata.update_processing_step(
+                "enhance", "done",
+                progress=100,
+                duration_ms=elapsed_ms,
+            )
+            self._log(f"Enhance passthrough complete: {elapsed_ms}ms")
+            return
+        except Exception as e:
+            self._log(f"Enhance passthrough failed: {e}", "ERROR")
+            self.metadata.update_processing_step(
+                "enhance", "failed",
+                progress=0,
+                error_message=f"passthrough failed: {type(e).__name__}: {e}",
+            )
+            raise
 
     def _run_diarize(self):
         """Run speaker diarization using pyannote.audio.
@@ -746,10 +783,54 @@ class AudioProcessingPipeline:
 
             # Save each speaker's combined audio
             speaker_audio_data = []
+            dropped_ghosts = []
             for speaker_id, audio_chunks in speaker_audio.items():
                 speaker_audio_combined = np.concatenate(audio_chunks)
-                # Ensure correct format for soundfile: (samples,) for mono
-                # soundfile expects 2D array (samples, channels) or handles 1D
+
+                # Ghost-speaker filter (2026-05-23): diarization on solo
+                # recordings hallucinates a second speaker from room noise
+                # floor (observed: SPEAKER_01 peak=0.02, 100% silent
+                # frames, eff_bw 277 Hz). Drop any "speaker" whose
+                # concatenated audio has peak < 0.01 (-40 dBFS) — well
+                # below speech, well above realistic room noise.
+                peak = float(np.abs(speaker_audio_combined).max()) if speaker_audio_combined.size else 0.0
+                if peak < 0.01:
+                    self._log(
+                        f"Dropping ghost speaker {speaker_id}: peak={peak:.4f} (<0.01) "
+                        f"— almost certainly diarization noise, not real speech"
+                    )
+                    dropped_ghosts.append(speaker_id)
+                    continue
+
+                # Loudness-normalize to broadcast-voice standard (-16 LUFS)
+                # with a peak limit at -1 dBFS. Without this, recordings
+                # captured at low gain come out at -40 dBFS (barely
+                # audible), and the trainer reads near-silent audio. The
+                # peak limit prevents LUFS normalization from clipping on
+                # quiet inputs that need a lot of gain (observed: a -38
+                # LUFS input normalized to peak 1.47 — clipped).
+                try:
+                    normalized = _loudness_normalize(
+                        speaker_audio_combined.astype(np.float32),
+                        sample_rate,
+                        target_lufs=-16.0,
+                        peak_limit_dbfs=-1.0,
+                    )
+                    new_peak = float(np.abs(normalized).max())
+                    new_rms = float(np.sqrt((normalized ** 2).mean()))
+                    self._log(
+                        f"LUFS-normalized {speaker_id}: "
+                        f"peak {peak:.3f}→{new_peak:.3f}, "
+                        f"rms_db {20*np.log10(max(np.sqrt((speaker_audio_combined**2).mean()), 1e-9)):.1f}→{20*np.log10(max(new_rms, 1e-9)):.1f}"
+                    )
+                    speaker_audio_combined = normalized
+                except Exception as norm_err:
+                    self._log(
+                        f"Loudness normalize failed for {speaker_id}: {norm_err} "
+                        f"— writing unnormalized audio",
+                        "WARNING",
+                    )
+
                 speaker_path = self.paths.speakers_folder / f"{speaker_id}.wav"
                 sf.write(str(speaker_path), speaker_audio_combined, sample_rate, subtype='PCM_16')
                 self._log(f"Extracted {speaker_id}: {len(speaker_audio_combined)} samples ({len(audio_chunks)} segments)")
@@ -782,10 +863,24 @@ class AudioProcessingPipeline:
                     "transcription_confidence": self.metadata._data.get("transcription", {}).get("confidence", 0.0),
                 })
 
+            # Drop any speaker_segments belonging to ghost speakers. The
+            # per-segment loop above writes one entry per diarized turn,
+            # including for ghosts. enrich_speaker_segments would happily
+            # populate audio_path/voice_audit on those segments even though
+            # the wav file was never written → 404s downstream when
+            # training tries to resolve them.
+            if dropped_ghosts:
+                self.metadata._data["speaker_segments"] = [
+                    seg for seg in self.metadata._data.get("speaker_segments", [])
+                    if seg.get("speaker_id") not in dropped_ghosts
+                ]
+                self.metadata.save()
+                self._log(f"Dropped {len(dropped_ghosts)} ghost speakers: {dropped_ghosts}")
+
             # Enrich segments with audio path (but NOT duration - we keep per-segment duration)
             self.metadata.enrich_speaker_segments(speaker_audio_data)
 
-            self._log(f"Speaker extraction complete: {len(speaker_audio)} speakers")
+            self._log(f"Speaker extraction complete: {len(speaker_audio_data)} real speakers (dropped {len(dropped_ghosts)} ghosts)")
 
         except Exception as e:
             self._log(f"Speaker extraction failed: {e}", "WARNING")

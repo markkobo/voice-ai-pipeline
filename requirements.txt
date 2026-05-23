@@ -72,6 +72,11 @@ pyannote.audio>=3.0.0,<4.0.0
 faster-whisper>=1.0.0
 speechbrain>=1.0.0
 noisereduce>=3.0.0
+# DeepFilterNet — primary DNN denoiser since 2026-05-23. Requires Rust to
+# build on Python 3.12 (no wheel). Falls back to noisereduce if missing.
+deepfilternet>=0.5.6
+# Loudness normalization (LUFS) for speaker extraction step.
+pyloudnorm>=0.2.0
 
 # ============================================================================
 # Training (LoRA / SFT)
