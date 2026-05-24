@@ -322,23 +322,54 @@ class AudioProcessingPipeline:
                 audio_np = np.asarray(audio, dtype=np.float32)
                 if audio_np.ndim > 1:
                     audio_np = audio_np.mean(axis=1)
-                audio_t = torch.from_numpy(audio_np).unsqueeze(0)
 
                 df_sr = df_state.sr()
+                # Resample at the numpy/tensor boundary so the chunker
+                # below works in the DF model's native sample rate.
                 if sample_rate != df_sr:
                     self._log(f"Resampling {sample_rate} → {df_sr} Hz for DF")
-                    audio_t = torchaudio.functional.resample(audio_t, sample_rate, df_sr)
+                    rs_t = torchaudio.functional.resample(
+                        torch.from_numpy(audio_np.copy()), sample_rate, df_sr
+                    )
+                    audio_np = rs_t.numpy()
 
+                # Chunk to ~30s windows. DF processes the full input as a
+                # single sequence through a CUDA GRU which trips
+                # CUDNN_STATUS_NOT_SUPPORTED on long inputs (observed
+                # 2026-05-24 on 18-min recordings — every reprocess failed
+                # and fell through to noisereduce which OOMed). Chunking
+                # to <=30s sidesteps the cuDNN sequence-length limit and
+                # is also ~5x faster on CUDA (better batching).
+                CHUNK_SEC = 30
+                chunk_samples = int(CHUNK_SEC * df_sr)
+                out_pieces = []
                 with _cuda_lock:
-                    self._log(f"Denoising with DeepFilterNet ({df_sr} Hz, {audio_t.shape[1]/df_sr:.1f}s)...")
-                    enhanced = enhance(df_model, df_state, audio_t)
+                    self._log(
+                        f"Denoising with DeepFilterNet ({df_sr} Hz, "
+                        f"{len(audio_np)/df_sr:.1f}s in "
+                        f"{(len(audio_np) + chunk_samples - 1) // chunk_samples} "
+                        f"chunks of {CHUNK_SEC}s)..."
+                    )
+                    for start in range(0, len(audio_np), chunk_samples):
+                        chunk = audio_np[start:start + chunk_samples]
+                        if len(chunk) < int(0.05 * df_sr):
+                            # Trailing tail < 50ms — append raw, DF can't
+                            # do much with it and may error on tiny inputs.
+                            out_pieces.append(chunk)
+                            continue
+                        chunk_t = torch.from_numpy(chunk.copy()).unsqueeze(0).contiguous()
+                        enh = enhance(df_model, df_state, chunk_t).squeeze(0).cpu().numpy()
+                        out_pieces.append(enh)
+                enhanced_np = np.concatenate(out_pieces) if out_pieces else audio_np
 
-                # If we resampled, send back to original SR so downstream
-                # stages and the manifest see consistent rates.
+                # Resample back to original SR if needed (for downstream
+                # consistency — diarize/transcribe read at the original
+                # rate).
                 if sample_rate != df_sr:
-                    enhanced = torchaudio.functional.resample(enhanced, df_sr, sample_rate)
-
-                enhanced_np = enhanced.squeeze(0).cpu().numpy()
+                    rs_t = torchaudio.functional.resample(
+                        torch.from_numpy(enhanced_np), df_sr, sample_rate
+                    )
+                    enhanced_np = rs_t.numpy()
 
                 self.paths.denoised_folder.mkdir(parents=True, exist_ok=True)
                 sf.write(str(self.paths.denoised_audio_path), enhanced_np, sample_rate)
@@ -389,8 +420,15 @@ class AudioProcessingPipeline:
                 else:
                     noise_clip = noise_audio
 
-                device = 'cuda' if torch.cuda.is_available() else 'cpu'
-                self._log(f"Denoising with noisereduce on {device}...")
+                # 2026-05-24: hardcoded device='cpu' here. The previous
+                # `device='cuda'` path tried to allocate ~20 TiB on long
+                # recordings (observed: 15-min wav blew up with
+                # "Unable to allocate 19.9 TiB for an array with shape
+                # (45575168, 60002) and data type float64"). The CUDA
+                # path in noisereduce 3.x materializes a (samples, fft)
+                # matrix in float64. CPU path uses an incremental
+                # STFT and works on long inputs.
+                self._log(f"Denoising with noisereduce on cpu (cuda path OOMs on long audio)...")
 
                 reduced_noise = nr.reduce_noise(
                     y=audio,
@@ -399,7 +437,7 @@ class AudioProcessingPipeline:
                     stationary=False,
                     n_fft=2048,
                     prop_decrease=0.8,
-                    device=device,
+                    device='cpu',
                 )
 
                 self.paths.denoised_folder.mkdir(parents=True, exist_ok=True)
