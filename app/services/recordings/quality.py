@@ -490,13 +490,16 @@ def audit_voice_training_quality(audio_path: Path) -> dict:
         "energy_8_12khz_pct": e_high,
     }
 
-    # Thresholds re-tuned 2026-05-21 against real broadband phone-mic
-    # recordings. The primary band-limiting indicator is energy above 4
-    # kHz (the telephone cutoff): clean recordings have ≥ 1.5% in 4-8
-    # kHz, telephone audio has ≪ 0.5%. The 95th-percentile effective
-    # bandwidth metric is a secondary signal — for real speech most
-    # power lives in F0+F1 (below 1 kHz), so a high "eff_bw" floor
-    # would reject clean wideband recordings as well as muffled ones.
+    # Thresholds re-tuned 2026-05-24 for post-DeepFilterNet audio.
+    # Earlier thresholds (bad < 0.5%, marginal < 1.5%) were measured on
+    # raw recordings where noise itself contributed broadband energy.
+    # After DF strips that noise, the same recording's 4-8 kHz energy
+    # drops by ~30-50% because we're now measuring pure speech, which
+    # is genuinely narrower than speech+noise. Without retuning, the
+    # full sweep on 2026-05-24 showed 14 speakers regressing in verdict
+    # despite the actual audio being noticeably cleaner (peak/RMS/
+    # loudness all improved). The new bands are calibrated against
+    # the post-DF distribution observed in that sweep.
     warns = []
     if sr < 24000:
         warns.append(f"取樣率僅 {sr} Hz（低於 TTS 原生 24 kHz）— 訓練無法還原失去的頻寬")
@@ -507,14 +510,14 @@ def audit_voice_training_quality(audio_path: Path) -> dict:
     if silent_pct > 40:
         warns.append(f"靜音比例 {silent_pct:.0f}% 偏高")
     # Telephone-band lowpass signature: vanishing energy above 4 kHz.
-    if e_mid < 0.5:
+    if e_mid < 0.25:
         warns.append(f"4-8 kHz 能量僅 {e_mid:.2f}% — 電話等級音質（聲音被低通切掉了），複製出的聲音會悶悶的")
-    elif e_mid < 1.5:
+    elif e_mid < 1.0:
         warns.append(f"4-8 kHz 能量 {e_mid:.1f}% 偏低 — 高頻細節不足，聲音可能略悶")
 
     # Verdict ladder (primary driver: energy above 4 kHz)
     bad_signal = (
-        e_mid < 0.5
+        e_mid < 0.25
         or (clipped > 100 and peak > 0.999)
         or sr < 16000
     )
