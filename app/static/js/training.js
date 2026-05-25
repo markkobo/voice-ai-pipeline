@@ -673,15 +673,77 @@
             }
         }
 
-        // ==================== PROGRESS SSE ====================
+        // ==================== PROGRESS SSE + polling fallback ====================
+        // cloudflared's free quick-tunnel (trycloudflare.com) aggressively
+        // buffers text/event-stream responses regardless of padding /
+        // X-Accel-Buffering / keepalive — confirmed 2026-05-25 with
+        // local SSE working perfectly and tunnel SSE getting zero bytes.
+        // Falls back to /api/training/versions/{id} polling at 2s if the
+        // SSE connection doesn't deliver a `connected` event within 5s.
+        let pollTimer = null;
+
+        function stopPolling() {
+            if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+        }
+
+        function pollProgress(versionId) {
+            const tick = async () => {
+                try {
+                    const r = await fetch(`/api/training/versions/${versionId}`, { cache: 'no-store' });
+                    if (!r.ok) return;
+                    const v = await r.json();
+                    if (v.progress) {
+                        updateProgress(v.progress);
+                    }
+                    if (v.status === 'ready') {
+                        log('Training complete (via polling)!');
+                        stopPolling();
+                        progressSection.classList.remove('visible');
+                        startBtn.disabled = false;
+                        startBtn.textContent = '開始訓練';
+                        showNotification('訓練完成！', `版本 ${versionId} 訓練成功`);
+                        switchTab('versions');
+                        loadVersions(versionId);
+                    } else if (v.status === 'failed') {
+                        log(`Training failed (via polling): ${v.error_message || ''}`, 'error');
+                        stopPolling();
+                        progressSection.classList.remove('visible');
+                        startBtn.disabled = false;
+                        startBtn.textContent = '開始訓練';
+                        showNotification('訓練失敗', v.error_message || '未知錯誤');
+                    }
+                } catch (e) {
+                    log(`Progress poll error: ${e.message}`, 'warning');
+                }
+            };
+            tick();  // fire immediately
+            pollTimer = setInterval(tick, 2000);
+        }
+
         function connectProgress(versionId) {
             if (eventSource) {
                 eventSource.close();
             }
+            stopPolling();
 
+            let sseDeliveredData = false;
             eventSource = new EventSource(`/api/training/versions/${versionId}/progress`);
 
+            // If SSE doesn't deliver any data event within 5s (cloudflared
+            // is buffering at the edge), close it and fall back to HTTP
+            // polling. Polling works through every proxy.
+            const fallbackTimer = setTimeout(() => {
+                if (!sseDeliveredData) {
+                    log('SSE silent for 5s — falling back to HTTP polling (likely cloudflared buffering)', 'warning');
+                    try { eventSource.close(); } catch (_) {}
+                    eventSource = null;
+                    pollProgress(versionId);
+                }
+            }, 5000);
+
             eventSource.onmessage = (e) => {
+                sseDeliveredData = true;
+                clearTimeout(fallbackTimer);
                 const data = JSON.parse(e.data);
                 if (data.event === 'progress') {
                     updateProgress(data);
@@ -702,10 +764,18 @@
                     eventSource.close();
                     showNotification('訓練失敗', data.error || '未知錯誤');
                 }
+                // `connected` and other events: just keep the connection alive.
             };
 
             eventSource.onerror = () => {
-                log('SSE connection lost, will retry...', 'warning');
+                log('SSE connection lost', 'warning');
+                if (!sseDeliveredData) {
+                    // Never got any data and now errored — go to polling.
+                    clearTimeout(fallbackTimer);
+                    try { eventSource.close(); } catch (_) {}
+                    eventSource = null;
+                    pollProgress(versionId);
+                }
             };
         }
 
