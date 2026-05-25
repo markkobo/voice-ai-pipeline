@@ -748,6 +748,24 @@ def main():
             merged_config.pop("speaker_encoder_config", None)
             # Keep tts_model_type = "custom_voice"
 
+            # Cast everything back to bf16 before save. PyTorch's AdamW +
+            # gradient flow through code_predictor's q/k/v/o_proj layers
+            # silently produces fp32 tensors during training even though
+            # the model was loaded in bf16 — observed 2026-05-25 with
+            # 20 attention weights stored as fp32 in broken SFT models
+            # (q/k/v/o_proj × 5 layers of talker.code_predictor.model).
+            # The mixed-precision tensors caused numerical drift during
+            # inference such that the model never emitted a stop token,
+            # generating 162s of garbage from 5-character prompts.
+            # Working v2_20260514 had 0 fp32 tensors. Forcing the dtype
+            # uniformly back to bf16 at save time guarantees the merged
+            # model matches the base model's dtype layout.
+            for k in list(state_dict.keys()):
+                t = state_dict[k]
+                if t.is_floating_point() and t.dtype != torch.bfloat16:
+                    state_dict[k] = t.to(torch.bfloat16)
+            logger.info(f"[MERGE] Cast state_dict to bf16 (uniform dtype) before save")
+
             # Save modified state dict to merged path
             from safetensors.torch import save_file
             save_file(state_dict, merged_path / "model.safetensors")
@@ -1349,8 +1367,19 @@ def merge_lora(lora_dir: Path, base_model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
             f"(This happens for LoRA runs from before the 2026-05-21 fix.)"
         )
 
+    # Same bf16-cast guard as the SFT path (see comment at line ~752):
+    # LoRA delta application uses .float() math then casts back via
+    # `(scaling * W_B.float() @ W_A.float()).to(W_base.dtype)`, but the
+    # baked codec_embedding row at spk_id can carry the speaker_encoder's
+    # output dtype (fp32) into the otherwise-bf16 table. Force uniform
+    # bf16 at save so the merged model matches base model's layout.
+    for k in list(merged_state.keys()):
+        t = merged_state[k]
+        if t.is_floating_point() and t.dtype != torch.bfloat16:
+            merged_state[k] = t.to(torch.bfloat16)
+
     # Save merged safetensor
-    logger.info(f"[MERGE] Saving merged model to {merged_path}")
+    logger.info(f"[MERGE] Saving merged model to {merged_path} (all bf16)")
     save_file(merged_state, merged_path / "model.safetensors")
 
     logger.info(f"[MERGE] Done! Merged model saved to: {merged_path}")
