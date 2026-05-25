@@ -374,13 +374,20 @@ class TrainingService:
         if v is None or v.merged_path or not v.lora_path:
             return
         lora_dir = Path(v.lora_path)
-        parts = lora_dir.name.split("_")
-        if len(parts) < 3:
-            return
-        version_base = "_".join(parts[:3])
-        merged_dir = lora_dir.parent / f"merged_qwen3_tts_{version_base}"
+        # New naming: full lora_dir.name. Falls back to legacy parts[:3]
+        # form for backfilling older trainings that landed at the
+        # collision-prone short name (e.g. xiao_s_v2 → merged_qwen3_tts_xiao_s_v2).
+        merged_dir = lora_dir.parent / f"merged_qwen3_tts_{lora_dir.name}"
         if not merged_dir.exists():
-            return
+            parts = lora_dir.name.split("_")
+            if len(parts) >= 3:
+                legacy = lora_dir.parent / f"merged_qwen3_tts_{'_'.join(parts[:3])}"
+                if legacy.exists():
+                    merged_dir = legacy
+                else:
+                    return
+            else:
+                return
 
         def _set(ver: TrainingVersion) -> None:
             ver.merged_path = str(merged_dir.resolve())

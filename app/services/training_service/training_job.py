@@ -619,10 +619,16 @@ def main():
             from huggingface_hub import snapshot_download
             base_model_path = Path(snapshot_download(BASE_MODEL))
 
-            # Copy base model directory structure
-            parts = Path(OUTPUT_DIR).name.split('_')
-            version_base = '_'.join(parts[:3])  # xiao_s_v33
-            merged_name = f"merged_qwen3_tts_{version_base}"
+            # Use the FULL version directory name to guarantee uniqueness.
+            # Previous naming (`_'.join(parts[:3])`) only kept persona +
+            # major version + date — two trainings on the same persona /
+            # day would write to the same merged dir, with the second
+            # silently OVERWRITING the first. Observed 2026-05-25: user's
+            # v9_20260525_172609 and v9_20260525_180112 both landed at
+            # `merged_qwen3_tts_test_v9_20260525`; the 18:01 run clobbered
+            # the 17:26 run's merge. Using lora_dir.name makes each merge
+            # uniquely addressable: `merged_qwen3_tts_test_v9_20260525_180112_175800`.
+            merged_name = f"merged_qwen3_tts_{Path(OUTPUT_DIR).name}"
             merged_path = Path(OUTPUT_DIR).parent / merged_name
 
             if merged_path.exists():
@@ -928,12 +934,9 @@ if __name__ == "__main__":
                         with open(tracker_file, "w") as f:
                             json.dump(prog, f)
 
-                    # For SFT, the model is already saved to merged_qwen3_tts_{version_base}
-                    # in the parent directory (same location as LoRA merged models)
+                    # SFT: subprocess already saved merged model to merged_qwen3_tts_{full_version_dir_name}.
                     if self.training_type == "sft":
-                        parts = self.version_dir.name.split('_')
-                        version_base = '_'.join(parts[:3])  # xiao_s_v32
-                        merged_name = f"merged_qwen3_tts_{version_base}"
+                        merged_name = f"merged_qwen3_tts_{self.version_dir.name}"
                         merged_path = self.version_dir.parent / merged_name
                         if merged_path.exists():
                             logger.info(f"[TRAINING:{self.version_id[:8]}] SFT model ready: {merged_path}")
@@ -1104,11 +1107,12 @@ def merge_lora(lora_dir: Path, base_model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
         logger.error(f"[MERGE] adapter_model.safetensors not found: {adapter_file}")
         return None
 
-    # Compute merged model path
-    # e.g. xiao_s_v12_20260330_223729 -> xiao_s_v12 -> merged_qwen3_tts_xiao_s_v12
-    parts = lora_dir.name.split('_')
-    version_base = '_'.join(parts[:3])  # first 3 parts
-    merged_name = f"merged_qwen3_tts_{version_base}"
+    # Compute merged model path — use FULL lora_dir.name to guarantee
+    # uniqueness across training runs. Previous `parts[:3]` collapsed
+    # multiple runs on the same persona/day to the same merged dir; the
+    # second run would silently overwrite the first (see 2026-05-25
+    # incident with v9_20260525_172609 vs v9_20260525_180112).
+    merged_name = f"merged_qwen3_tts_{lora_dir.name}"
     merged_path = lora_dir.parent / merged_name
 
     if merged_path.exists():
