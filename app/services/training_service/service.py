@@ -274,10 +274,62 @@ class TrainingService:
 
         Returns the number of versions reconciled.
         """
+        # Check for live training subprocesses BEFORE flipping anything.
+        # The subagent-driven server restart on 2026-05-25 flipped a
+        # running training to "failed (interrupted)" because the sweep
+        # couldn't tell the difference between "subprocess died" and
+        # "subprocess still alive, parent just restarted". The
+        # subprocess kept writing progress.json the whole time; the
+        # sweep just broke the UI by claiming it was dead.
+        #
+        # subprocess command line contains the lora_path:
+        # `.venv/bin/python {version_dir}/train_lora.py`. If any
+        # currently-running process matches that path, the subprocess
+        # is still alive — leave it alone, the next refresh on
+        # progress.json will eventually fire.
+        import subprocess as _sp
+        live_pids_by_dir: dict[str, int] = {}
+        try:
+            _out = _sp.run(
+                ["ps", "axwo", "pid,args"],
+                capture_output=True, text=True, timeout=5,
+            ).stdout
+            for line in _out.splitlines():
+                if "train_lora.py" in line and "/data/models/" in line:
+                    parts = line.strip().split(None, 1)
+                    if len(parts) == 2:
+                        pid_s, args = parts
+                        # Pull the version_dir name out of the path.
+                        # e.g. /...data/models/test_v9_2026.../train_lora.py
+                        for tok in args.split():
+                            if "/data/models/" in tok and tok.endswith("train_lora.py"):
+                                vdir = tok.rsplit("/", 1)[0].rsplit("/", 1)[1]
+                                try:
+                                    live_pids_by_dir[vdir] = int(pid_s)
+                                except ValueError:
+                                    pass
+        except Exception as e:
+            log.warning("sweep_stranded: ps scan failed (%s); will fall back to assuming all are dead", e)
+
         count = 0
         for v in self.repository.list():
             if v.status != VersionStatus.training:
                 continue
+
+            # If the subprocess is still alive, this isn't a stranded
+            # version — it's a healthy in-flight run that the parent
+            # restart didn't kill (subprocesses don't share fate with
+            # the FastAPI server). Leave it; next progress update will
+            # naturally refresh status when the subprocess finishes.
+            if v.lora_path:
+                vdir_name = v.lora_path.rstrip("/").rsplit("/", 1)[-1]
+                if vdir_name in live_pids_by_dir:
+                    log.info(
+                        "sweep_stranded: skipping %s (live subprocess pid=%d)",
+                        v.version_id, live_pids_by_dir[vdir_name],
+                    )
+                    continue
+
             progress = self.repository.read_progress(v.version_id)
             terminal = progress is not None and progress.status.value in (
                 "ready",

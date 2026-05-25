@@ -199,15 +199,25 @@ async def _sse_progress_generator(
 
     # Emit an immediate `connected` heartbeat so the client sees data on
     # the stream before the first poll cycle. Useful through cloudflared:
-    # some proxies buffer SSE until the first bytes arrive, which can
-    # delay the EventSource `open` event on mobile clients. Padded with a
-    # large comment line (SSE lines starting with `:` are ignored) to
-    # bust ~4 KB buffering in intermediate proxies.
-    yield ":" + (" " * 2048) + "\n\n"
+    # Cloudflare's HTTP/2 edge buffers small SSE responses until they hit
+    # an internal threshold (~4-8 KB observed empirically on
+    # trycloudflare.com). The 2 KB pad we used previously wasn't enough —
+    # the first `progress` snapshot is only ~400 bytes, so the stream
+    # would sit silently at the edge until the next epoch boundary.
+    # Bump to 8 KB so even a single-event burst clears CF's buffer.
+    # SSE lines starting with `:` are ignored by EventSource clients.
+    yield ":" + (" " * 8192) + "\n\n"
     yield f"data: {json.dumps({'event': 'connected', 'version_id': version_id})}\n\n"
 
     last_snapshot: Optional[dict] = None
     waited = 0.0
+    # Periodic keep-alive comment — emit every N seconds even when the
+    # progress snapshot hasn't changed so bytes keep flowing through
+    # Cloudflare's buffer. Without this, an idle epoch (>30 s between
+    # writes) leaves the EventSource on the client silent and the UI
+    # frozen at the last received value.
+    keepalive_every = 5.0
+    since_keepalive = 0.0
     while waited < SSE_MAX_WAIT_SECONDS:
         try:
             progress = service.read_progress(version_id)
@@ -219,6 +229,7 @@ async def _sse_progress_generator(
             yield f"data: {json.dumps({'event': 'error', 'error': str(e)})}\n\n"
             return
 
+        emitted = False
         if progress is not None:
             snapshot = progress.model_dump(mode="json")
             if progress.status.value in ("ready", "failed"):
@@ -234,9 +245,20 @@ async def _sse_progress_generator(
             if snapshot != last_snapshot:
                 yield f"data: {json.dumps({'event': 'progress', **snapshot})}\n\n"
                 last_snapshot = snapshot
+                emitted = True
+
+        if emitted:
+            since_keepalive = 0.0
+        elif since_keepalive >= keepalive_every:
+            # 1 KB padded comment — small enough to be cheap, large
+            # enough to keep CF's per-frame buffer fed. SSE clients
+            # silently discard lines starting with `:`.
+            yield ":" + (" " * 1024) + "\n\n"
+            since_keepalive = 0.0
 
         await asyncio.sleep(SSE_POLL_INTERVAL_SECONDS)
         waited += SSE_POLL_INTERVAL_SECONDS
+        since_keepalive += SSE_POLL_INTERVAL_SECONDS
 
     yield f"data: {json.dumps({'event': 'timeout', 'version_id': version_id})}\n\n"
 
