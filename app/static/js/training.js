@@ -78,6 +78,52 @@
             }, duration);
         }
 
+        // ==================== TRAINING UI STATE ====================
+        // Single source of truth for "are we currently training?". Toggles
+        // start button + cancel button visibility together so they can't
+        // get out of sync. Callers used to set startBtn.disabled and
+        // textContent inline in three different places — risky.
+        function setTrainingUI(isTraining) {
+            const cancelBtn = document.getElementById('cancelTrainingBtn');
+            if (isTraining) {
+                startBtn.disabled = true;
+                startBtn.textContent = '訓練中...';
+                if (cancelBtn) cancelBtn.style.display = '';
+            } else {
+                startBtn.disabled = false;
+                startBtn.textContent = '開始訓練';
+                if (cancelBtn) cancelBtn.style.display = 'none';
+                currentTraining = null;
+            }
+        }
+
+        async function cancelTraining() {
+            if (!currentTraining) {
+                log('No active training to cancel', 'warning');
+                return;
+            }
+            if (!confirm('確定要取消正在進行的訓練？已寫到 disk 的 epoch 進度會丟失。')) return;
+            const vid = currentTraining;
+            log(`Cancelling training: ${vid}`);
+            try {
+                const r = await fetch(`/api/training/versions/${vid}/cancel`, { method: 'POST' });
+                if (!r.ok) {
+                    const err = await r.json().catch(() => ({}));
+                    throw new Error(err.detail || err.message || `HTTP ${r.status}`);
+                }
+                log(`Training cancelled: ${vid}`);
+                showToast('已取消訓練', 'success');
+                stopPolling();
+                if (eventSource) { try { eventSource.close(); } catch (_) {} eventSource = null; }
+                progressSection.classList.remove('visible');
+                setTrainingUI(false);
+                loadVersions();
+            } catch (e) {
+                log(`Cancel failed: ${e.message}`, 'error');
+                showToast('取消失敗: ' + e.message, 'error');
+            }
+        }
+
         // ==================== INITIALIZATION ====================
         async function init() {
             await Promise.all([loadPersonas(), loadListeners(), loadRecordings()]);
@@ -103,8 +149,7 @@
                 log(`Resuming progress for in-flight training: ${active.version_id}`);
                 currentTraining = active.version_id;
                 progressSection.classList.add('visible');
-                startBtn.disabled = true;
-                startBtn.textContent = '訓練中...';
+                setTrainingUI(true);
                 connectProgress(active.version_id);
             } catch (e) {
                 log(`Failed to resume in-flight training: ${e.message}`, 'warning');
@@ -628,8 +673,7 @@
                 return;
             }
 
-            startBtn.disabled = true;
-            startBtn.textContent = '訓練中...';
+            setTrainingUI(true);
             progressSection.classList.add('visible');
 
             log(`Starting training: persona=${personaId}, segments=${segmentIds.length}`);
@@ -667,8 +711,7 @@
             } catch (e) {
                 log(`Training failed: ${e.message}`, 'error');
                 showToast('訓練失敗: ' + e.message, 'error');
-                startBtn.disabled = false;
-                startBtn.textContent = '開始訓練';
+                setTrainingUI(false);
                 progressSection.classList.remove('visible');
             }
         }
@@ -699,8 +742,7 @@
                         log('Training complete (via polling)!');
                         stopPolling();
                         progressSection.classList.remove('visible');
-                        startBtn.disabled = false;
-                        startBtn.textContent = '開始訓練';
+                        setTrainingUI(false);
                         showNotification('訓練完成！', `版本 ${versionId} 訓練成功`);
                         switchTab('versions');
                         loadVersions(versionId);
@@ -708,8 +750,7 @@
                         log(`Training failed (via polling): ${v.error_message || ''}`, 'error');
                         stopPolling();
                         progressSection.classList.remove('visible');
-                        startBtn.disabled = false;
-                        startBtn.textContent = '開始訓練';
+                        setTrainingUI(false);
                         showNotification('訓練失敗', v.error_message || '未知錯誤');
                     }
                 } catch (e) {
@@ -750,8 +791,7 @@
                 } else if (data.event === 'complete') {
                     log('Training complete!');
                     progressSection.classList.remove('visible');
-                    startBtn.disabled = false;
-                    startBtn.textContent = '開始訓練';
+                    setTrainingUI(false);
                     eventSource.close();
                     showNotification('訓練完成！', `版本 ${data.version_id || versionId} 訓練成功`);
                     switchTab('versions');
@@ -759,8 +799,7 @@
                 } else if (data.event === 'error') {
                     log(`Training error: ${data.error}`, 'error');
                     progressSection.classList.remove('visible');
-                    startBtn.disabled = false;
-                    startBtn.textContent = '開始訓練';
+                    setTrainingUI(false);
                     eventSource.close();
                     showNotification('訓練失敗', data.error || '未知錯誤');
                 }
@@ -913,7 +952,7 @@
                             </div>
                             <div class="version-actions">
                                 ${v.status === 'ready' && !isActive ? `<button class="btn-activate" onclick="activateVersion('${v.version_id}')">啟用</button>` : ''}
-                                ${v.status === 'ready' ? `<button class="btn-preview" title="試聽此版本的音色 (Loss 不能反映音質，請以此為準)" onclick="previewVersion('${v.version_id}')">▶ 預覽</button>` : ''}
+                                ${v.status === 'ready' ? `<button class="btn-preview" data-preview-btn="${v.version_id}" title="試聽此版本的音色 (Loss 不能反映音質，請以此為準) — 再按一次停止" onclick="previewVersion('${v.version_id}')">▶ 預覽</button>` : ''}
                                 <button class="btn-details" onclick="toggleDetails('${v.version_id}')" title="顯示完整 metadata (路徑、IDs、時間戳)">詳細</button>
                                 ${v.status !== 'training' ? `
                                     <button class="btn-delete" id="delbtn-${v.version_id}" onclick="confirmDelete('${v.version_id}')">✕</button>
@@ -1098,23 +1137,74 @@
             }
         }
 
+        // Module-level tracking so we can stop any in-flight preview from
+        // anywhere (cancel button, another preview click, page navigation).
+        // Stores the version_id whose audio is currently playing.
+        let currentPreviewAudio = null;
+        let currentPreviewVersionId = null;
+
+        function stopPreview() {
+            if (currentPreviewAudio) {
+                try {
+                    currentPreviewAudio.pause();
+                    currentPreviewAudio.currentTime = 0;
+                    if (currentPreviewAudio.src && currentPreviewAudio.src.startsWith('blob:')) {
+                        URL.revokeObjectURL(currentPreviewAudio.src);
+                    }
+                } catch (_) {}
+                if (currentPreviewVersionId) {
+                    const btn = document.querySelector(`[data-preview-btn="${currentPreviewVersionId}"]`);
+                    if (btn) btn.textContent = '▶ 預覽';
+                }
+            }
+            currentPreviewAudio = null;
+            currentPreviewVersionId = null;
+        }
+
         async function previewVersion(versionId) {
             if (gateIfTraining('預覽語音')) return;
+            // If THIS version is the one playing, button click = stop. If a
+            // DIFFERENT version is playing, stop it first then start new one.
+            if (currentPreviewVersionId === versionId && currentPreviewAudio) {
+                stopPreview();
+                return;
+            }
+            stopPreview();
+
             const previewText = document.getElementById('previewText').value.trim() || '你好，這是我的聲音測試。';
             log(`Generating preview for ${versionId}: "${previewText}"...`);
+            const btn = document.querySelector(`[data-preview-btn="${versionId}"]`);
+            if (btn) btn.textContent = '⏳ 生成中…';
             try {
                 const response = await fetch(`/api/training/versions/${versionId}/preview`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ text: previewText })
                 });
-                if (!response.ok) throw new Error('Preview failed');
+                if (!response.ok) {
+                    const err = await response.json().catch(() => ({}));
+                    throw new Error(err.detail || `HTTP ${response.status}`);
+                }
                 const blob = await response.blob();
                 const url = URL.createObjectURL(blob);
                 const audio = new Audio(url);
+                currentPreviewAudio = audio;
+                currentPreviewVersionId = versionId;
+                audio.addEventListener('ended', () => {
+                    if (currentPreviewVersionId === versionId) {
+                        stopPreview();
+                    }
+                });
+                audio.addEventListener('error', () => {
+                    if (currentPreviewVersionId === versionId) {
+                        stopPreview();
+                    }
+                });
                 audio.play();
-                log(`Preview playing for ${versionId}`);
+                if (btn) btn.textContent = '⏹ 停止';
+                log(`Preview playing for ${versionId} (click again to stop)`);
             } catch (e) {
+                if (btn) btn.textContent = '▶ 預覽';
                 log(`Preview failed: ${e.message}`, 'error');
                 showToast('預覽失敗: ' + e.message, 'error');
             }
