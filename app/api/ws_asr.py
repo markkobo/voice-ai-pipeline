@@ -405,10 +405,16 @@ async def run_llm_stream(
     current_tts_task: Optional[asyncio.Task] = None  # Single TTS task (sequential, not parallel)
 
     try:
+        # Pass the session's llm_model through so per-(persona,listener)
+        # routing actually takes effect. Before this, state.llm_model was
+        # read into a variable and never sent to the client — the chat
+        # always used the singleton's OPENAI_MODEL env. RFC M5 listener
+        # routing required this wiring before we can vary models.
         async for event in client.stream(
             prompt=asr_text,
             system_prompt=system_prompt,
             cancellation_event=cancellation_event,
+            model=llm_model,
         ):
             if event.event.value == "start":
                 await safe_send_text(websocket, {

@@ -106,6 +106,7 @@ class OpenAIClient:
         conversation_history: Optional[List[Dict[str, str]]] = None,
         temperature: float = 0.7,
         cancellation_event: Optional[asyncio.Event] = None,
+        model: Optional[str] = None,
     ) -> AsyncIterator[LLMStreamResult]:
         """
         Stream LLM response with cancellation support.
@@ -116,6 +117,10 @@ class OpenAIClient:
             conversation_history: Optional list of {"role": ..., "content": ...} dicts
             temperature: Sampling temperature
             cancellation_event: Optional asyncio.Event; if set, cancelled tokens are skipped
+            model: Optional per-call model override. Defaults to the client's
+                default (configured via OPENAI_MODEL env). Lets a single
+                singleton client serve different (persona, listener) routes
+                with different models — required for RFC M5 listener-routing.
 
         Yields:
             LLMStreamResult events with content deltas and telemetry
@@ -130,6 +135,9 @@ class OpenAIClient:
 
         messages.append({"role": "user", "content": prompt})
 
+        # Per-call model override, falls back to client default.
+        effective_model = model or self.model
+
         total_tokens = 0
         ttft_recorded = False
         ttft_time: Optional[float] = None
@@ -140,7 +148,7 @@ class OpenAIClient:
 
         try:
             stream = await self._client.chat.completions.create(
-                model=self.model,
+                model=effective_model,
                 messages=messages,
                 stream=True,
                 temperature=temperature,
@@ -169,7 +177,7 @@ class OpenAIClient:
                         ttft_recorded = True
                         metrics.llm_ttft.labels(
                             component="llm",
-                            model=self.model,
+                            model=effective_model,
                         ).observe(ttft_time)
 
                     content_buffer += delta.content
@@ -185,7 +193,7 @@ class OpenAIClient:
                     ) or 0
                     metrics.llm_tokens_total.labels(
                         component="llm",
-                        model=self.model,
+                        model=effective_model,
                         session_id="",
                     ).inc(total_tokens)
 
