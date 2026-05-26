@@ -90,6 +90,14 @@ let ttsStartCount = 0;
 let ttsDoneCount = 0;
 let llmDoneSeen = false;
 let isStartingRecording = false;
+// Set to true by the AudioWorklet when its ring buffer drains from
+// non-empty → empty. Reset to false on every tts_start (new audio
+// coming). Used by isResponseDone() — server's `tts_done` fires when
+// it finishes sending PCM, but the client still has ~5s of audio
+// buffered locally. Without waiting for actual drain, auto-continue
+// would re-arm the mic mid-playback and the mobile OS would duck
+// the speaker output (user report 2026-05-26).
+let audioDrained = true;
 
 let audioWorkletNode = null;
 let workletInitialized = false;
@@ -164,6 +172,7 @@ async function initAudioWorklet() {
                         for (let i = 0; i < out.length; i++) out[i] = 0;
                         return true;
                     }
+                    const wasNonEmpty = this.samplesInBuffer > 0;
                     for (let i = 0; i < out.length; i++) {
                         if (this.samplesInBuffer > 0) {
                             out[i] = this.ringBuffer[this.readPos];
@@ -172,6 +181,17 @@ async function initAudioWorklet() {
                         } else {
                             out[i] = 0;
                         }
+                    }
+                    // Notify main thread once when the buffer transitions
+                    // from non-empty → empty. Lets the auto-continue logic
+                    // wait for actual audio drain (vs just tts_done from
+                    // the server, which fires before client-side playback
+                    // finishes). User reported 2026-05-26 mid-TTS ducking
+                    // even on single-sentence responses — that was the
+                    // mic re-arming after tts_done while ~5s of buffered
+                    // audio was still playing.
+                    if (wasNonEmpty && this.samplesInBuffer === 0) {
+                        this.port.postMessage({ type: 'drained' });
                     }
                     return true;
                 }
@@ -205,6 +225,11 @@ async function ensureWorklet() {
         audioWorkletNode.connect(audioContext.destination);
         audioWorkletNode.port.onmessage = (e) => {
             if (e.data.type === 'log') log('Worklet: ' + e.data.msg);
+            if (e.data.type === 'drained') {
+                audioDrained = true;
+                log('Worklet: audio buffer drained');
+                maybeFinishResponse();
+            }
         };
         workletNodeCreated = true;
         log('AudioWorkletNode created, state=' + audioContext.state);
@@ -234,7 +259,14 @@ function transition(next, reason) {
 }
 
 function isResponseDone() {
-    return llmDoneSeen && (ttsStartCount === 0 || ttsDoneCount >= ttsStartCount);
+    // Need ALL THREE:
+    //   1. LLM finished streaming text (no more sentences coming)
+    //   2. Server sent tts_done for every tts_start it emitted
+    //   3. Client's audio worklet buffer has actually drained (otherwise
+    //      we'd re-arm the mic mid-playback and the OS would duck audio)
+    return llmDoneSeen
+        && (ttsStartCount === 0 || ttsDoneCount >= ttsStartCount)
+        && (ttsStartCount === 0 || audioDrained);
 }
 
 // Multi-sentence TTS gotcha: server sends N tts_start / tts_done pairs.
@@ -683,6 +715,7 @@ function handleMessage(msg) {
         ttsStartCount = 0;
         ttsDoneCount = 0;
         llmDoneSeen = false;
+        audioDrained = true;  // no audio yet, no need to wait for drain
         document.getElementById('thinkingIndicator').style.display = 'block';
         log('Thinking indicator shown');
         if (state === STATE.LISTENING) {
@@ -722,6 +755,7 @@ function handleMessage(msg) {
 
     if (msg.type === 'tts_start') {
         ttsStartCount += 1;
+        audioDrained = false;  // new audio coming, ignore stale drain signals
         // Cancel any pending "response finished" grace timer — a new
         // sentence just arrived, so we're definitely not done yet.
         if (_maybeFinishTimer) {
