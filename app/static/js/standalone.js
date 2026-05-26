@@ -897,6 +897,14 @@ async function startRecording() {
         // raw laptop mics deliver RMS ~0.005-0.025 which Silero can't
         // distinguish from silence. Echo cancellation prevents TTS
         // playback feedback from triggering false barge-in cancels.
+        // Tear down any prior mic graph BEFORE acquiring a new stream.
+        // If we do it after, teardownMic() would stop the tracks of the
+        // stream we JUST acquired (because we already set
+        // recordingStream = stream) → onaudioprocess delivers zeros →
+        // VAD never triggers. Observed 2026-05-26 with all chunks
+        // reporting avg_abs=0.0000.
+        teardownMic();
+
         const stream = await navigator.mediaDevices.getUserMedia({
             audio: {
                 sampleRate: 24000,
@@ -914,11 +922,6 @@ async function startRecording() {
             await audioContext.resume();
         }
 
-        // Tear down any prior mic graph completely before building a new
-        // one — leftover micSource from a previous recording session
-        // would otherwise keep the OS mic indicator on even though we
-        // think we stopped.
-        teardownMic();
         scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
         log('Using onaudioprocess for raw PCM at ' + audioContext.sampleRate + ' Hz');
 
