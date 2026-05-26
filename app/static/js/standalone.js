@@ -80,6 +80,8 @@ let state = STATE.IDLE;
 let ws = null;
 let audioContext = null;
 let scriptProcessor = null;
+let micSource = null;  // MediaStreamAudioSourceNode — held so cleanup can disconnect it
+let micSilentSink = null;  // GainNode with gain=0, so scriptProcessor.connect() target isn't the speakers
 let utteranceId = null;
 let ttsText = '';
 let ttsEmotion = null;
@@ -98,6 +100,29 @@ let isStartingRecording = false;
 // would re-arm the mic mid-playback and the mobile OS would duck
 // the speaker output (user report 2026-05-26).
 let audioDrained = true;
+
+// Single cleanup helper for mic teardown — used by all the sites that
+// stop recording (vad_commit, ws.onclose, stopRecordingAndSend,
+// onPrimaryClick LISTENING branch). Previously each site did
+// scriptProcessor.disconnect() + recordingStream.tracks.stop() but
+// none disconnected the MediaStreamAudioSourceNode (which kept a
+// dangling reference to the stream and prevented Android/iOS from
+// releasing the mic indicator after stop). Centralizing avoids future
+// drift between sites.
+function teardownMic() {
+    if (scriptProcessor) {
+        try { scriptProcessor.disconnect(); } catch (_) {}
+        scriptProcessor = null;
+    }
+    if (micSource) {
+        try { micSource.disconnect(); } catch (_) {}
+        micSource = null;
+    }
+    if (recordingStream) {
+        try { recordingStream.getTracks().forEach(t => t.stop()); } catch (_) {}
+        recordingStream = null;
+    }
+}
 
 let audioWorkletNode = null;
 let workletInitialized = false;
@@ -151,11 +176,24 @@ async function initAudioWorklet() {
                                 this.port.postMessage({ type: 'log', msg: 'BUF DROPPED ' + dropped + ' samples, buf=' + this.samplesInBuffer });
                             }
                         } else if (e.data.type === 'flush') {
+                            // Soft flush: only clear if buffer is small.
+                            // Used on tts_start to avoid wiping ongoing
+                            // playback if a new sentence overlaps.
                             if (this.samplesInBuffer < 24000) {
                                 this.writePos = 0;
                                 this.readPos = 0;
                                 this.samplesInBuffer = 0;
                             }
+                        } else if (e.data.type === 'abort') {
+                            // Hard flush: unconditionally clear. Used on
+                            // user-initiated cancel (中斷 button) to kill
+                            // mid-sentence TTS playback so the mic can
+                            // re-arm without the OS ducking the still-
+                            // playing audio (user report 2026-05-26 —
+                            // 中斷 left mic indicator on).
+                            this.writePos = 0;
+                            this.readPos = 0;
+                            this.samplesInBuffer = 0;
                         } else if (e.data.type === 'stop') {
                             this.isPlaying = false;
                         } else if (e.data.type === 'log') {
@@ -488,8 +526,7 @@ function connect() {
     ws.onclose = () => {
         _stopHeartbeat();
         if (state === STATE.LISTENING) {
-            if (scriptProcessor) { scriptProcessor.disconnect(); scriptProcessor = null; }
-            if (recordingStream) { recordingStream.getTracks().forEach(t => t.stop()); recordingStream = null; }
+            teardownMic();
             accumulatedChunks = [];
         }
         if (audioWorkletNode) {
@@ -620,10 +657,17 @@ async function onPrimaryClick() {
 }
 
 function sendCancel() {
-    // Cancel any TTS audio mid-buffer.
+    // Hard abort: unconditionally clear the worklet's ring buffer (the
+    // soft 'flush' only clears if buffer < 1s, which doesn't help for
+    // mid-TTS cancel). Without this the audio kept playing after 中斷
+    // and the mic re-arm immediately after triggered OS-level ducking.
     if (audioWorkletNode) {
-        try { audioWorkletNode.port.postMessage({ type: 'flush' }); } catch(e) {}
+        try { audioWorkletNode.port.postMessage({ type: 'abort' }); } catch(e) {}
     }
+    // Audio is now flushed, so the worklet won't emit a 'drained' event
+    // (transition is buffer → empty, not non-empty → empty when we just
+    // wiped it). Mark drained ourselves so isResponseDone is consistent.
+    audioDrained = true;
     if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'control', action: 'cancel' }));
         log('Sent cancel');
@@ -697,8 +741,7 @@ function handleMessage(msg) {
             if (scriptProcessor && scriptProcessor._localIsRecording) {
                 scriptProcessor._localIsRecording.value = false;
             }
-            if (scriptProcessor) { scriptProcessor.disconnect(); scriptProcessor = null; }
-            if (recordingStream) { recordingStream.getTracks().forEach(t => t.stop()); recordingStream = null; }
+            teardownMic();
             ws.send(JSON.stringify({ type: 'control', action: 'commit_utterance' }));
             accumulatedChunks = [];
             log('VAD commit: sent commit_utterance (audio already streamed)');
@@ -872,7 +915,11 @@ async function startRecording() {
             await audioContext.resume();
         }
 
-        if (scriptProcessor) scriptProcessor.disconnect();
+        // Tear down any prior mic graph completely before building a new
+        // one — leftover micSource from a previous recording session
+        // would otherwise keep the OS mic indicator on even though we
+        // think we stopped.
+        teardownMic();
         scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
         log('Using onaudioprocess for raw PCM at ' + audioContext.sampleRate + ' Hz');
 
@@ -897,9 +944,23 @@ async function startRecording() {
             accumulatedChunks.push(int16.buffer);
         };
 
-        const source = audioContext.createMediaStreamSource(stream);
-        source.connect(scriptProcessor);
-        scriptProcessor.connect(audioContext.destination);
+        micSource = audioContext.createMediaStreamSource(stream);
+        micSource.connect(scriptProcessor);
+        // Connect scriptProcessor to a SILENT GainNode rather than
+        // audioContext.destination — Web Audio quirk: ScriptProcessorNode
+        // only fires `onaudioprocess` when connected to a destination,
+        // but connecting it to the actual speakers routes mic input
+        // straight to playback (potential feedback) and keeps the
+        // audio session in "duplex" mode which Android/iOS interpret
+        // as "actively recording for playback" → mic indicator stays
+        // on even after track.stop(). A gain=0 sink keeps the processor
+        // ticking without producing any output.
+        if (!micSilentSink || micSilentSink.context !== audioContext) {
+            micSilentSink = audioContext.createGain();
+            micSilentSink.gain.value = 0;
+            micSilentSink.connect(audioContext.destination);
+        }
+        scriptProcessor.connect(micSilentSink);
 
         accumulatedChunks = [];
         ttsText = '';
@@ -922,8 +983,7 @@ function stopRecordingAndSend() {
     if (scriptProcessor && scriptProcessor._localIsRecording) {
         scriptProcessor._localIsRecording.value = false;
     }
-    if (scriptProcessor) { scriptProcessor.disconnect(); scriptProcessor = null; }
-    if (recordingStream) { recordingStream.getTracks().forEach(t => t.stop()); recordingStream = null; }
+    teardownMic();
     if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'control', action: 'commit_utterance' }));
     }
@@ -998,8 +1058,7 @@ document.addEventListener('keydown', (e) => {
         e.preventDefault();
         if (state === STATE.LISTENING) {
             if (scriptProcessor && scriptProcessor._localIsRecording) scriptProcessor._localIsRecording.value = false;
-            if (scriptProcessor) { scriptProcessor.disconnect(); scriptProcessor = null; }
-            if (recordingStream) { recordingStream.getTracks().forEach(t => t.stop()); recordingStream = null; }
+            teardownMic();
             accumulatedChunks = [];
             sendCancel();
             transition(STATE.READY, 'Esc cancel during listening');
