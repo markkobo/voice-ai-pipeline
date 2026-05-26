@@ -498,6 +498,15 @@ async function onVersionChange() {
             log(`Version ${versionId} activated`);
             showToast(`已切換至: ${versionSelect.options[versionSelect.selectedIndex].text}`, 'success');
             loadVersions();
+            // Trigger an immediate status-bar refresh so the top pill
+            // reflects the new active version within ~1s instead of
+            // waiting for the next 5s poll. Same pattern as the
+            // persona-change handler. User reported 2026-05-26: picked
+            // v7 in the version dropdown, status bar kept showing v9
+            // until the next scheduled poll.
+            setTimeout(() => {
+                if (window.SYS_FORCE_POLL) window.SYS_FORCE_POLL();
+            }, 500);
         } catch (e) {
             log(`Failed to activate version: ${e.message}`, 'error');
             showToast('切換版本失敗', 'error');
