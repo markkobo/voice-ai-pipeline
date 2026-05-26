@@ -124,10 +124,17 @@ VERSION_ID = "''' + self.version_id + '''"
 
 # Initialize progress.json before training starts
 def init_progress():
+    # total_epochs included so the API/UI reads the real value
+    # instead of TrainingProgressSnapshot's default of 10. User
+    # reported "Epoch 30/10" on 2026-05-26 — the user set 30 epochs,
+    # subprocess was correctly running 30, but progress.json
+    # omitted total_epochs so the pydantic snapshot's default kicked
+    # in and the UI showed the wrong denominator.
     prog = {
         "version_id": VERSION_ID,
         "status": "training",
         "current_epoch": 0,
+        "total_epochs": NUM_EPOCHS,
         "progress_pct": 0,
         "persona_id": PERSONA_ID,
         "training_type": "lora" if USE_LORA else "sft",
