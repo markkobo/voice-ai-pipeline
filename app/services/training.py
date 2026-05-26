@@ -160,7 +160,17 @@ class VersionManager:
         return version
 
     def get_version(self, version_id: str) -> Optional[TrainingVersion]:
-        """Get a version by ID."""
+        """Get a version by ID.
+
+        Reloads the index from disk first so versions created via the new
+        JsonTrainingRepository (which doesn't share state with this legacy
+        cache) are visible. Without this re-read, the engine's
+        activate_version() would log "Version XXX not found" for any
+        training created after server start. User reported 2026-05-26:
+        picked v7 in the chat version dropdown, status bar stayed on v9
+        because the engine couldn't find v7 to activate.
+        """
+        self._load_index()
         for v in self._versions:
             if v.version_id == version_id:
                 return v
