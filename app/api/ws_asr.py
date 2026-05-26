@@ -423,27 +423,24 @@ async def run_llm_stream(
                 new_emotion, cleaned_content = emotion_mapper.update(event.content)
 
                 if new_emotion and not tts_notified:
-                    # First emotion detected
+                    # First emotion detected. Accumulate any same-delta
+                    # content into tts_text_parts and let the standard
+                    # sentence-boundary fire path (below) handle it —
+                    # firing TTS for an incomplete leading char like "当"
+                    # here AND again when the punctuation boundary arrives
+                    # produces double-spoken first characters (user
+                    # reported 2026-05-26 "先講一兩個字, 過一下又從頭講
+                    # 整句"). Server log confirmed 3 tts_starts for a
+                    # single sentence: '当' → '当然可以！' → next sentence.
+                    # The emotion-already-set branch below already does the
+                    # right thing; mirror it here.
                     tts_notified = True
                     current_emotion = new_emotion
                     # Path B: No instruct needed, using text enhancement
                     tts_text_parts = []  # Start fresh after tag
 
                     if cleaned_content:
-                        # Emotion and first content char arrived together — start TTS immediately
                         tts_text_parts.append(cleaned_content)
-                        tts_text = "".join(tts_text_parts)
-                        # Start TTS for this first sentence
-                        await await_prior_tts_task(current_tts_task, "first-emotion")
-                        current_tts_task = asyncio.create_task(_stream_tts_sentence(
-                            websocket=websocket,
-                            text=tts_text,
-                            emotion=current_emotion or "默認",
-                            persona_id=persona_id,
-                            sentence_idx=tts_sentence_idx,
-                            session_id=session_id,
-                        ))
-                        tts_sentence_idx += 1
 
                     # Send llm_token only if there's content
                     if cleaned_content:
@@ -459,6 +456,8 @@ async def run_llm_stream(
 
                     # Drain remaining buffered characters from EmotionParser.
                     # Bounded via drain_emotion_parser — guarantees termination.
+                    # Fire TTS only on punctuation boundaries (same as the
+                    # emotion-already-set branch below).
                     async for _drained_emotion, more_content in drain_emotion_parser(emotion_mapper):
                         tts_text_parts.append(more_content)
                         tts_text = "".join(tts_text_parts)
