@@ -183,6 +183,18 @@
         function buildPersonaDropdown() {
             const current = personaSelect.value;
             personaSelect.innerHTML = '';
+            // Default option: show all recordings, no persona pre-selected.
+            // User reported 2026-05-26: previously the first persona was
+            // auto-selected and the recording tree filtered to it, but
+            // users expected to see ALL recordings first and then narrow
+            // down. Without this option there was no way to view a
+            // cross-persona recordings list. Caller must validate persona
+            // is non-empty before kicking off training (handled in
+            // startTraining()).
+            const allOpt = document.createElement('option');
+            allOpt.value = '';
+            allOpt.textContent = '— 全部人格（請選擇要訓練的人格）—';
+            personaSelect.appendChild(allOpt);
             personas.forEach(p => {
                 const opt = document.createElement('option');
                 opt.value = p.persona_id;
@@ -191,6 +203,8 @@
             });
             if (current && personaSelect.querySelector(`option[value="${current}"]`)) {
                 personaSelect.value = current;
+            } else {
+                personaSelect.value = '';  // default to all
             }
         }
 
@@ -642,6 +656,11 @@
         async function startTraining() {
             if (gateIfTraining('開始訓練')) return;
             const personaId = personaSelect.value;
+            if (!personaId) {
+                showToast('請先在上方選擇要訓練的人格', 'error');
+                personaSelect.focus();
+                return;
+            }
             const trainingType = document.getElementById('trainingTypeSelect').value;
             const epochs = parseInt(document.getElementById('epochsSelect').value);
             const rank = parseInt(document.getElementById('rankSelect').value);
