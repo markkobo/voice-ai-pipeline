@@ -237,15 +237,44 @@ function isResponseDone() {
     return llmDoneSeen && (ttsStartCount === 0 || ttsDoneCount >= ttsStartCount);
 }
 
-function maybeFinishResponse() {
+// Multi-sentence TTS gotcha: server sends N tts_start / tts_done pairs.
+// Between sentence k's tts_done and sentence k+1's tts_start, counts
+// transiently match (k == k). If llm_done already arrived, the OLD
+// isResponseDone() check returned true and re-armed the mic — which
+// then caused mobile OS audio-session ducking when the NEXT sentence's
+// TTS audio started playing (user reported 2026-05-26 "TTS speaks for
+// a few seconds, then volume drops + recording icon appears"). Adding
+// a debounce: only consider the response actually finished if no new
+// tts_start has arrived for `RESPONSE_DONE_GRACE_MS` after the last
+// terminating signal. Also defers the maybeFinishResponse callback.
+const RESPONSE_DONE_GRACE_MS = 1500;
+let _maybeFinishTimer = null;
+
+function _maybeFinishResponseImmediate() {
     if (!isResponseDone()) return;
     if (state !== STATE.THINKING && state !== STATE.SPEAKING) return;
     if (autoContinueChk && autoContinueChk.checked) {
-        log('Auto-continue: re-arming mic');
+        log('Auto-continue: re-arming mic (after grace period)');
         startRecording();
     } else {
         transition(STATE.READY, 'response finished, auto-continue off');
     }
+}
+
+function maybeFinishResponse() {
+    if (!isResponseDone()) {
+        if (_maybeFinishTimer) { clearTimeout(_maybeFinishTimer); _maybeFinishTimer = null; }
+        return;
+    }
+    if (state !== STATE.THINKING && state !== STATE.SPEAKING) return;
+    // Restart the grace timer every time we get here. If a new tts_start
+    // arrives within the grace window, it'll bump ttsStartCount and the
+    // next isResponseDone() check will return false, cancelling the timer.
+    if (_maybeFinishTimer) clearTimeout(_maybeFinishTimer);
+    _maybeFinishTimer = setTimeout(() => {
+        _maybeFinishTimer = null;
+        _maybeFinishResponseImmediate();
+    }, RESPONSE_DONE_GRACE_MS);
 }
 
 function renderUI() {
@@ -693,6 +722,13 @@ function handleMessage(msg) {
 
     if (msg.type === 'tts_start') {
         ttsStartCount += 1;
+        // Cancel any pending "response finished" grace timer — a new
+        // sentence just arrived, so we're definitely not done yet.
+        if (_maybeFinishTimer) {
+            clearTimeout(_maybeFinishTimer);
+            _maybeFinishTimer = null;
+            log('Cancelled pending auto-continue: new tts_start arrived during grace');
+        }
         if (audioWorkletNode) {
             audioWorkletNode.port.postMessage({ type: 'flush' });
         }
