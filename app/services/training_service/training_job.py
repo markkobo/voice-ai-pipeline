@@ -48,6 +48,7 @@ class TrainingJob:
         self._thread: Optional[threading.Thread] = None
         self._result: Optional[TrainingResult] = None
         self._cancelled = False
+        self._process = None  # Popen handle, set when subprocess launches
 
     def start(self):
         """Start training in background thread."""
@@ -859,7 +860,11 @@ if __name__ == "__main__":
                 self._result = TrainingResult(success=False, error=f"Script compile error: {e}")
                 return
 
-            # Run training script
+            # Run training script. Store the Popen on self so cancel()
+            # can actually kill it — previous behavior just flipped
+            # self._cancelled, the subprocess kept running and kept
+            # holding ~7 GB VRAM until natural completion (user report
+            # 2026-05-26 "cancelled but still 16/22 GB used").
             process = subprocess.Popen(
                 [sys.executable, str(train_script)],
                 stdout=subprocess.PIPE,
@@ -867,6 +872,7 @@ if __name__ == "__main__":
                 text=True,
                 env=env,
             )
+            self._process = process
 
             # Wait for process with timeout - read output in real-time
             stdout_lines = []
@@ -886,6 +892,33 @@ if __name__ == "__main__":
                     if remaining:
                         stdout_lines.append(remaining)
                     break
+
+                # Check if cancel() was called from outside (UI cancel
+                # button). The subprocess holds ~7 GB VRAM throughout
+                # training; without this check it would keep running
+                # until natural completion despite the user clicking
+                # cancel.
+                if self._cancelled:
+                    logger.warning(f"[TRAINING:{self.version_id[:8]}] Cancel requested — killing subprocess")
+                    process.kill()
+                    try:
+                        process.wait(timeout=5)
+                    except Exception:
+                        pass
+                    stdout_lines.append("\n[CANCELLED] Subprocess killed by user request")
+                    try:
+                        tracker_file = self.version_dir / "progress.json"
+                        if tracker_file.exists():
+                            with open(tracker_file) as f:
+                                prog = json.load(f)
+                            prog["status"] = "failed"
+                            prog["error_message"] = "Cancelled by user"
+                            with open(tracker_file, "w") as f:
+                                json.dump(prog, f)
+                    except Exception as e:
+                        logger.warning(f"[TRAINING:{self.version_id[:8]}] Failed to update progress.json: {e}")
+                    self._result = TrainingResult(success=False, error="Cancelled by user")
+                    return
 
                 # Check timeout
                 elapsed = time.time() - start_time
@@ -1082,9 +1115,22 @@ if __name__ == "__main__":
         return self._result
 
     def cancel(self):
-        """Cancel training."""
+        """Cancel training — kill subprocess immediately if alive.
+
+        The poll loop in _run_training also checks self._cancelled, but
+        killing here directly minimizes the window where VRAM stays
+        held (subprocess loops on its training step, may not yield to
+        the python-side poll for several seconds on a long forward).
+        """
         self._cancelled = True
         logger.info(f"[TRAINING:{self.version_id[:8]}] Cancelling training")
+        proc = getattr(self, '_process', None)
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.kill()
+                logger.info(f"[TRAINING:{self.version_id[:8]}] Subprocess killed (pid={proc.pid})")
+            except Exception as e:
+                logger.warning(f"[TRAINING:{self.version_id[:8]}] Failed to kill subprocess: {e}")
 
     def is_running(self) -> bool:
         """Check if training is still running."""
