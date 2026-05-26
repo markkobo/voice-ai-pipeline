@@ -81,7 +81,6 @@ let ws = null;
 let audioContext = null;
 let scriptProcessor = null;
 let micSource = null;  // MediaStreamAudioSourceNode — held so cleanup can disconnect it
-let micSilentSink = null;  // GainNode with gain=0, so scriptProcessor.connect() target isn't the speakers
 let utteranceId = null;
 let ttsText = '';
 let ttsEmotion = null;
@@ -946,21 +945,18 @@ async function startRecording() {
 
         micSource = audioContext.createMediaStreamSource(stream);
         micSource.connect(scriptProcessor);
-        // Connect scriptProcessor to a SILENT GainNode rather than
-        // audioContext.destination — Web Audio quirk: ScriptProcessorNode
-        // only fires `onaudioprocess` when connected to a destination,
-        // but connecting it to the actual speakers routes mic input
-        // straight to playback (potential feedback) and keeps the
-        // audio session in "duplex" mode which Android/iOS interpret
-        // as "actively recording for playback" → mic indicator stays
-        // on even after track.stop(). A gain=0 sink keeps the processor
-        // ticking without producing any output.
-        if (!micSilentSink || micSilentSink.context !== audioContext) {
-            micSilentSink = audioContext.createGain();
-            micSilentSink.gain.value = 0;
-            micSilentSink.connect(audioContext.destination);
-        }
-        scriptProcessor.connect(micSilentSink);
+        // ScriptProcessorNode requires connection to a destination for
+        // onaudioprocess to fire. Tried routing via a gain=0 GainNode
+        // to avoid the OS-level duplex audio detection (2026-05-26
+        // commit 561e5c2), but mobile Chrome optimizes silent-output
+        // paths and stopped delivering input samples — VAD went dead
+        // (server saw rms=0.0000 across all chunks). Reverted to direct
+        // destination connection; the audio output is silent anyway
+        // because the actual playback path is the AudioWorklet, not
+        // this scriptProcessor. The mic-indicator behavior on mobile
+        // still benefits from the other fixes (micSource disconnect,
+        // recordingStream.tracks.stop, hard abort on cancel).
+        scriptProcessor.connect(audioContext.destination);
 
         accumulatedChunks = [];
         ttsText = '';
