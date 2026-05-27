@@ -8,20 +8,25 @@
         }
         .container { max-width: 1100px; margin: 0 auto; }
 
-        /* Header */
+        /* Header — wraps on narrow viewports so the buttons + version
+           selector don't crash into the H1 title. The H1 always sits
+           on its own line; action buttons flow to a second line as
+           needed. */
         .header {
             display: flex;
+            flex-wrap: wrap;
             justify-content: space-between;
             align-items: center;
+            gap: 10px;
             margin-bottom: 20px;
             padding-bottom: 15px;
             border-bottom: 1px solid #333;
         }
-        .header h1 { font-size: 1.5rem; color: #fff; }
+        .header h1 { font-size: 1.5rem; color: #fff; flex: 1 0 100%; order: -1; }
         .back-btn {
             background: #444;
             color: #fff;
-            padding: 8px 16px;
+            padding: 6px 12px;
             border: none;
             border-radius: 6px;
             cursor: pointer;
@@ -29,9 +34,43 @@
             display: inline-flex;
             align-items: center;
             gap: 6px;
+            font-size: 0.85rem;
+            white-space: nowrap;
         }
         .back-btn:hover { background: #555; }
-        .header-actions { display: flex; gap: 12px; align-items: center; }
+        .header-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            align-items: center;
+        }
+
+        /* Demo mode — the top status-bar nav already provides chat /
+           recordings / training, so the in-page nav buttons (← 返回
+           對話 / 跳轉到訓練 →) are redundant noise. Hide the technical
+           「備份到 R2」 too — operators don't trigger backups during a
+           live demo. Keep the version selector visible so the demo
+           can swap voices. */
+        body.demo-mode .header .back-btn,
+        body.demo-mode .header #backupBtn { display: none !important; }
+
+        /* Narrow phones (≤600px): tighten the recordings header and
+           make sure the version-selector + (in non-demo) buttons don't
+           crash into each other. The H1 already takes its own line via
+           `flex: 1 0 100%` above; here we shrink the title slightly
+           and let action chips fill the second row. */
+        @media (max-width: 600px) {
+            body { padding: 12px; }
+            .header { gap: 8px; padding-bottom: 12px; margin-bottom: 14px; }
+            .header h1 { font-size: 1.25rem; }
+            .header-actions { width: 100%; gap: 6px; }
+            .version-selector { flex-wrap: wrap; font-size: 0.8rem; }
+            .version-selector select { padding: 5px 8px; font-size: 0.85rem; }
+            .back-btn { padding: 5px 10px; font-size: 0.8rem; }
+            .metadata-selectors { flex-direction: column; gap: 10px; }
+            .selector-group { width: 100%; }
+            .selector-group select { min-width: 0; width: 100%; }
+        }
 
         /* Version selector */
         .version-selector {

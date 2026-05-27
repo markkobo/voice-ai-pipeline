@@ -8,6 +8,11 @@
         }
         .container { max-width: 1100px; margin: 0 auto; }
 
+        /* Header — wraps on narrow viewports. H1 always sits on its
+           own row (`flex: 1 0 100%`) so it never gets squeezed between
+           the two `.back-btn` links. In demo mode the back-btn links
+           are hidden entirely — the top status-bar nav already
+           provides chat / recordings / training. */
         .header {
             display: flex;
             justify-content: space-between;
@@ -18,11 +23,11 @@
             flex-wrap: wrap;
             gap: 10px;
         }
-        .header h1 { font-size: 1.5rem; color: #fff; }
+        .header h1 { font-size: 1.5rem; color: #fff; flex: 1 0 100%; order: -1; }
         .back-btn {
             background: #444;
             color: #fff;
-            padding: 8px 16px;
+            padding: 6px 12px;
             border: none;
             border-radius: 6px;
             cursor: pointer;
@@ -30,8 +35,26 @@
             display: inline-flex;
             align-items: center;
             gap: 6px;
+            font-size: 0.85rem;
+            white-space: nowrap;
         }
         .back-btn:hover { background: #555; }
+
+        /* Demo mode — hide redundant in-page nav (top status bar has
+           chat / recordings / training links already). */
+        body.demo-mode .header .back-btn { display: none !important; }
+
+        /* Narrow phones: tighten chrome to match recordings page. */
+        @media (max-width: 600px) {
+            body { padding: 12px; }
+            .header { gap: 8px; padding-bottom: 12px; margin-bottom: 14px; }
+            .header h1 { font-size: 1.25rem; }
+            .back-btn { padding: 5px 10px; font-size: 0.8rem; }
+            .tabs { gap: 6px; }
+            .tab { padding: 8px 14px; font-size: 0.9rem; }
+            .filter-bar { flex-direction: column; }
+            .filter-bar select { width: 100%; }
+        }
 
         .tabs {
             display: flex;
