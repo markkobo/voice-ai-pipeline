@@ -240,7 +240,21 @@ class JsonTrainingRepository:
             self._write_index_locked(versions, active)
 
     def delete(self, version_id: str) -> None:
-        """Remove a version + its on-disk artifacts."""
+        """Remove a version + its on-disk artifacts.
+
+        Merged-dir deletion uses `target.merged_path` as the SINGLE source
+        of truth — never re-derives the path from `lora_path.name`. The
+        re-derive path is what caused the 2026-05-25 catastrophe where
+        deleting a bad SFT v2_20260525 also wiped the user's working
+        v2_20260514 merged dir (both derived to the same legacy
+        `parts[:3]` name `merged_qwen3_tts_xiao_s_v2`).
+
+        Before deleting the merged dir, we also scan remaining versions
+        for any whose stored `merged_path` points at the same directory
+        — if found, we skip the rmtree (still drop the index entry) and
+        warn. Defense-in-depth in case a future code path manages to set
+        two versions' `merged_path` to the same on-disk dir.
+        """
         with self._exclusive_lock(self.index_path):
             versions, active = self._read_index_locked()
             target: Optional[TrainingVersion] = None
@@ -257,8 +271,8 @@ class JsonTrainingRepository:
                     f"Refusing to delete active version {version_id}; "
                     "clear active first via clear_active_if()"
                 )
-            versions = [v for v in versions if v.version_id != version_id]
-            self._write_index_locked(versions, active)
+            remaining = [v for v in versions if v.version_id != version_id]
+            self._write_index_locked(remaining, active)
 
         # Best-effort filesystem cleanup outside the lock.
         if target.lora_path:
@@ -268,14 +282,37 @@ class JsonTrainingRepository:
                     shutil.rmtree(lora_path)
                 except OSError as e:
                     log.warning("Failed to remove %s: %s", lora_path, e)
-            # For SFT models, also wipe the merged model dir.
-            if target.model_type in ("sft", "custom_voice", "custom_voice_compatible"):
-                merged_path = self._compute_merged_path(lora_path)
-                if merged_path is not None and merged_path.exists():
-                    try:
-                        shutil.rmtree(merged_path)
-                    except OSError as e:
-                        log.warning("Failed to remove merged %s: %s", merged_path, e)
+
+        # Merged dir: use stored merged_path only. No re-derivation.
+        if target.merged_path:
+            merged_path = Path(target.merged_path)
+            # Guard against shared paths — refuse to rm if any other
+            # version still claims this same merged_path.
+            sharers = [
+                v.version_id
+                for v in remaining
+                if v.merged_path and Path(v.merged_path) == merged_path
+            ]
+            if sharers:
+                log.warning(
+                    "Refusing to delete merged dir %s for %s — also "
+                    "claimed by %s. Index entry removed; files left "
+                    "on disk.",
+                    merged_path, version_id, sharers,
+                )
+            elif merged_path.exists():
+                try:
+                    shutil.rmtree(merged_path)
+                except OSError as e:
+                    log.warning("Failed to remove merged %s: %s", merged_path, e)
+        elif target.model_type in ("sft", "custom_voice", "custom_voice_compatible"):
+            # No merged_path on the version → don't guess. Log so the
+            # operator notices and can clean up manually.
+            log.warning(
+                "Version %s is %s but has no merged_path set; not "
+                "attempting to derive/delete a merged dir.",
+                version_id, target.model_type,
+            )
 
     def update(
         self,
@@ -394,15 +431,6 @@ class JsonTrainingRepository:
             "active_version": active.model_dump(mode="json") if active else None,
         }
         self._atomic_write_json(self.index_path, payload)
-
-    @staticmethod
-    def _compute_merged_path(lora_path: Path) -> Optional[Path]:
-        """Mirror the merged-model naming used by training_job.merge_lora."""
-        parts = lora_path.name.split("_")
-        if len(parts) < 3:
-            return None
-        version_base = "_".join(parts[:3])
-        return lora_path.parent / f"merged_qwen3_tts_{version_base}"
 
     # ------------------------------------------------------------------
     # POSIX file locking + atomic write primitives.

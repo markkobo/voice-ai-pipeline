@@ -289,16 +289,36 @@ class VersionManager:
             if lora_path.exists():
                 shutil.rmtree(lora_path)
 
-            # For SFT models, also delete the merged model directory
-            # Merged path: {lora_path parent}/merged_qwen3_tts_{version_base}
-            if version.model_type in ('sft', 'custom_voice', 'custom_voice_compatible'):
-                parts = lora_path.name.split('_')
-                version_base = '_'.join(parts[:3])  # e.g., persona_new_v3
-                merged_name = f"merged_qwen3_tts_{version_base}"
-                merged_path = lora_path.parent / merged_name
-                if merged_path.exists():
-                    shutil.rmtree(merged_path)
-                    logger.info(f"[TRAINING] Deleted merged model: {merged_path}")
+        # Merged dir cleanup. Use the version's stored `merged_path` as
+        # the SINGLE source of truth — never re-derive from lora_path.name.
+        # The 2026-05-25 catastrophe (deleting v2_20260525 wiped the user's
+        # working v2_20260514 merged dir) happened because the legacy
+        # `parts[:3]` re-derivation collapsed two distinct timestamps to
+        # the same dir name `merged_qwen3_tts_xiao_s_v2`. With merged_path
+        # stored explicitly there's no ambiguity, AND we guard against
+        # shared paths by scanning surviving versions.
+        if version.merged_path:
+            merged_path = Path(version.merged_path)
+            sharers = [
+                v.version_id
+                for v in self._versions
+                if v.merged_path and Path(v.merged_path) == merged_path
+            ]
+            if sharers:
+                logger.warning(
+                    f"[TRAINING] Refusing to delete merged dir {merged_path} "
+                    f"for {version_id} — also claimed by {sharers}. "
+                    f"Index entry removed; files left on disk."
+                )
+            elif merged_path.exists():
+                shutil.rmtree(merged_path)
+                logger.info(f"[TRAINING] Deleted merged model: {merged_path}")
+        elif version.model_type in ('sft', 'custom_voice', 'custom_voice_compatible'):
+            logger.warning(
+                f"[TRAINING] Version {version_id} is {version.model_type} "
+                f"but has no merged_path set; not attempting to derive/delete "
+                f"a merged dir."
+            )
 
         self._save_index()
         logger.info(f"[TRAINING] Deleted version: {version_id}")

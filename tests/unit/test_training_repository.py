@@ -284,6 +284,130 @@ class TestConcurrency:
         )
 
 
+class TestDeleteMergedPathSafety:
+    """Regression tests for the 2026-05-25 incident: deleting one SFT version
+    must NOT remove another version's merged model dir, even when the two
+    versions' legacy `parts[:3]`-derived merged-dir names would have
+    collided.
+
+    The fix has two layers of defense:
+      1. `delete()` uses `target.merged_path` as the single source of
+         truth — no re-derivation from `lora_path.name`.
+      2. Before rmtree-ing the merged dir, it scans surviving versions
+         for any whose stored `merged_path` matches; if so, it refuses
+         to delete and logs a warning.
+    """
+
+    def _sft(
+        self,
+        version_id: str,
+        lora_dir: Path,
+        merged_dir: Path,
+        persona_id: str = "xiao_s",
+    ) -> TrainingVersion:
+        """Build a custom_voice (SFT) TrainingVersion with both paths set."""
+        lora_dir.mkdir(parents=True, exist_ok=True)
+        merged_dir.mkdir(parents=True, exist_ok=True)
+        # Drop a sentinel file in merged_dir so we can detect rmtree.
+        (merged_dir / "model.safetensors").write_text("dummy")
+        v = TrainingVersion(
+            version_id=version_id,
+            persona_id=persona_id,
+            recording_ids_used=["rec-1"],
+            lora_path=str(lora_dir),
+            merged_path=str(merged_dir.resolve()),
+            model_type="custom_voice",
+            created_at=datetime.now(timezone.utc),
+        )
+        return v
+
+    def test_delete_does_not_wipe_other_versions_shared_merged_dir(
+        self, repo, tmp_path
+    ):
+        """The 2026-05-25 scenario: two SFTs whose lora dirs are different
+        timestamps (`xiao_s_v2_20260514_...` and `xiao_s_v2_20260525_...`)
+        would BOTH have legacy-collapsed to `merged_qwen3_tts_xiao_s_v2`.
+        Suppose they both ended up pointing at the same on-disk merged dir
+        (e.g. because one was trained on top of the other's output). When
+        we delete one, the OTHER's merged dir must survive.
+        """
+        # Legacy-style collision: both lora names collapse to
+        # "xiao_s_v2" under parts[:3].
+        lora_a = tmp_path / "xiao_s_v2_20260514_120000_111111"
+        lora_b = tmp_path / "xiao_s_v2_20260525_214017_209227"
+        shared_merged = tmp_path / "merged_qwen3_tts_xiao_s_v2"
+
+        v_old = self._sft("v2_20260514_120000_111111", lora_a, shared_merged)
+        v_new = self._sft("v2_20260525_214017_209227", lora_b, shared_merged)
+        repo.save(v_old)
+        repo.save(v_new)
+
+        # Delete the NEW (bad) version. The OLD version's merged dir
+        # must still exist on disk.
+        repo.delete("v2_20260525_214017_209227")
+
+        assert not repo.exists("v2_20260525_214017_209227")
+        # Surviving version's merged_path must still resolve.
+        survivor = repo.get("v2_20260514_120000_111111")
+        assert survivor.merged_path == str(shared_merged.resolve())
+        assert shared_merged.exists(), (
+            "Shared merged dir was wiped — the 2026-05-25 catastrophe "
+            "would have recurred."
+        )
+        assert (shared_merged / "model.safetensors").exists()
+
+    def test_delete_uses_stored_merged_path_not_derived(self, repo, tmp_path):
+        """If the version's stored `merged_path` points somewhere OTHER
+        than what the old `parts[:3]` rule would have derived, the delete
+        must follow the stored path, not re-derive.
+        """
+        lora = tmp_path / "xiao_s_v2_20260525_214017_209227"
+        # Stored merged dir uses the NEW naming convention (full lora name).
+        merged_new = tmp_path / "merged_qwen3_tts_xiao_s_v2_20260525_214017_209227"
+        # Legacy-derived name; an unrelated dir we don't want touched.
+        legacy_derived = tmp_path / "merged_qwen3_tts_xiao_s_v2"
+        legacy_derived.mkdir()
+        (legacy_derived / "unrelated.bin").write_text("keep me")
+
+        v = self._sft("v2_20260525_214017_209227", lora, merged_new)
+        repo.save(v)
+        repo.delete("v2_20260525_214017_209227")
+
+        # The actually-stored merged dir got removed.
+        assert not merged_new.exists()
+        # The legacy-derived dir was NEVER touched (no re-derivation).
+        assert legacy_derived.exists()
+        assert (legacy_derived / "unrelated.bin").exists()
+
+    def test_delete_skips_when_no_merged_path(self, repo, tmp_path):
+        """SFT version with merged_path=None: don't guess, just log + skip."""
+        lora = tmp_path / "xiao_s_v3_20260525_111111_111111"
+        lora.mkdir()
+        # A plausible legacy-derived merged dir sitting nearby — we must
+        # NOT touch it.
+        plausible = tmp_path / "merged_qwen3_tts_xiao_s_v3"
+        plausible.mkdir()
+        (plausible / "sentinel").write_text("dont touch")
+
+        v = TrainingVersion(
+            version_id="v3_20260525_111111_111111",
+            persona_id="xiao_s",
+            recording_ids_used=["rec-1"],
+            lora_path=str(lora),
+            merged_path=None,  # explicitly unset
+            model_type="custom_voice",
+            created_at=datetime.now(timezone.utc),
+        )
+        repo.save(v)
+        repo.delete("v3_20260525_111111_111111")
+
+        # Lora dir is gone.
+        assert not lora.exists()
+        # Plausible merged dir was NOT derived/removed.
+        assert plausible.exists()
+        assert (plausible / "sentinel").exists()
+
+
 class TestSweepStranded:
     """TrainingService.sweep_stranded() — reconcile orphaned `training` versions
     on startup. Regression for the 2026-05-21 "stuck in training" bug.
