@@ -39,6 +39,7 @@ from app.api._errors import (
 from .audio_resolver import AudioResolver, ResolvedSegment
 from .models import (
     MIN_TRAINING_AUDIO_SECONDS,
+    VALID_LANGUAGE_TOKENS,
     ActiveVersion,
     ManifestRecording,
     TrainingManifest,
@@ -495,6 +496,7 @@ class TrainingService:
         batch_size: int = 4,
         training_type: TrainingType = TrainingType.lora,
         learning_rate: Optional[float] = None,
+        language_token: Optional[str] = None,
     ) -> CreatedVersion:
         """
         Validate inputs → resolve audio → create version → start job.
@@ -522,6 +524,16 @@ class TrainingService:
             raise InvalidTrainingParamsError(
                 f"learning_rate out of plausible range [1e-8, 1e-1]: {learning_rate}",
                 details={"learning_rate": learning_rate},
+            )
+        # `language_token` accepts None (UI "不指定" → bake as False) or
+        # one of the codec_language_id keys in the base model. Anything
+        # else would crash the engine's `codec_language_id[dialect]`
+        # lookup at inference time — reject here with a clear error.
+        if language_token is not None and language_token not in VALID_LANGUAGE_TOKENS:
+            raise InvalidTrainingParamsError(
+                f"language_token must be None or one of {sorted(VALID_LANGUAGE_TOKENS)}; "
+                f"got {language_token!r}",
+                details={"language_token": language_token},
             )
 
         # 3. Refuse if another training is already running — prevents the
@@ -581,6 +593,7 @@ class TrainingService:
             segment_ids_used=list(segment_ids),
             lora_path=str(lora_dir),
             created_at=datetime.now(timezone.utc),
+            language_token=language_token,
         )
         self.repository.save(version)
 
@@ -703,4 +716,5 @@ def _default_job_factory(
         total_audio_duration=total_duration,
         training_type=(version.training_type.value if version.training_type else "lora"),
         persona_id=version.persona_id,
+        language_token=version.language_token,
     )

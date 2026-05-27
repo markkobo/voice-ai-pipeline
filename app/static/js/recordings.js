@@ -16,7 +16,6 @@
         const searchInput = document.getElementById('searchInput');
         const listenerFilter = document.getElementById('listenerFilter');
         const recBtn = document.getElementById('recBtn');
-        const stopBtn = document.getElementById('stopBtn');
         const duration = document.getElementById('duration');
         const dbMeterFill = document.getElementById('dbMeterFill');
         const dbLevel = document.getElementById('dbLevel');
@@ -483,7 +482,7 @@
                             ${uniqueSpeakers.length > 0 ? `<span>🔊 ${uniqueSpeakers.length} 說話者</span>` : ''}
                         </div>
                         <div class="recording-actions" onclick="event.stopPropagation()">
-                            ${canPlay ? `<button class="action-btn play" onclick="playFullRecording('${r.recording_id}')" title="播放全部">⏵</button>` : ''}
+                            ${canPlay ? `<button class="action-btn play" id="play-full-${r.recording_id}" onclick="toggleFullRecording('${r.recording_id}')" title="播放全部">⏵</button>` : ''}
                             ${r.status === 'processed' || r.status === 'raw' || r.status === 'failed' ? `<button class="action-btn parse" onclick="parseRecording('${r.recording_id}')">${r.status === 'failed' ? '重新解析' : r.status === 'processed' ? '重新解析' : '解析'}</button>` : ''}
                             ${r.status === 'processing' ? `<span class="loading"></span>` : ''}
                             <button class="action-btn delete" onclick="confirmDeleteRecording('${r.recording_id}')">✕</button>
@@ -582,9 +581,7 @@
                     </div>
                     <span class="segment-duration">${duration.toFixed(1)}s</span>
                     <div class="playback-controls">
-                        <button class="play-btn" id="play-${r.recording_id}-${speakerId}" onclick="playSegment('${r.recording_id}', '${speakerId}')">▶</button>
-                        <button class="pause-btn" id="pause-${r.recording_id}-${speakerId}" onclick="pauseSegment()" style="display:none">⏸</button>
-                        <button class="stop-btn" onclick="stopSegment()" style="background:#666">⏹</button>
+                        <button class="play-btn" id="play-${r.recording_id}-${speakerId}" onclick="toggleSegmentPlayback('${r.recording_id}', '${speakerId}')">▶</button>
                     </div>
                     <div class="progress-container">
                         <div class="progress-bar" id="progress-${r.recording_id}-${speakerId}" onclick="seekSegment(event, '${r.recording_id}', '${speakerId}')">
@@ -707,9 +704,7 @@
                     </div>
                     <span class="segment-duration">${duration.toFixed(1)}s</span>
                     <div class="playback-controls">
-                        <button class="play-btn" id="play-${r.recording_id}-${speakerId}" onclick="playSegment('${r.recording_id}', '${speakerId}')">▶</button>
-                        <button class="pause-btn" id="pause-${r.recording_id}-${speakerId}" onclick="pauseSegment()" style="display:none">⏸</button>
-                        <button class="stop-btn" onclick="stopSegment()" style="background:#666">⏹</button>
+                        <button class="play-btn" id="play-${r.recording_id}-${speakerId}" onclick="toggleSegmentPlayback('${r.recording_id}', '${speakerId}')">▶</button>
                     </div>
                     <div class="progress-container">
                         <div class="progress-bar" id="progress-${r.recording_id}-${speakerId}" onclick="seekSegment(event, '${r.recording_id}', '${speakerId}')">
@@ -785,12 +780,23 @@
         }
 
         // ==================== SEGMENT PLAYBACK ====================
+        // Single-button toggle: ▶ starts, ■ stops. Same button serves both
+        // roles — when audio is playing, the play-btn's text/title flip to
+        // stop semantics. On `ended` (natural finish) we reset back to ▶.
+        function toggleSegmentPlayback(recordingId, speakerId) {
+            const key = `${recordingId}-${speakerId}`;
+            if (activeAudio && currentPlayingId === key) {
+                stopSegment();
+            } else {
+                playSegment(recordingId, speakerId);
+            }
+        }
+
         function playSegment(recordingId, speakerId) {
             // Stop any currently playing audio
             stopSegment();
 
             const playBtn = document.getElementById(`play-${recordingId}-${speakerId}`);
-            const pauseBtn = document.getElementById(`pause-${recordingId}-${speakerId}`);
 
             log(`Playing segment: ${speakerId}`, 'info', 'PLAYBACK');
 
@@ -810,31 +816,27 @@
 
                     activeAudio.addEventListener('ended', () => {
                         resetPlaybackUI(recordingId, speakerId);
+                        activeAudio = null;
+                        currentPlayingId = null;
                     });
 
                     activeAudio.addEventListener('error', (e) => {
                         log(`Audio error: ${e.message}`, 'error', 'PLAYBACK');
                         resetPlaybackUI(recordingId, speakerId);
+                        activeAudio = null;
+                        currentPlayingId = null;
                     });
 
-                    playBtn.style.display = 'none';
-                    pauseBtn.style.display = 'flex';
+                    if (playBtn) {
+                        playBtn.textContent = '■';
+                        playBtn.title = '停止播放';
+                    }
                     activeAudio.play();
                 })
                 .catch(e => {
                     log(`Failed to play segment: ${e.message}`, 'error', 'PLAYBACK');
                     showToast('播放失敗: ' + e.message, 'error');
                 });
-        }
-
-        function pauseSegment() {
-            if (!activeAudio) return;
-            const [recordingId, speakerId] = currentPlayingId.split('-').slice(-2);
-            activeAudio.pause();
-            const playBtn = document.getElementById(`play-${recordingId}-${speakerId}`);
-            const pauseBtn = document.getElementById(`pause-${recordingId}-${speakerId}`);
-            if (playBtn) playBtn.style.display = 'flex';
-            if (pauseBtn) pauseBtn.style.display = 'none';
         }
 
         function stopSegment() {
@@ -852,10 +854,11 @@
 
         function resetPlaybackUI(recordingId, speakerId) {
             const playBtn = document.getElementById(`play-${recordingId}-${speakerId}`);
-            const pauseBtn = document.getElementById(`pause-${recordingId}-${speakerId}`);
             const progressFill = document.getElementById(`progress-fill-${recordingId}-${speakerId}`);
-            if (playBtn) playBtn.style.display = 'flex';
-            if (pauseBtn) pauseBtn.style.display = 'none';
+            if (playBtn) {
+                playBtn.textContent = '▶';
+                playBtn.title = '播放';
+            }
             if (progressFill) progressFill.style.width = '0%';
         }
 
@@ -883,8 +886,37 @@
         }
 
         // ==================== FULL RECORDING PLAYBACK ====================
+        // Toggle pattern matching segment playback: same button starts/stops.
+        function toggleFullRecording(recordingId) {
+            const key = `full-${recordingId}`;
+            if (activeAudio && currentPlayingId === key) {
+                stopFullRecording();
+            } else {
+                playFullRecording(recordingId);
+            }
+        }
+
+        function _resetFullRecordingBtn(recordingId) {
+            const btn = document.getElementById(`play-full-${recordingId}`);
+            if (btn) {
+                btn.textContent = '⏵';
+                btn.title = '播放全部';
+            }
+        }
+
+        function stopFullRecording() {
+            if (!activeAudio) return;
+            const recordingId = (currentPlayingId || '').replace(/^full-/, '');
+            activeAudio.pause();
+            activeAudio.currentTime = 0;
+            activeAudio = null;
+            currentPlayingId = null;
+            if (recordingId) _resetFullRecordingBtn(recordingId);
+        }
+
         function playFullRecording(recordingId) {
             stopSegment();
+            stopFullRecording();
 
             log(`Playing full recording: ${recordingId}`, 'info', 'PLAYBACK');
 
@@ -898,9 +930,22 @@
                     activeAudio = new Audio(url);
                     currentPlayingId = `full-${recordingId}`;
 
+                    const btn = document.getElementById(`play-full-${recordingId}`);
+                    if (btn) {
+                        btn.textContent = '■';
+                        btn.title = '停止播放';
+                    }
+
                     activeAudio.addEventListener('ended', () => {
                         activeAudio = null;
                         currentPlayingId = null;
+                        _resetFullRecordingBtn(recordingId);
+                    });
+
+                    activeAudio.addEventListener('error', () => {
+                        activeAudio = null;
+                        currentPlayingId = null;
+                        _resetFullRecordingBtn(recordingId);
                     });
 
                     activeAudio.play();
@@ -1243,8 +1288,8 @@
                 startTime = Date.now();
 
                 recBtn.classList.add('recording');
-                recBtn.querySelector('#recText').textContent = '錄音中...';
-                stopBtn.classList.add('visible');
+                recBtn.querySelector('#recIcon').textContent = '■';
+                recBtn.querySelector('#recText').textContent = '停止錄音';
                 qualityIndicator.textContent = '錄音中...';
 
                 durationInterval = setInterval(() => {
@@ -1324,8 +1369,8 @@
             }
 
             recBtn.classList.remove('recording');
+            recBtn.querySelector('#recIcon').textContent = '●';
             recBtn.querySelector('#recText').textContent = '開始錄音';
-            stopBtn.classList.remove('visible');
             duration.textContent = '00:00';
             dbMeterFill.style.width = '0%';
             dbLevel.textContent = '-∞ dB';
@@ -1477,7 +1522,6 @@
             if (isRecording) stopRecording();
             else startRecording();
         });
-        stopBtn.addEventListener('click', stopRecording);
 
         // Debug panel toggle
         document.getElementById('debugToggle').addEventListener('click', () => {

@@ -556,11 +556,13 @@ async function loadVersions() {
         const activeVersionId = activeData.version?.version_id;
 
         versionSelect.innerHTML = '<option value="">系統預設</option>';
+        const fmt = window.formatVersionName || ((x) => x);
         versions.forEach(v => {
             if (v.status === 'ready') {
-                const label = v.nickname ? `${v.version_id}: ${v.nickname}` : v.version_id;
+                const pretty = fmt(v.version_id);
+                const label = v.nickname ? `${pretty} — ${v.nickname}` : pretty;
                 const selected = v.version_id === activeVersionId ? 'selected' : '';
-                versionSelect.innerHTML += `<option value="${v.version_id}" ${selected}>${label}</option>`;
+                versionSelect.innerHTML += `<option value="${v.version_id}" ${selected} title="${v.version_id}">${label}</option>`;
             }
         });
 

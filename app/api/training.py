@@ -65,6 +65,16 @@ class CreateTrainingRequest(BaseModel):
     batch_size: int = 4
     training_type: TrainingType = TrainingType.lora
     learning_rate: Optional[float] = None
+    # Forces Qwen3-TTS codec language tokens for this persona via the
+    # baked `spk_is_dialect[persona]` field. Accepted values: any of the
+    # 10 keys in talker_config.codec_language_id of the base model
+    # (chinese, english, japanese, korean, french, spanish, german,
+    # italian, portuguese, russian) OR False/None to disable the dialect
+    # override (recommended for non-Beijing-accented sources). Reaches
+    # `training_job.TrainingJob.language_token` and is written into both
+    # the SFT bake's config.json and merge_lora's config.json. UI default
+    # is "不指定" → None (becomes Python False in the bake).
+    language_token: Optional[str] = None
 
 
 class UpdateVersionRequest(BaseModel):
@@ -352,6 +362,7 @@ async def create_training(
         batch_size=body.batch_size,
         training_type=body.training_type,
         learning_rate=body.learning_rate,
+        language_token=body.language_token,
     )
     version = result.version
     return CreateTrainingResponse(

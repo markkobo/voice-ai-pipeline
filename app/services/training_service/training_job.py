@@ -36,6 +36,7 @@ class TrainingJob:
         total_audio_duration: float,
         training_type: str = "lora",
         persona_id: str = "persona_new",
+        language_token: Optional[str] = None,
     ):
         self.version_id = version_id
         self.version_dir = Path(version_dir)
@@ -44,6 +45,14 @@ class TrainingJob:
         self.total_audio_duration = total_audio_duration
         self.training_type = training_type
         self.persona_id = persona_id
+        # `language_token` is the user-selected codec language for
+        # `spk_is_dialect[persona]`. `None` (UI "不指定") writes Python
+        # `False` in the baked custom_voice config — i.e. no dialect
+        # override at inference. Otherwise must be one of
+        # codec_language_id keys (validated upstream in the service).
+        # Replaces the previous hardcoded "chinese" that destroyed
+        # Taiwan-accented clones by forcing the Beijing codec.
+        self.language_token = language_token
 
         self._thread: Optional[threading.Thread] = None
         self._result: Optional[TrainingResult] = None
@@ -121,6 +130,10 @@ BATCH_SIZE = ''' + str(self.config.batch_size) + '''
 TRACKER_PATH = Path(OUTPUT_DIR) / "progress.json"
 PERSONA_ID = "''' + self.persona_id + '''"
 VERSION_ID = "''' + self.version_id + '''"
+# LANGUAGE_TOKEN: user-selected codec language for spk_is_dialect[persona].
+# None → write Python False (no dialect override). Otherwise a string like
+# "chinese" / "english" / etc. validated upstream in the service layer.
+LANGUAGE_TOKEN = ''' + ("None" if self.language_token is None else repr(self.language_token)) + '''
 
 # Initialize progress.json before training starts
 def init_progress():
@@ -706,11 +719,19 @@ def main():
                 merged_config["talker_config"] = {}
             merged_config["talker_config"]["spk_id"] = spk_id_dict
 
-            # Mark speaker as using Chinese dialect to preserve accent
-            # spk_is_dialect[speaker] should be the dialect name string (e.g., "chinese")
-            # NOT a boolean True - the inference code uses it as codec_language_id[dialect] key
+            # Write the user-selected language token into spk_is_dialect.
+            # The inference code at qwen_tts modeling_qwen3_tts.py:2118-2122
+            # consults this ONLY when the runtime language is "chinese" or
+            # "auto"; in that case it overrides the codec language to
+            # codec_language_id[spk_is_dialect[speaker]]. None → write
+            # Python `False` (the engine's `!= False` check short-circuits
+            # and falls back to the runtime language untouched). Forcing
+            # "chinese" on a Taiwan-accented source routes through the
+            # Beijing-accented codec and destroys the clone — diagnosed
+            # 2026-05-27. The dropdown in the UI exposes this choice;
+            # default is "不指定" → False.
             spk_is_dialect = merged_config.get("talker_config", {}).get("spk_is_dialect", {})
-            spk_is_dialect[PERSONA_ID.lower()] = "chinese"  # Use "chinese" for Chinese language preservation
+            spk_is_dialect[PERSONA_ID.lower()] = LANGUAGE_TOKEN if LANGUAGE_TOKEN is not None else False
             merged_config["talker_config"]["spk_is_dialect"] = spk_is_dialect
 
             # Update tts_model_type to custom_voice
@@ -1002,8 +1023,14 @@ if __name__ == "__main__":
                             merged_path = None
                             logger.error(f"[TRAINING:{self.version_id[:8]}] SFT model not found at {merged_path}")
                     else:
-                        # LoRA training - need to merge adapter with base model
-                        merged_path = merge_lora(self.version_dir)
+                        # LoRA training - need to merge adapter with base model.
+                        # Forward language_token so the bake inside merge_lora
+                        # writes the user-selected value into spk_is_dialect
+                        # instead of the old hardcoded "chinese".
+                        merged_path = merge_lora(
+                            self.version_dir,
+                            language_token=self.language_token,
+                        )
                         if merged_path and merged_path.exists():
                             logger.info(f"[TRAINING:{self.version_id[:8]}] Merge complete: {merged_path}")
                         else:
@@ -1148,7 +1175,11 @@ if __name__ == "__main__":
 # LoRA Merge
 # =============================================================================
 
-def merge_lora(lora_dir: Path, base_model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-Base") -> Optional[Path]:
+def merge_lora(
+    lora_dir: Path,
+    base_model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+    language_token: Optional[str] = None,
+) -> Optional[Path]:
     """
     Merge LoRA adapter weights into base Qwen3-TTS model and save.
 
@@ -1158,6 +1189,14 @@ def merge_lora(lora_dir: Path, base_model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
     Args:
         lora_dir: Path to version directory containing adapter/ (e.g. data/models/xiao_s_v12_timestamp)
         base_model: HuggingFace model ID for base Qwen3-TTS
+        language_token: User-selected codec language for
+            `talker_config.spk_is_dialect[persona]` in the baked
+            CustomVoice config. `None` writes Python `False` (no dialect
+            override; UI default "不指定"). Otherwise a string like
+            "chinese", "english", etc. — must be a key of
+            `talker_config.codec_language_id` in the base model.
+            Replaces the previously-hardcoded "chinese" that forced the
+            Beijing codec on Taiwan-accented clones.
 
     Returns:
         Path to merged model directory, or None if merge failed
@@ -1361,9 +1400,17 @@ def merge_lora(lora_dir: Path, base_model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
                 merged_config["talker_config"] = {}
             merged_config["talker_config"]["spk_id"] = spk_id_dict
 
-            # Mark as Chinese dialect (preserves accent in inference).
+            # Write the user-selected language token into spk_is_dialect.
+            # Mirrors the SFT bake path — see comment there for the
+            # semantics. `language_token` is None → bake Python `False`
+            # so the engine skips the dialect override and uses the
+            # runtime language as-is. Replaces the prior hardcoded
+            # "chinese" that destroyed Taiwan-accented clones by routing
+            # them through the Beijing-accented codec (2026-05-27).
             spk_is_dialect = merged_config.get("talker_config", {}).get("spk_is_dialect", {})
-            spk_is_dialect[persona_id.lower()] = "chinese"
+            spk_is_dialect[persona_id.lower()] = (
+                language_token if language_token is not None else False
+            )
             merged_config["talker_config"]["spk_is_dialect"] = spk_is_dialect
 
             # Switch architecture so the engine routes to

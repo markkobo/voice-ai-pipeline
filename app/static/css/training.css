@@ -244,6 +244,20 @@
             background: #ff444433;
             color: #ff4444;
         }
+        /* Voice-cloning audit badge — surfaces effective bandwidth /
+         * peak / roll-off so the user can spot muffled source audio
+         * before kicking off a training run. Matches recordings.css
+         * .voice-audit-badge so the two pages look consistent. */
+        .voice-audit-badge {
+            font-size: 0.72rem;
+            padding: 2px 8px;
+            border-radius: 4px;
+            white-space: nowrap;
+            cursor: help;
+        }
+        .voice-audit-badge.va-good { background: #11331f; color: #6fe2a4; }
+        .voice-audit-badge.va-marginal { background: #3a2f10; color: #f4c66a; }
+        .voice-audit-badge.va-bad { background: #3a1010; color: #ff7a7a; }
 
         /* Segment audio controls */
         .segment-audio {

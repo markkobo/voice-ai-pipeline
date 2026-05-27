@@ -51,6 +51,22 @@ class ProgressStatus(str, Enum):
 # by the API request models).
 # ---------------------------------------------------------------------------
 VALID_LORA_RANKS = {4, 8, 16, 32}
+# Valid values for `language_token` — must match
+# `talker_config.codec_language_id` keys in the Qwen3-TTS-12Hz-1.7B-Base
+# config (10 languages). `None` (UI: "不指定") is also accepted and
+# translates to Python `False` at bake time → no dialect override.
+VALID_LANGUAGE_TOKENS = {
+    "chinese",
+    "english",
+    "japanese",
+    "korean",
+    "french",
+    "spanish",
+    "german",
+    "italian",
+    "portuguese",
+    "russian",
+}
 MIN_EPOCHS = 1
 # Upper bound bumped from 50 → 200 to support SFT runs, which routinely
 # need 100+ epochs for full-model fine-tuning to converge on a small
@@ -105,6 +121,17 @@ class TrainingVersion(BaseModel):
     # when reconciling a version whose subprocess died without writing a
     # terminal state.
     error_message: Optional[str] = None
+    # Forces Qwen3-TTS codec language tokens for this persona via
+    # talker_config.spk_is_dialect[persona] in the baked custom_voice
+    # config. `None` (UI: "不指定") writes Python `False` at bake time —
+    # i.e. no dialect override; the engine uses whatever language is
+    # passed at inference. Non-None values must be one of
+    # codec_language_id keys (chinese, english, japanese, korean,
+    # french, spanish, german, italian, portuguese, russian). For
+    # Taiwan-accented sources, `None` is recommended — setting
+    # "chinese" forces the Beijing-accented codec path which destroys
+    # the cloned accent (root cause of 2026-05-27 hand-patch incident).
+    language_token: Optional[str] = None
 
     def to_legacy_dict(self) -> dict:
         """Match the legacy `to_dict()` shape that UI clients consume.

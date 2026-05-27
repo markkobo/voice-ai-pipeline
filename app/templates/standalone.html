@@ -11,11 +11,31 @@
 <body>
     {% include "_status_bar.html" %}
     <div id="toastContainer"></div>
+
+    <!-- EverHome splash overlay — only visible in demo mode (?demo=1).
+         Click anywhere to dismiss and reveal the chat UI underneath.
+         Lives outside .container so the dark theme can extend full-bleed. -->
+    <div id="everhomeSplash" onclick="dismissSplash()" style="display:none;">
+        <div class="splash-inner">
+            <div class="splash-logo">EverHome</div>
+            <div class="splash-tagline">A Time Capsule You Can Talk To</div>
+            <div class="splash-tagline-cn">屬於家的，可以對話的時光膠囊</div>
+            <button class="splash-start" onclick="dismissSplash(); event.stopPropagation();">點擊開始 · Click to Start</button>
+        </div>
+    </div>
+
     <div class="container">
         <div style="display: flex; justify-content: space-between; align-items: center;">
             <div>
-                <h1>Voice AI — 小S <span id="uiVersion" style="font-size:12px;color:#888">[v27]</span></h1>
-                <p class="subtitle">選擇對象，按一下開始對話</p>
+                <h1>
+                    <span class="brand-default">Voice AI — 小S</span>
+                    <span class="brand-demo">EverHome</span>
+                    <span id="uiVersion" style="font-size:12px;color:#888">[v27]</span>
+                </h1>
+                <p class="subtitle">
+                    <span class="brand-default">選擇對象，按一下開始對話</span>
+                    <span class="brand-demo">Talk to your time capsule</span>
+                </p>
             </div>
             <button id="clearBtn" onclick="clearConversation()" style="background:#555;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:13px;">🗑 清除對話</button>
         </div>
@@ -112,6 +132,27 @@
     </div>
 
     <script src="/static/js/standalone.js" defer></script>
+    <script>
+        // EverHome splash — show on initial demo-mode load. Dismissed by
+        // any click (overlay or start button); stays dismissed for the
+        // session via sessionStorage so accidental refreshes don't keep
+        // interrupting the demo.
+        (function () {
+            if (new URLSearchParams(location.search).get('demo') !== '1') return;
+            if (sessionStorage.getItem('everhomeSplashDismissed') === '1') return;
+            document.addEventListener('DOMContentLoaded', () => {
+                const el = document.getElementById('everhomeSplash');
+                if (el) el.classList.add('show');
+            }, { once: true });
+        })();
+        window.dismissSplash = function () {
+            const el = document.getElementById('everhomeSplash');
+            if (!el) return;
+            el.style.opacity = '0';
+            sessionStorage.setItem('everhomeSplashDismissed', '1');
+            setTimeout(() => { el.classList.remove('show'); el.style.opacity = ''; }, 600);
+        };
+    </script>
 
 </body>
 </html>

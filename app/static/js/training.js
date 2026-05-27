@@ -311,6 +311,11 @@
                         persona_id: s.persona_id,
                         listener_id: s.listener_id,
                         longest_segment: null,
+                        // voice_audit is per-speaker (audit_voice_training_quality
+                        // is computed once per speaker_id by the pipeline and
+                        // copied onto every segment); first non-null wins.
+                        // Same shape as on the recordings page: {level, warnings, metrics}.
+                        voice_audit: null,
                     };
                     groups.set(s.speaker_id, g);
                 }
@@ -331,6 +336,9 @@
                 if (!g.longest_segment || d > (g.longest_segment.duration_seconds || 0)) {
                     g.longest_segment = s;
                 }
+                if (!g.voice_audit && s.voice_audit) {
+                    g.voice_audit = s.voice_audit;
+                }
             }
             const out = Array.from(groups.values());
             out.forEach(g => {
@@ -349,6 +357,26 @@
             const personaName = getPersonaName(r.persona_id);
             const durationText = r.duration_seconds ? r.duration_seconds.toFixed(1) + 's' : '-';
 
+            // Aggregate voice-audit across all speakers — worst level wins so
+            // the user sees the weakest link without expanding the folder.
+            let aggLevel = null;
+            const sevRank = { bad: 3, marginal: 2, good: 1 };
+            for (const g of speakerGroups) {
+                const lvl = g.voice_audit?.level;
+                if (!lvl) continue;
+                if (!aggLevel || (sevRank[lvl] || 0) > (sevRank[aggLevel] || 0)) aggLevel = lvl;
+            }
+            let folderAuditBadge = '';
+            if (aggLevel) {
+                const label = aggLevel === 'good' ? '✓ 音質良好' :
+                              aggLevel === 'marginal' ? '⚠ 音質勉強' :
+                              aggLevel === 'bad' ? '✕ 不適合訓練' : '';
+                const cls = aggLevel === 'good' ? 'va-good' :
+                            aggLevel === 'marginal' ? 'va-marginal' :
+                            aggLevel === 'bad' ? 'va-bad' : '';
+                folderAuditBadge = `<span class="voice-audit-badge ${cls}" title="展開查看詳細音質分析">${label}</span>`;
+            }
+
             return `
                 <div class="tree-recording ${hasSelected ? 'has-selected' : ''}" id="rec-${r.recording_id}">
                     <div class="recording-header-row" onclick="toggleRecording('${r.recording_id}')">
@@ -357,6 +385,7 @@
                         <div class="recording-badges">
                             <span class="recording-badge listener">[${listenerName}]</span>
                             <span class="recording-badge persona">[${personaName}]</span>
+                            ${folderAuditBadge}
                         </div>
                         <span class="recording-duration">${durationText}</span>
                     </div>
@@ -404,6 +433,34 @@
             if (qualityFlags.too_short) flagsHtml.push('<span class="quality-flag active">太短</span>');
             const flagsDisplay = flagsHtml.length > 0 ? `<div class="quality-flags">${flagsHtml.join('')}</div>` : '';
 
+            // Voice-cloning audit badge — surfaces effective_bandwidth /
+            // peak / spectral roll-off summary so the user can see at a
+            // glance whether a segment is broadband enough for a clean
+            // clone. Same shape + tooltip style as on the recordings page
+            // (recordings.js renderSpeakerRow). The training UI previously
+            // exposed only the segment quality_score, which doesn't catch
+            // muffled-source-audio cases (low effective bw + high quality).
+            const va = group.voice_audit;
+            let voiceAuditBadge = '';
+            if (va && va.level) {
+                const level = va.level;
+                const label = level === 'good' ? '✓ 音質良好' :
+                              level === 'marginal' ? '⚠ 音質勉強' :
+                              level === 'bad' ? '✕ 不適合訓練' : '?';
+                const cls = level === 'good' ? 'va-good' :
+                            level === 'marginal' ? 'va-marginal' :
+                            level === 'bad' ? 'va-bad' : '';
+                const m = va.metrics || {};
+                const warns = (va.warnings || []).join('\n');
+                const tooltip = (warns ? warns + '\n\n' : '') +
+                    `effective_bw: ${(m.effective_bandwidth_hz || 0).toFixed(0)} Hz\n` +
+                    `peak_dbfs: ${(m.peak_dbfs || 0).toFixed(1)}\n` +
+                    `rms_dbfs: ${(m.rms_dbfs || 0).toFixed(1)}\n` +
+                    `silent_pct: ${(m.silent_pct || 0).toFixed(1)}%\n` +
+                    `>4kHz: ${(m.energy_4_8khz_pct || 0).toFixed(1)}%, >8kHz: ${(m.energy_8_12khz_pct || 0).toFixed(2)}%`;
+                voiceAuditBadge = `<span class="voice-audit-badge ${cls}" title="${escapeHtml(tooltip)}">${label}</span>`;
+            }
+
             const truncated = transcript.length > 50 ? transcript.substring(0, 50) + '...' : transcript;
             const countBadge = segCount > 1
                 ? `<span class="quality-badge" style="background:#37475a;color:#bcd;">${segCount} 段</span>`
@@ -427,6 +484,7 @@
                     <span class="segment-duration">${duration.toFixed(1)}s</span>
                     ${countBadge}
                     ${qualityBadge}
+                    ${voiceAuditBadge}
                     <div class="segment-audio" onclick="event.stopPropagation()">
                         <button class="audio-btn play" id="play-${safeSegId}"
                             onclick="playSegment('${r.recording_id}', '${group.speaker_id}', ${playStart}, ${playEnd}, '${safeSegId}')">▶</button>
@@ -672,6 +730,11 @@
             const epochs = parseInt(document.getElementById('epochsSelect').value);
             const rank = parseInt(document.getElementById('rankSelect').value);
             const batchSize = parseInt(document.getElementById('batchSizeSelect').value);
+            // Empty string ("不指定") → null → backend writes Python False
+            // into spk_is_dialect[persona]. Non-empty → string like
+            // "chinese" / "english" that the backend bakes verbatim.
+            const languageRaw = document.getElementById('languageTokenSelect').value;
+            const languageToken = languageRaw === '' ? null : languageRaw;
 
             const segmentIds = Array.from(selectedSegments);
             if (segmentIds.length === 0) {
@@ -713,6 +776,7 @@
                     num_epochs: epochs,
                     batch_size: batchSize,
                     training_type: trainingType,
+                    language_token: languageToken,
                 };
                 console.log('DEBUG payload:', JSON.stringify(payload));
 

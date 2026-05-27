@@ -94,6 +94,22 @@
                                 <option value="8">8</option>
                             </select>
                         </div>
+                        <div class="form-group">
+                            <label title="決定 Qwen3-TTS 烘焙時要不要鎖定特定語系的 codec 語言 token。「不指定」會把 spk_is_dialect 寫成 false，推論時用原本說話者口音；其他選項會強制走該語言的 codec，可能讓非北京口音聽起來像北京腔。">語言 (Language)</label>
+                            <select id="languageTokenSelect">
+                                <option value="" selected>不指定（推薦：保留原口音）</option>
+                                <option value="chinese" title="可能讓非北京口音聽起來像北京腔">中文（強制北京 codec）</option>
+                                <option value="english">英文 (English)</option>
+                                <option value="japanese">日文 (Japanese)</option>
+                                <option value="korean">韓文 (Korean)</option>
+                                <option value="french">法文 (French)</option>
+                                <option value="spanish">西文 (Spanish)</option>
+                                <option value="german">德文 (German)</option>
+                                <option value="italian">義文 (Italian)</option>
+                                <option value="portuguese">葡文 (Portuguese)</option>
+                                <option value="russian">俄文 (Russian)</option>
+                            </select>
+                        </div>
                     </div>
                     <div id="loraWarning" style="display:none; margin-top:10px; padding:10px 14px; background:#3a2f10; color:#f4c66a; border-radius:6px; font-size:0.85rem;">
                         ⚠️ <strong>LoRA 目前不穩定</strong>：訓練 forward path 只能訓練到 code_predictor，gradient 訊號不足以收斂，產出常為雜音 / 跑到 max_new_tokens。建議用 SFT。詳見 <code>memory/training_pipeline_deferred.md</code>。
