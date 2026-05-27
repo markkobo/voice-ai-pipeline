@@ -25,32 +25,22 @@
     </div>
 
     <div class="container">
-        <div style="display: flex; justify-content: space-between; align-items: center;">
+        <div class="header-row">
             <div>
                 <h1>
                     <span class="brand-default">Voice AI — EverHome Lab</span>
                     <span class="brand-demo">EverHome</span>
-                    <span id="uiVersion" style="font-size:12px;color:#888">[v27]</span>
+                    <span id="uiVersion" style="font-size:12px;color:#888">[v28]</span>
                 </h1>
                 <p class="subtitle">
                     <span class="brand-default">Pick a listener, tap to start talking</span>
                     <span class="brand-demo">Talk to your time capsule</span>
                 </p>
             </div>
-            <button id="clearBtn" onclick="clearConversation()" style="background:#555;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:13px;">🗑 Clear Chat</button>
         </div>
         <div id="status" class="status disconnected">Disconnected</div>
 
         <div class="config-row">
-            <div class="config-item">
-                <label>Listener</label>
-                <select id="listener">
-                    <option value="child">Child</option>
-                    <option value="mom">Mom</option>
-                    <option value="friend">Friend</option>
-                    <option value="default" selected>Default</option>
-                </select>
-            </div>
             <div class="config-item">
                 <label>Persona</label>
                 <select id="persona">
@@ -61,7 +51,16 @@
                 </select>
             </div>
             <div class="config-item">
-                <label>Voice Detection Sensitivity</label>
+                <label>Listener</label>
+                <select id="listener">
+                    <option value="child">Child</option>
+                    <option value="mom">Mom</option>
+                    <option value="friend">Friend</option>
+                    <option value="default" selected>Default</option>
+                </select>
+            </div>
+            <div class="config-item">
+                <label>Mic Sensitivity</label>
                 <select id="vad" onchange="onVadChange()">
                     <option value="low">Low</option>
                     <option value="medium" selected>Medium</option>
@@ -71,13 +70,13 @@
         </div>
 
         <!-- Active version indicator -->
-        <div id="versionIndicator" style="background: #1a1a2e; border-radius: 8px; padding: 8px 14px; margin-bottom: 12px; font-size: 0.85rem; display: flex; align-items: center; gap: 8px;">
-            <span style="color: #888;">🎙️ Voice:</span>
-            <select id="versionSelect" onchange="onVersionChange()" style="background: #1a1a2e; color: #00ccff; border: 1px solid #333; border-radius: 4px; padding: 4px 8px; font-size: 0.85rem; max-width: 220px;">
+        <div id="versionIndicator">
+            <span class="version-label">🎙️ Voice</span>
+            <select id="versionSelect" onchange="onVersionChange()">
                 <option value="">System Default</option>
             </select>
-            <span id="versionInfo" style="color: #666; font-size: 0.75rem;"></span>
-            <button onclick="loadVersions()" style="background: #333; color: #aaa; border: none; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 0.75rem; margin-left: auto;">🔄</button>
+            <button class="version-refresh" onclick="loadVersions()" title="Reload voices">🔄</button>
+            <span id="versionInfo"></span>
         </div>
 
         <!-- Persona-listener tone chip — shows the audience that switching
@@ -92,7 +91,7 @@
         </div>
 
         <!-- Single-button FSM control row (refactor 2026-05-20).
-             The old four-button row (開始對話/停止對話/開始錄音/停止錄音/強制送出/取消)
+             The old four-button row (start/stop/record/stop-record/force-send/cancel)
              collapsed into ONE primary button whose label is driven by the
              chat FSM state machine in standalone.js. -->
         <div class="controls">
@@ -101,9 +100,8 @@
                 <input type="checkbox" id="autoContinueChk" checked>
                 <span>Auto-continue</span>
             </label>
-            <button id="demoResetBtn" onclick="demoReset()" title="Demo reset — clear conversation, stop everything, restore active version, return to ready"
-                    style="background: transparent; color: #555; border: 1px solid #333; padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 0.75rem; margin-left: auto;">
-                ↺ reset
+            <button id="demoResetBtn" onclick="demoReset()" title="Clear chat, stop playback, return to ready">
+                ↺ Restart
             </button>
         </div>
 
@@ -126,7 +124,7 @@
             <div id="debugContent"></div>
         </div>
         <div class="keyboard-hint">
-            Shortcuts: <kbd>Space</kbd> Start/Send &nbsp;|&nbsp; <kbd>Esc</kbd> Interrupt &nbsp;|&nbsp; <kbd>Ctrl+K</kbd> Clear chat
+            Shortcuts: <kbd>Space</kbd> Start/Send &nbsp;|&nbsp; <kbd>Esc</kbd> Interrupt &nbsp;|&nbsp; <kbd>Ctrl+K</kbd> Restart
         </div>
     </div>
 

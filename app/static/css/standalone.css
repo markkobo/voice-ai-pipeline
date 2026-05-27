@@ -103,6 +103,91 @@
         .toast.error { background: #4a1a1a; color: #ff4444; border: 1px solid #ff4444; }
         .toast.info { background: #1a2a4a; color: #00ccff; border: 1px solid #00ccff; }
 
+        /* ---------- Header row (no more big clear button) ----------
+           Old layout had a giant "清除對話" button competing with the
+           H1 in the top-right. That button has been merged into the
+           ↺ 重新開始 control further down in .controls — the header
+           is now purely brand + tagline. */
+        .header-row { display: flex; justify-content: space-between; align-items: center; }
+
+        /* ---------- Version indicator row ----------
+           Dropdown grows to fill the row (was capped at 220px while a
+           refresh button got pushed to the far right by margin-left:auto,
+           leaving a wasteful gap). Refresh button is now a compact icon
+           right next to the dropdown, and version-info wraps to a new
+           visual layer via flex-basis if it doesn't fit. */
+        #versionIndicator {
+            background: #1a1a2e;
+            border-radius: 8px;
+            padding: 8px 12px;
+            margin-bottom: 12px;
+            font-size: 0.85rem;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        #versionIndicator .version-label { color: #888; white-space: nowrap; }
+        #versionIndicator #versionSelect {
+            flex: 1;
+            min-width: 120px;
+            background: #1a1a2e;
+            color: #00ccff;
+            border: 1px solid #333;
+            border-radius: 4px;
+            padding: 4px 8px;
+            font-size: 0.85rem;
+            width: auto;  /* override global select{width:100%} */
+        }
+        #versionIndicator .version-refresh {
+            background: #333;
+            color: #aaa;
+            border: none;
+            padding: 4px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            width: auto;  /* override global button{width:100%} */
+            line-height: 1;
+        }
+        #versionIndicator .version-refresh:hover { background: #444; color: #fff; }
+        #versionIndicator #versionInfo {
+            color: #666;
+            font-size: 0.75rem;
+            flex-basis: 100%;  /* wraps to its own line when present */
+        }
+        #versionIndicator #versionInfo:empty { display: none; }
+
+        /* ---------- Reset button (in .controls row) ----------
+           "↺ 重新開始" is the merged successor of the old big "清除對話"
+           button. Visible but visually secondary to the blue primary
+           speak button. Pushed to the right end of the controls row. */
+        #demoResetBtn {
+            background: transparent;
+            color: #555;
+            border: 1px solid #ccc;
+            padding: 6px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            margin-left: auto;
+            width: auto;  /* override global button{width:100%} */
+            white-space: nowrap;
+        }
+        #demoResetBtn:hover { background: #f0f0f0; color: #333; border-color: #999; }
+        body.demo-mode #demoResetBtn { color: #aab2c5; border-color: #2a3045; }
+        body.demo-mode #demoResetBtn:hover { background: rgba(200,158,250,0.08); color: #fff; border-color: #c89efa; }
+
+        /* Mobile (~375px): stack config items two-up via min-width, keep
+           refresh button adjacent to dropdown, allow reset to wrap. */
+        @media (max-width: 480px) {
+            .container { padding: 16px; }
+            h1 { font-size: 20px; }
+            .config-item { min-width: 100px; }
+            .controls { flex-wrap: wrap; }
+            #demoResetBtn { margin-left: auto; }
+        }
+
         /* System status bar styles moved to _status_bar.css (RFC_M6
            Phase 0-pre review #28). */
 

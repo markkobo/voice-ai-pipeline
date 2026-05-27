@@ -1143,8 +1143,12 @@ document.addEventListener('keydown', (e) => {
     }
     if (e.code === 'KeyK' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
-        clearConversation();
-        log('Ctrl+K: conversation cleared');
+        // Ctrl+K is the user-facing "重新開始" — same as the visible
+        // ↺ 重新開始 button. Full reset (kills TTS, cancels LLM, mic
+        // teardown, re-sends config) is the right behavior for a demo
+        // panic-button, not the lighter clearConversation() DOM wipe.
+        demoReset();
+        log('Ctrl+K: demo reset');
     }
 });
 
