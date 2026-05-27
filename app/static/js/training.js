@@ -645,11 +645,18 @@
             startBtn.disabled = totalDuration < 10;
         }
 
-        // Hide/show LoRA-rank field based on selected training type.
+        // Hide/show LoRA-rank field + experimental warning based on
+        // selected training type. The LoRA path is currently unstable
+        // (forward_sub_talker_finetune only reaches code_predictor) so
+        // we surface a warning when the user picks it. SFT is the
+        // recommended default. Deferred work: forward_talker_finetune.
         function onTrainingTypeChange() {
             const ttype = document.getElementById('trainingTypeSelect').value;
             const rankGroup = document.getElementById('rankGroup');
-            if (rankGroup) rankGroup.style.display = (ttype === 'lora') ? '' : 'none';
+            const warning = document.getElementById('loraWarning');
+            const isLora = (ttype === 'lora');
+            if (rankGroup) rankGroup.style.display = isLora ? '' : 'none';
+            if (warning) warning.style.display = isLora ? '' : 'none';
         }
 
         // ==================== START TRAINING ====================

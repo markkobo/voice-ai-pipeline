@@ -99,7 +99,13 @@ class _NullVramCoordinator:
 # ---------------------------------------------------------------------------
 # Constraints exposed to the API layer for use in Pydantic models.
 # ---------------------------------------------------------------------------
-DEFAULT_LORA_LEARNING_RATE = 1e-4
+# LoRA's 1e-4 was the original default but caused unconverged loss
+# (~7.0 plateau) and runaway max-token generation in every 2026-05-25+
+# LoRA run. Dropped to 1e-5 for less-catastrophic moves; combined with
+# the higher default rank (32 in the UI) it improves chances of
+# convergence but does NOT fully fix the underlying forward-path issue.
+# LoRA remains experimental until forward_talker_finetune lands.
+DEFAULT_LORA_LEARNING_RATE = 1e-5
 DEFAULT_SFT_LEARNING_RATE = 1e-6
 TIME_PER_AUDIO_SECOND = 0.5
 TRAINING_OVERHEAD_FACTOR = 1.3
