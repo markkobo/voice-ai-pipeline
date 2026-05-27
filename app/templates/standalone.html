@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="zh-TW">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Voice AI — 小S</title>
+    <title>Voice AI — EverHome Lab</title>
     <link rel="stylesheet" href="/static/css/_status_bar.css">
     <link rel="stylesheet" href="/static/css/standalone.css">
     <script src="/static/js/_status_bar.js" defer></script>
@@ -19,8 +19,8 @@
         <div class="splash-inner">
             <div class="splash-logo">EverHome</div>
             <div class="splash-tagline">A Time Capsule You Can Talk To</div>
-            <div class="splash-tagline-cn">屬於家的，可以對話的時光膠囊</div>
-            <button class="splash-start" onclick="dismissSplash(); event.stopPropagation();">點擊開始 · Click to Start</button>
+            <div class="splash-tagline-cn">Memories that talk back</div>
+            <button class="splash-start" onclick="dismissSplash(); event.stopPropagation();">Click to Start</button>
         </div>
     </div>
 
@@ -28,53 +28,53 @@
         <div style="display: flex; justify-content: space-between; align-items: center;">
             <div>
                 <h1>
-                    <span class="brand-default">Voice AI — 小S</span>
+                    <span class="brand-default">Voice AI — EverHome Lab</span>
                     <span class="brand-demo">EverHome</span>
                     <span id="uiVersion" style="font-size:12px;color:#888">[v27]</span>
                 </h1>
                 <p class="subtitle">
-                    <span class="brand-default">選擇對象，按一下開始對話</span>
+                    <span class="brand-default">Pick a listener, tap to start talking</span>
                     <span class="brand-demo">Talk to your time capsule</span>
                 </p>
             </div>
-            <button id="clearBtn" onclick="clearConversation()" style="background:#555;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:13px;">🗑 清除對話</button>
+            <button id="clearBtn" onclick="clearConversation()" style="background:#555;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:13px;">🗑 Clear Chat</button>
         </div>
         <div id="status" class="status disconnected">Disconnected</div>
 
         <div class="config-row">
             <div class="config-item">
-                <label>對象 (Listener)</label>
+                <label>Listener</label>
                 <select id="listener">
-                    <option value="child">小孩</option>
-                    <option value="mom">媽媽</option>
-                    <option value="friend">朋友</option>
-                    <option value="default" selected>一般</option>
+                    <option value="child">Child</option>
+                    <option value="mom">Mom</option>
+                    <option value="friend">Friend</option>
+                    <option value="default" selected>Default</option>
                 </select>
             </div>
             <div class="config-item">
-                <label>人格 (Persona)</label>
+                <label>Persona</label>
                 <select id="persona">
-                    <option value="xiao_s" selected>小S</option>
-                    <option value="caregiver">照護者</option>
-                    <option value="elder_gentle">長輩-溫柔</option>
-                    <option value="elder_playful">長輩-活潑</option>
+                    <option value="xiao_s" selected>Xiao S</option>
+                    <option value="caregiver">Caregiver</option>
+                    <option value="elder_gentle">Elder — Gentle</option>
+                    <option value="elder_playful">Elder — Playful</option>
                 </select>
             </div>
             <div class="config-item">
-                <label>VAD 靈敏度</label>
+                <label>Voice Detection Sensitivity</label>
                 <select id="vad" onchange="onVadChange()">
-                    <option value="low">低</option>
-                    <option value="medium" selected>中</option>
-                    <option value="high">高</option>
+                    <option value="low">Low</option>
+                    <option value="medium" selected>Medium</option>
+                    <option value="high">High</option>
                 </select>
             </div>
         </div>
 
         <!-- Active version indicator -->
         <div id="versionIndicator" style="background: #1a1a2e; border-radius: 8px; padding: 8px 14px; margin-bottom: 12px; font-size: 0.85rem; display: flex; align-items: center; gap: 8px;">
-            <span style="color: #888;">🎙️ 聲音版本:</span>
+            <span style="color: #888;">🎙️ Voice:</span>
             <select id="versionSelect" onchange="onVersionChange()" style="background: #1a1a2e; color: #00ccff; border: 1px solid #333; border-radius: 4px; padding: 4px 8px; font-size: 0.85rem; max-width: 220px;">
-                <option value="">系統預設</option>
+                <option value="">System Default</option>
             </select>
             <span id="versionInfo" style="color: #666; font-size: 0.75rem;"></span>
             <button onclick="loadVersions()" style="background: #333; color: #aaa; border: none; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 0.75rem; margin-left: auto;">🔄</button>
@@ -85,11 +85,10 @@
              talking to. Updates instantly on dropdown change via
              onListenerChange / onPersonaChange handlers. -->
         <div id="toneChip" style="background: linear-gradient(135deg, #2a1d3a, #1d2a3a); border-radius: 20px; padding: 6px 14px; margin-bottom: 12px; font-size: 0.85rem; display: inline-flex; align-items: center; gap: 6px; color: #c89efa;">
-            <span style="opacity: 0.7;">💬 正在以</span>
+            <span style="opacity: 0.7;">💬 Speaking as</span>
             <span id="toneChipPersona" style="font-weight: 600; color: #fff;">—</span>
-            <span style="opacity: 0.7;">的口氣對</span>
+            <span style="opacity: 0.7;">to</span>
             <span id="toneChipListener" style="font-weight: 600; color: #fff;">—</span>
-            <span style="opacity: 0.7;">說話</span>
         </div>
 
         <!-- Single-button FSM control row (refactor 2026-05-20).
@@ -97,10 +96,10 @@
              collapsed into ONE primary button whose label is driven by the
              chat FSM state machine in standalone.js. -->
         <div class="controls">
-            <button id="primaryBtn" class="primary" disabled onclick="onPrimaryClick()">連線中…</button>
-            <label class="auto-continue-toggle" title="AI 回答結束後自動再次開啟麥克風，免按按鈕就能繼續對話">
+            <button id="primaryBtn" class="primary" disabled onclick="onPrimaryClick()">Connecting…</button>
+            <label class="auto-continue-toggle" title="Re-open the mic automatically after the AI finishes — no button needed to keep talking">
                 <input type="checkbox" id="autoContinueChk" checked>
-                <span>自動繼續對話</span>
+                <span>Auto-continue</span>
             </label>
             <button id="demoResetBtn" onclick="demoReset()" title="Demo reset — clear conversation, stop everything, restore active version, return to ready"
                     style="background: transparent; color: #555; border: 1px solid #333; padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 0.75rem; margin-left: auto;">
@@ -109,25 +108,25 @@
         </div>
 
         <div class="conversation" id="conversation">
-            <div class="placeholder">按 [🎤 開始說話] 或空白鍵開始對話...</div>
+            <div class="placeholder">Press [🎤 Start Speaking] or Space to begin...</div>
         </div>
 
         <!-- Thinking indicator (hidden by default) -->
         <div id="thinkingIndicator" style="display: none; margin-bottom: 16px;">
             <div class="thinking">
-                <span>AI 思考中</span>
+                <span>AI thinking</span>
                 <div class="thinking-dot"></div>
                 <div class="thinking-dot"></div>
                 <div class="thinking-dot"></div>
             </div>
         </div>
 
-        <div class="debug-toggle" onclick="toggleDebug()">📋 Debug Panel (點擊展開)</div>
+        <div class="debug-toggle" onclick="toggleDebug()">📋 Debug Panel (click to expand)</div>
         <div id="debug" class="debug">
             <div id="debugContent"></div>
         </div>
         <div class="keyboard-hint">
-            快捷鍵: <kbd>Space</kbd> 開始/送出 &nbsp;|&nbsp; <kbd>Esc</kbd> 中斷 &nbsp;|&nbsp; <kbd>Ctrl+K</kbd> 清除對話
+            Shortcuts: <kbd>Space</kbd> Start/Send &nbsp;|&nbsp; <kbd>Esc</kbd> Interrupt &nbsp;|&nbsp; <kbd>Ctrl+K</kbd> Clear chat
         </div>
     </div>
 

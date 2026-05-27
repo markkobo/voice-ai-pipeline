@@ -39,7 +39,7 @@
 
         // ==================== LOGGING ====================
         function log(message, level = 'info', component = 'UI') {
-            const time = new Date().toLocaleTimeString('zh-TW', { hour12: false });
+            const time = new Date().toLocaleTimeString('en-US', { hour12: false });
             const entry = document.createElement('div');
             entry.className = `log-entry ${level}`;
             entry.innerHTML = `<span class="log-time">${time}</span><span class="log-component">[${component}]</span> ${message}`;
@@ -200,17 +200,17 @@
             const id = e.idInput.value.trim();
 
             if (!name) {
-                _setModalError('請輸入名稱', 'name');
+                _setModalError('Please enter a name', 'name');
                 e.nameInput.focus();
                 return;
             }
             if (!id) {
-                _setModalError('請輸入 ID（或先輸入名稱以自動產生）', 'id');
+                _setModalError('Please enter an ID (or enter a name first to auto-generate)', 'id');
                 e.idInput.focus();
                 return;
             }
             if (!_ID_PATTERN.test(id)) {
-                _setModalError('ID 格式不正確：只能小寫字母、數字、底線；以字母開頭', 'id');
+                _setModalError('Invalid ID format: lowercase letters, digits, and underscores only; must start with a letter', 'id');
                 e.idInput.focus();
                 return;
             }
@@ -225,13 +225,13 @@
                     default_emotion: e.emotion.value,
                 });
                 if (result && result.ok === false) {
-                    _setModalError(result.message || '新增失敗', result.field || null);
+                    _setModalError(result.message || 'Failed to add', result.field || null);
                     e.confirm.disabled = false;
                     return;
                 }
                 closeModal();
             } catch (err) {
-                _setModalError('新增失敗: ' + (err && err.message ? err.message : err), null);
+                _setModalError('Failed to add: ' + (err && err.message ? err.message : err), null);
                 e.confirm.disabled = false;
             }
         }
@@ -298,7 +298,7 @@
 
         function buildListenerFilter() {
             const current = listenerFilter.value;
-            listenerFilter.innerHTML = '<option value="">全部聆聽者</option>';
+            listenerFilter.innerHTML = '<option value="">All Listeners</option>';
             listeners.forEach(l => {
                 const opt = document.createElement('option');
                 opt.value = l.listener_id;
@@ -335,7 +335,7 @@
                 const activeData = await activeRes.json();
                 const activeVersionId = activeData.version?.version_id;
 
-                versionSelect.innerHTML = '<option value="">系統預設</option>';
+                versionSelect.innerHTML = '<option value="">System Default</option>';
                 (versionsData.versions || []).forEach(v => {
                     if (v.status === 'ready') {
                         const label = v.nickname ? `${v.version_id} (${escapeHtml(v.nickname)})` : v.version_id;
@@ -371,7 +371,7 @@
                 }
             } catch (e) {
                 log(`Failed to load recordings: ${e.message}`, 'error', 'UI');
-                treeView.innerHTML = '<div class="empty-state">載入失敗</div>';
+                treeView.innerHTML = '<div class="empty-state">Failed to load</div>';
             }
         }
 
@@ -396,7 +396,7 @@
         // ==================== TREE VIEW RENDERING ====================
         function renderTree(recordings) {
             if (recordings.length === 0) {
-                treeView.innerHTML = '<div class="empty-state">尚無錄音</div>';
+                treeView.innerHTML = '<div class="empty-state">No recordings yet</div>';
                 return;
             }
 
@@ -416,7 +416,7 @@
         function renderRecordingFolder(r) {
             const speakers = r.speaker_segments || [];
             const statusClass = r.status === 'processed' ? 'ok' : r.status === 'failed' ? 'failed' : r.status === 'processing' ? 'processing' : '';
-            const statusText = r.status === 'raw' ? '待處理' : r.status === 'processed' ? '已完成' : r.status === 'processing' ? '處理中' : r.status === 'failed' ? '失敗' : r.status;
+            const statusText = r.status === 'raw' ? 'Pending' : r.status === 'processed' ? 'Completed' : r.status === 'processing' ? 'Processing' : r.status === 'failed' ? 'Failed' : r.status;
 
             const listenerName = getListenerName(r.listener_id);
             const personaName = getPersonaName(r.persona_id);
@@ -479,11 +479,11 @@
                         </div>
                         <div class="recording-meta">
                             <span>⏱ ${durationText}</span>
-                            ${uniqueSpeakers.length > 0 ? `<span>🔊 ${uniqueSpeakers.length} 說話者</span>` : ''}
+                            ${uniqueSpeakers.length > 0 ? `<span>🔊 ${uniqueSpeakers.length} speakers</span>` : ''}
                         </div>
                         <div class="recording-actions" onclick="event.stopPropagation()">
-                            ${canPlay ? `<button class="action-btn play" id="play-full-${r.recording_id}" onclick="toggleFullRecording('${r.recording_id}')" title="播放全部">⏵</button>` : ''}
-                            ${r.status === 'processed' || r.status === 'raw' || r.status === 'failed' ? `<button class="action-btn parse" onclick="parseRecording('${r.recording_id}')">${r.status === 'failed' ? '重新解析' : r.status === 'processed' ? '重新解析' : '解析'}</button>` : ''}
+                            ${canPlay ? `<button class="action-btn play" id="play-full-${r.recording_id}" onclick="toggleFullRecording('${r.recording_id}')" title="Play all">⏵</button>` : ''}
+                            ${r.status === 'processed' || r.status === 'raw' || r.status === 'failed' ? `<button class="action-btn parse" onclick="parseRecording('${r.recording_id}')">${r.status === 'failed' ? 'Re-process' : r.status === 'processed' ? 'Re-process' : 'Process'}</button>` : ''}
                             ${r.status === 'processing' ? `<span class="loading"></span>` : ''}
                             <button class="action-btn delete" onclick="confirmDeleteRecording('${r.recording_id}')">✕</button>
                         </div>
@@ -491,17 +491,17 @@
                     <div class="transcription-container" id="transcription-${r.recording_id}">
                         <div class="transcription-header" onclick="toggleTranscription('${r.recording_id}')">
                             <span class="expand-icon">▶</span>
-                            <span class="transcription-label">📝 轉譯稿</span>
-                            ${r.transcription?.text ? `<span class="transcription-preview">${r.transcription.text.substring(0, 60)}${r.transcription.text.length > 60 ? '...' : ''}</span>` : '<span style="color:#888">無轉譯稿</span>'}
+                            <span class="transcription-label">📝 Transcript</span>
+                            ${r.transcription?.text ? `<span class="transcription-preview">${r.transcription.text.substring(0, 60)}${r.transcription.text.length > 60 ? '...' : ''}</span>` : '<span style="color:#888">No transcript</span>'}
                             ${r.transcription?.confidence ? `<span class="transcription-confidence">${(r.transcription.confidence * 100).toFixed(0)}%</span>` : ''}
                         </div>
                         <div class="transcription-content" id="transcription-content-${r.recording_id}" style="display:none;">
-                            <div class="transcription-text">${r.transcription?.text || '無轉譯稿'}</div>
+                            <div class="transcription-text">${r.transcription?.text || 'No transcript'}</div>
                         </div>
                     </div>
                     <div class="segments-container" id="segments-${r.recording_id}">
                         ${r.status === 'processing' ? renderProcessingState(r) : ''}
-                        ${uniqueSpeakers.length === 0 && r.status !== 'processing' ? '<div style="padding:12px;color:#888;font-size:0.85rem;">尚無分段</div>' : ''}
+                        ${uniqueSpeakers.length === 0 && r.status !== 'processing' ? '<div style="padding:12px;color:#888;font-size:0.85rem;">No segments yet</div>' : ''}
                         ${uniqueSpeakers.map(sg => renderSpeakerRow(r, sg)).join('')}
                     </div>
                 </div>
@@ -524,7 +524,7 @@
                 ? (quality >= 0.8 ? 'quality-excellent' : quality >= 0.6 ? 'quality-good' : quality >= 0.4 ? 'quality-fair' : 'quality-poor')
                 : '';
             const qualityLabel = quality !== null
-                ? (quality >= 0.8 ? '優秀' : quality >= 0.6 ? '良好' : quality >= 0.4 ? '一般' : '惡劣')
+                ? (quality >= 0.8 ? 'Excellent' : quality >= 0.6 ? 'Good' : quality >= 0.4 ? 'Fair' : 'Poor')
                 : '';
             const qualityBadge = quality !== null
                 ? `<span class="quality-badge ${qualityClass}">${qualityLabel} ${(quality * 100).toFixed(0)}%</span>`
@@ -538,7 +538,7 @@
             let voiceAuditBadge = '';
             if (va && va.level) {
                 const level = va.level;
-                const label = level === 'good' ? '✓ 音質良好' : level === 'marginal' ? '⚠ 音質勉強' : level === 'bad' ? '✕ 不適合訓練' : '?';
+                const label = level === 'good' ? '✓ Good Audio' : level === 'marginal' ? '⚠ Marginal Audio' : level === 'bad' ? '✕ Not Suitable for Training' : '?';
                 const cls = level === 'good' ? 'va-good' : level === 'marginal' ? 'va-marginal' : 'va-bad';
                 const m = va.metrics || {};
                 const warns = (va.warnings || []).join('\n');
@@ -556,27 +556,27 @@
                     <span class="speaker-icon">👤</span>
                     <div class="speaker-info">
                         <span class="speaker-name">${speakerId}</span>
-                        <span class="speaker-segments-count">${segmentCount} 段</span>
+                        <span class="speaker-segments-count">${segmentCount} segments</span>
                         ${qualityBadge}
                         ${voiceAuditBadge}
                         ${transcript ? `<span class="speaker-transcript">${transcript}${transcript.length >= 100 ? '...' : ''}</span>` : ''}
                     </div>
                     <div class="segment-dropdowns">
                         <div class="dropdown-group">
-                            <label>人格</label>
+                            <label>Persona</label>
                             <select onchange="updateSegment('${r.recording_id}', '${speakerId}', 'persona_id', this.value)">
                                 <option value="">--</option>
                                 ${personas.map(p => `<option value="${p.persona_id}" ${p.persona_id === personaId ? 'selected' : ''}>${escapeHtml(p.name)}</option>`).join('')}
                             </select>
-                            <button class="add-btn" onclick="openAddPersonaModal()" title="新增人格">+</button>
+                            <button class="add-btn" onclick="openAddPersonaModal()" title="Add Persona">+</button>
                         </div>
                         <div class="dropdown-group">
-                            <label>對</label>
+                            <label>To</label>
                             <select onchange="updateSegment('${r.recording_id}', '${speakerId}', 'listener_id', this.value)">
                                 <option value="">--</option>
                                 ${listeners.map(l => `<option value="${l.listener_id}" ${l.listener_id === listenerId ? 'selected' : ''}>${escapeHtml(l.name)}</option>`).join('')}
                             </select>
-                            <button class="add-btn" onclick="openAddListenerModal()" title="新增聆聽者">+</button>
+                            <button class="add-btn" onclick="openAddListenerModal()" title="Add Listener">+</button>
                         </div>
                     </div>
                     <span class="segment-duration">${duration.toFixed(1)}s</span>
@@ -595,7 +595,7 @@
 
         function renderProcessingState(r) {
             const steps = r.processing_steps || {};
-            const stepNames = { denoise: '降噪', enhance: '增強', diarize: '標記說話者', transcribe: '轉錄' };
+            const stepNames = { denoise: 'Denoise', enhance: 'Enhance', diarize: 'Speaker diarization', transcribe: 'Transcribe' };
             const stepOrder = ['denoise', 'enhance', 'diarize', 'transcribe'];
             let currentStep = '';
             for (const step of stepOrder) {
@@ -617,30 +617,30 @@
                 }
             }
             const retryBtn = stuck
-                ? `<button class="action-btn parse" style="margin-left:8px" onclick="retryStuckRecording('${r.recording_id}')" title="處理已停滯，點擊重試">🔄 重試</button>`
+                ? `<button class="action-btn parse" style="margin-left:8px" onclick="retryStuckRecording('${r.recording_id}')" title="Processing stalled — click to retry">🔄 Retry</button>`
                 : '';
 
             return `
                 <div class="processing-state">
                     <span class="loading"></span>
-                    <span>處理中: ${currentStep || '準備中'}...</span>
+                    <span>Processing: ${currentStep || 'preparing'}...</span>
                     ${retryBtn}
                 </div>
             `;
         }
 
         async function retryStuckRecording(recordingId) {
-            if (gateIfTraining('重試錄音')) return;
+            if (gateIfTraining('retry recording')) return;
             log(`Retrying stuck recording: ${recordingId}`, 'info', 'PIPELINE');
 
-            // Optimistic local update — swap the "重試" affordance for a
+            // Optimistic local update — swap the retry affordance for a
             // fresh status string so we don't re-fire on the very next
             // poll tick while the server is still updating updated_at.
             const el = document.getElementById(`rec-${recordingId}`);
             if (el) {
                 const processingState = el.querySelector('.processing-state');
                 if (processingState) {
-                    processingState.innerHTML = '<span class="loading"></span><span>處理中: 重新啟動...</span>';
+                    processingState.innerHTML = '<span class="loading"></span><span>Processing: restarting...</span>';
                 }
             }
 
@@ -653,13 +653,13 @@
                     throw new Error(err.detail || `HTTP ${response.status}`);
                 }
                 log(`Retry triggered for ${recordingId}`, 'info', 'PIPELINE');
-                showToast('已重新啟動處理', 'success');
+                showToast('Processing restarted', 'success');
                 // Re-fetch so the row updates with fresh server state
                 // (status=processing + new updated_at → button hidden).
                 loadRecordings();
             } catch (e) {
                 log(`Retry failed: ${e.message}`, 'error', 'PIPELINE');
-                showToast('重試失敗: ' + e.message, 'error');
+                showToast('Retry failed: ' + e.message, 'error');
                 // Re-render so the retry button reappears for another try.
                 loadRecordings();
             }
@@ -686,20 +686,20 @@
                     </div>
                     <div class="segment-dropdowns">
                         <div class="dropdown-group">
-                            <label>人格</label>
+                            <label>Persona</label>
                             <select onchange="updateSegment('${r.recording_id}', '${speakerId}', 'persona_id', this.value)">
                                 <option value="">--</option>
                                 ${personas.map(p => `<option value="${p.persona_id}" ${p.persona_id === personaId ? 'selected' : ''}>${escapeHtml(p.name)}</option>`).join('')}
                             </select>
-                            <button class="add-btn" onclick="openAddPersonaModal()" title="新增人格">+</button>
+                            <button class="add-btn" onclick="openAddPersonaModal()" title="Add Persona">+</button>
                         </div>
                         <div class="dropdown-group">
-                            <label>對</label>
+                            <label>To</label>
                             <select onchange="updateSegment('${r.recording_id}', '${speakerId}', 'listener_id', this.value)">
                                 <option value="">--</option>
                                 ${listeners.map(l => `<option value="${l.listener_id}" ${l.listener_id === listenerId ? 'selected' : ''}>${escapeHtml(l.name)}</option>`).join('')}
                             </select>
-                            <button class="add-btn" onclick="openAddListenerModal()" title="新增聆聽者">+</button>
+                            <button class="add-btn" onclick="openAddListenerModal()" title="Add Listener">+</button>
                         </div>
                     </div>
                     <span class="segment-duration">${duration.toFixed(1)}s</span>
@@ -718,13 +718,13 @@
         }
 
         function getPersonaName(personaId) {
-            if (!personaId) return '未設定';
+            if (!personaId) return 'Unset';
             const p = personas.find(x => x.persona_id === personaId);
             return p ? p.name : personaId;
         }
 
         function getListenerName(listenerId) {
-            if (!listenerId) return '未設定';
+            if (!listenerId) return 'Unset';
             const l = listeners.find(x => x.listener_id === listenerId);
             return l ? l.name : listenerId;
         }
@@ -829,13 +829,13 @@
 
                     if (playBtn) {
                         playBtn.textContent = '■';
-                        playBtn.title = '停止播放';
+                        playBtn.title = 'Stop';
                     }
                     activeAudio.play();
                 })
                 .catch(e => {
                     log(`Failed to play segment: ${e.message}`, 'error', 'PLAYBACK');
-                    showToast('播放失敗: ' + e.message, 'error');
+                    showToast('Playback failed: ' + e.message, 'error');
                 });
         }
 
@@ -857,7 +857,7 @@
             const progressFill = document.getElementById(`progress-fill-${recordingId}-${speakerId}`);
             if (playBtn) {
                 playBtn.textContent = '▶';
-                playBtn.title = '播放';
+                playBtn.title = 'Play';
             }
             if (progressFill) progressFill.style.width = '0%';
         }
@@ -900,7 +900,7 @@
             const btn = document.getElementById(`play-full-${recordingId}`);
             if (btn) {
                 btn.textContent = '⏵';
-                btn.title = '播放全部';
+                btn.title = 'Play all';
             }
         }
 
@@ -933,7 +933,7 @@
                     const btn = document.getElementById(`play-full-${recordingId}`);
                     if (btn) {
                         btn.textContent = '■';
-                        btn.title = '停止播放';
+                        btn.title = 'Stop';
                     }
 
                     activeAudio.addEventListener('ended', () => {
@@ -949,11 +949,11 @@
                     });
 
                     activeAudio.play();
-                    showToast('開始播放', 'info');
+                    showToast('Playback started', 'info');
                 })
                 .catch(e => {
                     log(`Playback failed: ${e.message}`, 'error', 'PLAYBACK');
-                    showToast('播放失敗: ' + e.message, 'error');
+                    showToast('Playback failed: ' + e.message, 'error');
                 });
         }
 
@@ -990,16 +990,16 @@
                     }
                 }
 
-                showToast('已更新', 'success');
+                showToast('Updated', 'success');
             } catch (e) {
                 log(`Update failed: ${e.message}`, 'error', 'UI');
-                showToast('更新失敗: ' + e.message, 'error');
+                showToast('Update failed: ' + e.message, 'error');
             }
         }
 
         // ==================== PARSE / RE-PARSE ====================
         async function parseRecording(recordingId) {
-            if (gateIfTraining('解析錄音')) return;
+            if (gateIfTraining('process recording')) return;
             log(`Parsing recording: ${recordingId}`, 'info', 'PIPELINE');
 
             const el = document.getElementById(`rec-${recordingId}`);
@@ -1019,14 +1019,14 @@
 
                 const result = await response.json();
                 log(`Processing started: ${result.status} (polling for completion...)`, 'info', 'PIPELINE');
-                showToast('開始解析錄音...', 'success');
+                showToast('Processing recording...', 'success');
 
                 // Poll for completion
                 await pollProcessingStatus(recordingId, actionsDiv, originalHTML);
 
             } catch (e) {
                 log(`Parse failed: ${e.message}`, 'error', 'PIPELINE');
-                showToast('解析失敗: ' + e.message, 'error');
+                showToast('Processing failed: ' + e.message, 'error');
                 actionsDiv.innerHTML = originalHTML;
             }
         }
@@ -1076,14 +1076,14 @@
                         log(`Parse complete! Found ${rec.speaker_segments?.length || 0} segments`, 'info', 'PIPELINE');
                         loadRecordings();
                         if (rec.speaker_segments?.length > 0) {
-                            showToast(`解析完成！找到 ${rec.speaker_segments.length} 個片段`, 'success');
+                            showToast(`Done! Found ${rec.speaker_segments.length} segments`, 'success');
                         } else {
-                            showToast('解析完成但沒有分段', 'warning');
+                            showToast('Done, but no segments found', 'warning');
                         }
                         return;
                     } else if (rec.status === 'failed') {
                         log(`Parse failed: recording status is failed`, 'error', 'PIPELINE');
-                        showToast('解析失敗', 'error');
+                        showToast('Processing failed', 'error');
                         actionsDiv.innerHTML = originalHTML;
                         return;
                     }
@@ -1095,7 +1095,7 @@
             }
 
             log(`Parse timeout after ${maxWait}s`, 'error', 'PIPELINE');
-            showToast('解析超時', 'error');
+            showToast('Processing timed out', 'error');
             actionsDiv.innerHTML = originalHTML;
         }
 
@@ -1105,9 +1105,9 @@
             const actionsDiv = el.querySelector('.recording-actions');
             actionsDiv.innerHTML = `
                 <div class="delete-confirm">
-                    <span>確認刪除？</span>
-                    <button class="action-btn delete" onclick="deleteRecording('${recordingId}')">刪除</button>
-                    <button class="action-btn cancel-btn" onclick="loadRecordings()">取消</button>
+                    <span>Confirm delete?</span>
+                    <button class="action-btn delete" onclick="deleteRecording('${recordingId}')">Delete</button>
+                    <button class="action-btn cancel-btn" onclick="loadRecordings()">Cancel</button>
                 </div>
             `;
         }
@@ -1117,11 +1117,11 @@
             try {
                 const response = await fetch(`/api/recordings/${recordingId}`, { method: 'DELETE' });
                 if (!response.ok) throw new Error('Delete failed');
-                showToast('已刪除', 'success');
+                showToast('Deleted', 'success');
                 loadRecordings();
             } catch (e) {
                 log(`Delete failed: ${e.message}`, 'error', 'UI');
-                showToast('刪除失敗: ' + e.message, 'error');
+                showToast('Delete failed: ' + e.message, 'error');
             }
         }
 
@@ -1135,24 +1135,24 @@
             const apiMsg = (body && (body.message || body.detail)) || '';
             switch (code) {
                 case 'duplicate_id':
-                    return { message: 'ID 重複，請改用其他 ID', field: 'id' };
+                    return { message: 'ID already exists — please choose a different one', field: 'id' };
                 case 'invalid_id_format':
-                    return { message: 'ID 格式不正確：只能小寫字母、數字、底線；以字母開頭', field: 'id' };
+                    return { message: 'Invalid ID format: lowercase letters, digits, and underscores only; must start with a letter', field: 'id' };
                 case 'invalid_emotion':
-                    return { message: '無效的情緒值', field: null };
+                    return { message: 'Invalid emotion value', field: null };
                 case 'fixed_persona_readonly':
-                    return { message: '此 ID 為系統固定人格，無法建立', field: 'id' };
+                    return { message: 'This ID is a built-in persona and cannot be created', field: 'id' };
             }
-            if (status === 400) return { message: apiMsg || '格式不正確', field: null };
-            if (status === 409) return { message: apiMsg || 'ID 重複', field: 'id' };
-            if (status === 422) return { message: apiMsg || '欄位驗證失敗', field: null };
-            return { message: apiMsg || `新增失敗 (HTTP ${status})`, field: null };
+            if (status === 400) return { message: apiMsg || 'Invalid input', field: null };
+            if (status === 409) return { message: apiMsg || 'ID already exists', field: 'id' };
+            if (status === 422) return { message: apiMsg || 'Field validation failed', field: null };
+            return { message: apiMsg || `Failed to add (HTTP ${status})`, field: null };
         }
 
         function openAddPersonaModal() {
             openModal({
                 type: 'persona',
-                title: '新增人格',
+                title: 'Add Persona',
                 onSubmit: async ({ name, id, is_family }) => {
                     let res, body;
                     try {
@@ -1163,7 +1163,7 @@
                         });
                         body = await res.json().catch(() => ({}));
                     } catch (e) {
-                        return { ok: false, message: '網路錯誤: ' + e.message };
+                        return { ok: false, message: 'Network error: ' + e.message };
                     }
                     if (!res.ok) {
                         return { ok: false, ...(_modalErrorFromApi(res.status, body)) };
@@ -1175,7 +1175,7 @@
                     personaSelect.value = newId;
                     // Refresh per-segment dropdowns so the new option appears.
                     filterAndRender();
-                    showToast('新增成功', 'success');
+                    showToast('Added', 'success');
                     log(`Persona created: ${newId} (${name})`, 'info', 'UI');
                     return { ok: true };
                 },
@@ -1185,7 +1185,7 @@
         function openAddListenerModal() {
             openModal({
                 type: 'listener',
-                title: '新增聆聽者',
+                title: 'Add Listener',
                 defaults: { is_family: false, default_emotion: '溫和' },
                 onSubmit: async ({ name, id, is_family, default_emotion }) => {
                     let res, body;
@@ -1202,7 +1202,7 @@
                         });
                         body = await res.json().catch(() => ({}));
                     } catch (e) {
-                        return { ok: false, message: '網路錯誤: ' + e.message };
+                        return { ok: false, message: 'Network error: ' + e.message };
                     }
                     if (!res.ok) {
                         return { ok: false, ...(_modalErrorFromApi(res.status, body)) };
@@ -1213,7 +1213,7 @@
                     buildRecorderDropdowns();
                     listenerSelect.value = newId;
                     filterAndRender();
-                    showToast('新增成功', 'success');
+                    showToast('Added', 'success');
                     log(`Listener created: ${newId} (${name})`, 'info', 'UI');
                     return { ok: true };
                 },
@@ -1289,8 +1289,8 @@
 
                 recBtn.classList.add('recording');
                 recBtn.querySelector('#recIcon').textContent = '■';
-                recBtn.querySelector('#recText').textContent = '停止錄音';
-                qualityIndicator.textContent = '錄音中...';
+                recBtn.querySelector('#recText').textContent = 'Stop Recording';
+                qualityIndicator.textContent = 'Recording...';
 
                 durationInterval = setInterval(() => {
                     const elapsed = Math.floor((Date.now() - startTime) / 1000);
@@ -1307,7 +1307,7 @@
                 log('Recording started', 'info', 'RECORDING');
             } catch (e) {
                 log(`Failed to start recording: ${e.message}`, 'error', 'RECORDING');
-                alert('無法訪問麥克風: ' + e.message);
+                alert('Could not access microphone: ' + e.message);
             }
         }
 
@@ -1329,16 +1329,16 @@
             dbLevel.textContent = db > -60 ? `${db.toFixed(1)} dB` : '-∞ dB';
 
             if (db > -12 && db < 0) {
-                qualityIndicator.textContent = '✓ 音量良好';
+                qualityIndicator.textContent = '✓ Good level';
                 qualityIndicator.style.color = '#00ff88';
             } else if (db >= 0) {
-                qualityIndicator.textContent = '⚠ 音量太大';
+                qualityIndicator.textContent = '⚠ Too loud';
                 qualityIndicator.style.color = '#ff4444';
             } else if (db < -30) {
-                qualityIndicator.textContent = '⚠ 音量太小';
+                qualityIndicator.textContent = '⚠ Too quiet';
                 qualityIndicator.style.color = '#ffcc00';
             } else {
-                qualityIndicator.textContent = '錄音中...';
+                qualityIndicator.textContent = 'Recording...';
                 qualityIndicator.style.color = '#888';
             }
 
@@ -1370,11 +1370,11 @@
 
             recBtn.classList.remove('recording');
             recBtn.querySelector('#recIcon').textContent = '●';
-            recBtn.querySelector('#recText').textContent = '開始錄音';
+            recBtn.querySelector('#recText').textContent = 'Start Recording';
             duration.textContent = '00:00';
             dbMeterFill.style.width = '0%';
             dbLevel.textContent = '-∞ dB';
-            qualityIndicator.textContent = '等待錄音...';
+            qualityIndicator.textContent = 'Waiting for recording...';
             qualityIndicator.style.color = '#888';
         }
 
@@ -1403,18 +1403,18 @@
 
                 const result = await response.json();
                 log(`Upload complete: recording_id=${result.recording_id}`, 'info', 'UPLOAD');
-                showToast('錄音上傳成功！正在處理...', 'success');
+                showToast('Recording uploaded — processing...', 'success');
                 loadRecordings();
                 await triggerProcessing(result.recording_id);
 
             } catch (e) {
                 log(`Upload failed: ${e.message}`, 'error', 'UPLOAD');
-                showToast('上傳失敗: ' + e.message, 'error');
+                showToast('Upload failed: ' + e.message, 'error');
             }
         }
 
         async function triggerProcessing(recordingId) {
-            if (gateIfTraining('處理錄音')) return;
+            if (gateIfTraining('process recording')) return;
             log(`Triggering processing: ${recordingId}`, 'info', 'PIPELINE');
             try {
                 const response = await fetch(`/api/recordings/${recordingId}/process`, {
@@ -1430,7 +1430,7 @@
         async function triggerBackup() {
             const btn = document.getElementById('backupBtn');
             btn.disabled = true;
-            btn.textContent = '備份中...';
+            btn.textContent = 'Backing up...';
             log('Starting R2 backup...', 'info', 'BACKUP');
 
             try {
@@ -1439,10 +1439,10 @@
 
                 if (result.status === 'timeout') {
                     log(`Backup timeout: ${result.message}`, 'error', 'BACKUP');
-                    showToast('備份超時！', 'error');
+                    showToast('Backup timed out', 'error');
                 } else if (result.status === 'success') {
                     log(`Backup complete! Lines: ${result.total_lines}`, 'info', 'BACKUP');
-                    showToast('備份成功！', 'success');
+                    showToast('Backup successful', 'success');
                 } else {
                     log(`Backup completed with issues. Errors: ${result.errors?.length || 0}`, 'warning', 'BACKUP');
                     if (result.errors?.length > 0) {
@@ -1451,14 +1451,14 @@
                     if (result.output_lines?.length > 0) {
                         result.output_lines.slice(-10).forEach(l => log(`Backup output: ${l}`, 'info', 'BACKUP'));
                     }
-                    showToast(`備份完成但有錯誤: ${result.errors?.length || 0}個`, 'warning');
+                    showToast(`Backup finished with ${result.errors?.length || 0} error(s)`, 'warning');
                 }
             } catch (e) {
                 log(`Backup failed: ${e.message}`, 'error', 'BACKUP');
-                showToast('備份失敗: ' + e.message, 'error');
+                showToast('Backup failed: ' + e.message, 'error');
             } finally {
                 btn.disabled = false;
-                btn.textContent = '📤 備份到R2';
+                btn.textContent = '📤 Backup to R2';
             }
         }
 
@@ -1511,9 +1511,9 @@
             }
             loadRecordings();
             if (failCount === 0 && successCount > 0) {
-                showToast(`${successCount} 個檔案上傳成功，正在處理...`, 'success');
+                showToast(`${successCount} file(s) uploaded — processing...`, 'success');
             } else if (failCount > 0) {
-                showToast(`${failCount} 個檔案上傳失敗`, 'error');
+                showToast(`${failCount} file(s) failed to upload`, 'error');
             }
         }
 

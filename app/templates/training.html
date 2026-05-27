@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="zh-TW">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>訓練管理 - Voice AI</title>
+    <title>Training — EverHome</title>
     <link rel="stylesheet" href="/static/css/_status_bar.css">
     <link rel="stylesheet" href="/static/css/training.css">
     <script src="/static/js/_status_bar.js" defer></script>
@@ -15,24 +15,24 @@
 
     <div class="container">
         <div class="header">
-            <a href="/ui" class="back-btn">跳轉到對話</a>
-            <h1>訓練管理</h1>
-            <a href="/ui/recordings" class="back-btn">錄音管理</a>
+            <a href="/ui" class="back-btn">To Chat</a>
+            <h1>Training</h1>
+            <a href="/ui/recordings" class="back-btn">Recordings</a>
         </div>
 
         <div class="tabs">
-            <button class="tab active" onclick="switchTab('training')">訓練</button>
-            <button class="tab" onclick="switchTab('versions')">版本</button>
+            <button class="tab active" onclick="switchTab('training')">Training</button>
+            <button class="tab" onclick="switchTab('versions')">Versions</button>
         </div>
 
         <!-- Training Tab -->
         <div id="training-tab">
             <!-- Persona Selection -->
             <div class="section">
-                <div class="section-title">選擇人格</div>
+                <div class="section-title">Select Persona</div>
                 <div class="form-row">
                     <div class="form-group">
-                        <label>人格 (Persona)</label>
+                        <label>Persona</label>
                         <select id="personaSelect"></select>
                     </div>
                 </div>
@@ -40,28 +40,28 @@
 
             <!-- Recordings Selection with Tree View -->
             <div class="section">
-                <div class="section-title">選擇片段</div>
+                <div class="section-title">Select Segments</div>
                 <div class="filter-bar">
                     <select id="listenerFilter">
-                        <option value="">全部聆聽者</option>
+                        <option value="">All Listeners</option>
                     </select>
                     <span id="recordingsCount" class="recordings-count"></span>
                 </div>
                 <div id="treeView">
-                    <div class="empty-state">載入中...</div>
+                    <div class="empty-state">Loading...</div>
                 </div>
             </div>
 
             <!-- Training Settings -->
             <div class="section">
-                <div class="section-title">訓練設定</div>
+                <div class="section-title">Training Settings</div>
                 <div class="training-settings">
                     <div class="settings-grid">
                         <div class="form-group">
-                            <label>訓練類型</label>
+                            <label>Training Type</label>
                             <select id="trainingTypeSelect" onchange="onTrainingTypeChange()">
-                                <option value="sft" selected>SFT (推薦, 穩定)</option>
-                                <option value="lora">LoRA (experimental — 目前易產生雜音)</option>
+                                <option value="sft" selected>SFT (recommended, stable)</option>
+                                <option value="lora">LoRA (experimental — currently prone to noise)</option>
                             </select>
                         </div>
                         <div class="form-group">
@@ -95,32 +95,32 @@
                             </select>
                         </div>
                         <div class="form-group">
-                            <label title="決定 Qwen3-TTS 烘焙時要不要鎖定特定語系的 codec 語言 token。「不指定」會把 spk_is_dialect 寫成 false，推論時用原本說話者口音；其他選項會強制走該語言的 codec，可能讓非北京口音聽起來像北京腔。">語言 (Language)</label>
+                            <label title="Controls whether to lock Qwen3-TTS to a specific codec language token during bake. 'Auto' writes spk_is_dialect=false so inference uses the speaker's original accent; other options force that language's codec, which may impose a Beijing accent on Taiwan-accented sources.">Language</label>
                             <select id="languageTokenSelect">
-                                <option value="" selected>不指定（推薦：保留原口音）</option>
-                                <option value="chinese" title="可能讓非北京口音聽起來像北京腔">中文（強制北京 codec）</option>
-                                <option value="english">英文 (English)</option>
-                                <option value="japanese">日文 (Japanese)</option>
-                                <option value="korean">韓文 (Korean)</option>
-                                <option value="french">法文 (French)</option>
-                                <option value="spanish">西文 (Spanish)</option>
-                                <option value="german">德文 (German)</option>
-                                <option value="italian">義文 (Italian)</option>
-                                <option value="portuguese">葡文 (Portuguese)</option>
-                                <option value="russian">俄文 (Russian)</option>
+                                <option value="" selected>Auto (recommended — preserves accent)</option>
+                                <option value="chinese" title="May impose Beijing accent on Taiwan-accented sources">Chinese (forces Beijing codec)</option>
+                                <option value="english">English</option>
+                                <option value="japanese">Japanese</option>
+                                <option value="korean">Korean</option>
+                                <option value="french">French</option>
+                                <option value="spanish">Spanish</option>
+                                <option value="german">German</option>
+                                <option value="italian">Italian</option>
+                                <option value="portuguese">Portuguese</option>
+                                <option value="russian">Russian</option>
                             </select>
                         </div>
                     </div>
                     <div id="loraWarning" style="display:none; margin-top:10px; padding:10px 14px; background:#3a2f10; color:#f4c66a; border-radius:6px; font-size:0.85rem;">
-                        ⚠️ <strong>LoRA 目前不穩定</strong>：訓練 forward path 只能訓練到 code_predictor，gradient 訊號不足以收斂，產出常為雜音 / 跑到 max_new_tokens。建議用 SFT。詳見 <code>memory/training_pipeline_deferred.md</code>。
+                        ⚠️ <strong>LoRA is currently unstable</strong>: the training forward path can only reach code_predictor; the gradient signal is too weak to converge, so outputs are often noise or run to max_new_tokens. SFT is recommended. See <code>memory/training_pipeline_deferred.md</code> for details.
                     </div>
                 </div>
 
                 <!-- Training Preview -->
                 <div class="training-preview" id="trainingPreview">
-                    <h3 style="font-size: 1rem; margin-bottom: 10px; color: #00ccff;">訓練預覽</h3>
+                    <h3 style="font-size: 1rem; margin-bottom: 10px; color: #00ccff;">Training Preview</h3>
                     <div id="previewList">
-                        <div class="empty-state">選擇片段以查看預覽</div>
+                        <div class="empty-state">Select segments to preview</div>
                     </div>
                 </div>
 
@@ -139,17 +139,17 @@
                             <div class="stat-value" id="statLoss">-</div>
                         </div>
                         <div class="stat-item">
-                            <div class="stat-label">預計剩餘</div>
+                            <div class="stat-label">ETA</div>
                             <div class="stat-value" id="statETA">-</div>
                         </div>
                     </div>
                 </div>
 
                 <button class="btn-primary" id="startTrainingBtn" onclick="startTraining()">
-                    開始訓練
+                    Start Training
                 </button>
                 <button id="cancelTrainingBtn" onclick="cancelTraining()" style="display:none; margin-top:8px; background:#dc3545; color:#fff; border:none; padding:10px 16px; border-radius:6px; cursor:pointer; font-size:0.9rem;">
-                    ✕ 取消訓練
+                    ✕ Cancel Training
                 </button>
             </div>
         </div>
@@ -157,13 +157,13 @@
         <!-- Versions Tab -->
         <div id="versions-tab" style="display: none;">
             <div class="section">
-                <div class="section-title">版本列表</div>
+                <div class="section-title">Versions</div>
                 <div style="margin-bottom: 12px;">
-                    <label style="font-size: 0.85rem; color: #888; display: block; margin-bottom: 6px;">測試文字 (預覽時朗讀)</label>
-                    <input type="text" id="previewText" value="你好，這是我的聲音測試。"
+                    <label style="font-size: 0.85rem; color: #888; display: block; margin-bottom: 6px;">Test Text (spoken during preview)</label>
+                    <input type="text" id="previewText" value="Hello, this is a test of my voice."
                         style="width: 100%; padding: 10px 14px; background: #1a1a2e; color: #fff; border: 1px solid #333; border-radius: 8px; font-size: 14px;">
                 </div>
-                <div id="versionsList">載入中...</div>
+                <div id="versionsList">Loading...</div>
             </div>
         </div>
 

@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="zh-TW">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>錄音管理 - Voice AI</title>
+    <title>Recordings — EverHome</title>
     <link rel="stylesheet" href="/static/css/_status_bar.css">
     <link rel="stylesheet" href="/static/css/recordings.css">
     <script src="/static/js/_status_bar.js" defer></script>
@@ -17,53 +17,53 @@
     <!-- Modal for adding persona/listener -->
     <div class="modal-overlay" id="addModal">
         <div class="modal-content">
-            <h3 id="modalTitle">新增</h3>
+            <h3 id="modalTitle">Add</h3>
             <div class="modal-field">
-                <label for="modalInput">顯示名稱</label>
-                <input type="text" id="modalInput" placeholder="例如：媽媽、小孩、Lily">
+                <label for="modalInput">Display Name</label>
+                <input type="text" id="modalInput" placeholder="e.g. Mom, Lily">
             </div>
             <div class="modal-field">
-                <label for="modalIdInput">ID <span class="modal-hint">(只能小寫字母、數字、底線；以字母開頭)</span></label>
-                <input type="text" id="modalIdInput" placeholder="例如：mama、grandma_lily">
+                <label for="modalIdInput">ID <span class="modal-hint">(lowercase letters, digits, underscores; start with a letter)</span></label>
+                <input type="text" id="modalIdInput" placeholder="e.g. mom, grandma_lily">
             </div>
             <div class="modal-field modal-field-persona" id="modalFieldIsFamily">
                 <label class="modal-checkbox-label">
                     <input type="checkbox" id="modalIsFamily" checked>
-                    <span>家庭成員 (is_family)</span>
+                    <span>Family member (is_family)</span>
                 </label>
             </div>
             <div class="modal-field modal-field-listener" id="modalFieldEmotion">
-                <label for="modalEmotionSelect">預設情緒</label>
+                <label for="modalEmotionSelect">Default Emotion</label>
                 <select id="modalEmotionSelect">
-                    <option value="溫和">溫和</option>
-                    <option value="撒嬌">撒嬌</option>
-                    <option value="寵溺">寵溺</option>
-                    <option value="幽默">幽默</option>
-                    <option value="毒舌">毒舌</option>
-                    <option value="開心">開心</option>
-                    <option value="認真">認真</option>
-                    <option value="默認">默認</option>
+                    <option value="溫和">Gentle</option>
+                    <option value="撒嬌">Playful</option>
+                    <option value="寵溺">Loving</option>
+                    <option value="幽默">Humorous</option>
+                    <option value="毒舌">Sassy</option>
+                    <option value="開心">Happy</option>
+                    <option value="認真">Serious</option>
+                    <option value="默認">Default</option>
                 </select>
             </div>
             <div class="modal-error" id="modalError"></div>
             <div class="modal-actions">
-                <button class="action-btn" style="background:#666" onclick="closeModal()">取消</button>
-                <button class="action-btn play" id="modalConfirmBtn" onclick="confirmModal()">確認</button>
+                <button class="action-btn" style="background:#666" onclick="closeModal()">Cancel</button>
+                <button class="action-btn play" id="modalConfirmBtn" onclick="confirmModal()">Confirm</button>
             </div>
         </div>
     </div>
 
     <div class="container">
         <div class="header">
-            <a href="/ui" class="back-btn">← 返回對話</a>
-            <h1>錄音管理</h1>
+            <a href="/ui" class="back-btn">← Back to Chat</a>
+            <h1>Recordings</h1>
             <div class="header-actions">
-                <button class="action-btn" id="backupBtn" onclick="triggerBackup()" style="background:#2a7;">📤 備份到R2</button>
-                <a href="/ui/training" class="back-btn">跳轉到訓練 →</a>
+                <button class="action-btn" id="backupBtn" onclick="triggerBackup()" style="background:#2a7;">📤 Backup to R2</button>
+                <a href="/ui/training" class="back-btn">To Training →</a>
                 <div class="version-selector">
-                    <span>版本:</span>
+                    <span>Version:</span>
                     <select id="versionSelect">
-                        <option value="default">系統預設</option>
+                        <option value="default">System Default</option>
                     </select>
                 </div>
             </div>
@@ -71,7 +71,7 @@
 
         <!-- WebRTC Recording Section -->
         <div class="recording-section">
-            <div class="section-title">🎤 錄音 (WebRTC)</div>
+            <div class="section-title">🎤 Record (WebRTC)</div>
 
             <div class="recorder" id="recorder">
                 <!-- dB Meter -->
@@ -80,23 +80,23 @@
                 </div>
                 <div class="db-info">
                     <span id="dbLevel">-∞ dB</span>
-                    <span id="qualityIndicator">等待錄音...</span>
+                    <span id="qualityIndicator">Waiting for recording...</span>
                 </div>
 
                 <!-- Metadata selectors -->
                 <div class="metadata-selectors">
                     <div class="selector-group">
-                        <label>👤 聆聽者</label>
+                        <label>👤 Listener</label>
                         <div class="selector-row">
                             <select id="listenerSelect"></select>
-                            <button type="button" class="add-btn add-btn-inline" onclick="openAddListenerModal()" title="新增聆聽者" aria-label="新增聆聽者">+</button>
+                            <button type="button" class="add-btn add-btn-inline" onclick="openAddListenerModal()" title="Add Listener" aria-label="Add Listener">+</button>
                         </div>
                     </div>
                     <div class="selector-group">
-                        <label>🎭 人格</label>
+                        <label>🎭 Persona</label>
                         <div class="selector-row">
                             <select id="personaSelect"></select>
-                            <button type="button" class="add-btn add-btn-inline" onclick="openAddPersonaModal()" title="新增人格" aria-label="新增人格">+</button>
+                            <button type="button" class="add-btn add-btn-inline" onclick="openAddPersonaModal()" title="Add Persona" aria-label="Add Persona">+</button>
                         </div>
                     </div>
                 </div>
@@ -105,7 +105,7 @@
                 <div class="recorder-controls">
                     <button class="rec-btn" id="recBtn">
                         <span id="recIcon">●</span>
-                        <span id="recText">開始錄音</span>
+                        <span id="recText">Start Recording</span>
                     </button>
                     <span class="duration" id="duration">00:00</span>
                 </div>
@@ -116,8 +116,8 @@
                 <input type="file" id="fileInput" accept=".wav,.mp3,.m4a,.webm" multiple>
                 <div class="upload-icon">📁</div>
                 <div class="upload-text">
-                    拖放檔案到此處 或 <strong>選擇檔案</strong><br>
-                    <small>支援: WAV, MP3, M4A, WebM (最大 500MB)</small>
+                    Drag files here or <strong>click to select</strong><br>
+                    <small>Supported: WAV, MP3, M4A, WebM (max 500MB)</small>
                 </div>
             </div>
         </div>
@@ -126,26 +126,26 @@
         <div class="debug-panel" id="debugPanel">
             <div class="debug-panel-header">
                 <span>📋 Debug Panel</span>
-                <button class="debug-toggle" id="debugToggle">折疊</button>
+                <button class="debug-toggle" id="debugToggle">Collapse</button>
             </div>
             <div id="debugLogs"></div>
         </div>
 
         <!-- Recordings List with Tree View -->
         <div class="recording-section">
-            <div class="section-title">📚 錄音列表</div>
+            <div class="section-title">📚 Recordings</div>
 
             <!-- Filter bar -->
             <div class="filter-bar">
-                <input type="text" id="searchInput" placeholder="搜尋錄音..." oninput="filterAndRender()">
+                <input type="text" id="searchInput" placeholder="Search recordings..." oninput="filterAndRender()">
                 <select id="listenerFilter" onchange="filterAndRender()">
-                    <option value="">全部聆聽者</option>
+                    <option value="">All Listeners</option>
                 </select>
             </div>
 
             <!-- Tree view container -->
             <div class="tree-view" id="treeView">
-                <div class="empty-state">載入中...</div>
+                <div class="empty-state">Loading...</div>
             </div>
         </div>
     </div>

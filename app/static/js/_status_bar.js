@@ -36,11 +36,11 @@
     // match the known pattern, so untrained / custom names still render.
     // Used by the status-bar voice pill + per-page version dropdowns.
     const PERSONA_DISPLAY = {
-        xiao_s: '小S', test: 'Test', caregiver: '照護者',
-        elder_gentle: '長輩-溫柔', elder_playful: '長輩-活潑',
+        xiao_s: 'Xiao S', test: 'Test', caregiver: 'Caregiver',
+        elder_gentle: 'Elder — Gentle', elder_playful: 'Elder — Playful',
     };
     window.formatVersionName = function (raw) {
-        if (!raw || raw === 'default') return '系統預設';
+        if (!raw || raw === 'default') return 'System Default';
         // pattern: {persona}_v{N}_YYYYMMDD_HHMMSS_{hash}
         const m = raw.match(/^(.+?)_v(\d+)_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})\d{2}_\w+$/);
         if (!m) return raw;
@@ -78,7 +78,7 @@
             const voicePill = document.getElementById('sysVoice');
             if (voiceText) {
                 const rawV = s.tts && s.tts.active_version;
-                voiceText.textContent = rawV ? window.formatVersionName(rawV) : '系統預設';
+                voiceText.textContent = rawV ? window.formatVersionName(rawV) : 'System Default';
                 if (voicePill) voicePill.title = rawV ? `Active TTS voice: ${rawV}` : 'Active TTS voice';
             }
             // ASR pill
@@ -148,7 +148,7 @@
 
     window.gateIfTraining = function (label) {
         if (window.SYS.trainingActive) {
-            alert(`訓練進行中，無法執行「${label}」 (GPU is busy)`);
+            alert(`Training in progress — "${label}" is unavailable (GPU is busy)`);
             return true;
         }
         return false;

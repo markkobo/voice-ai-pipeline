@@ -351,11 +351,11 @@ function renderUI() {
 
     const pillByState = {
         [STATE.IDLE]:       { cls: 'disconnected', text: 'Disconnected' },
-        [STATE.CONNECTING]: { cls: 'connecting',   text: '連線中…' },
-        [STATE.READY]:      { cls: 'ready',        text: '已連線・就緒' },
-        [STATE.LISTENING]:  { cls: 'listening',    text: '錄音中…' },
-        [STATE.THINKING]:   { cls: 'thinking',     text: 'AI 思考中…' },
-        [STATE.SPEAKING]:   { cls: 'speaking',     text: 'AI 說話中…' },
+        [STATE.CONNECTING]: { cls: 'connecting',   text: 'Connecting…' },
+        [STATE.READY]:      { cls: 'ready',        text: 'Connected · Ready' },
+        [STATE.LISTENING]:  { cls: 'listening',    text: 'Listening…' },
+        [STATE.THINKING]:   { cls: 'thinking',     text: 'AI thinking…' },
+        [STATE.SPEAKING]:   { cls: 'speaking',     text: 'AI speaking…' },
     };
     const pill = pillByState[state] || pillByState[STATE.IDLE];
     statusEl.className = 'status ' + pill.cls;
@@ -363,12 +363,12 @@ function renderUI() {
 
     const btnByState = {
         // IDLE = disconnected. Click → reconnect. Distinct from CONNECTING.
-        [STATE.IDLE]:       { txt: '🔌 重新連線', disabled: false, cls: 'primary' },
-        [STATE.CONNECTING]: { txt: '連線中…',    disabled: true,  cls: 'primary' },
-        [STATE.READY]:      { txt: '🎤 開始說話', disabled: false, cls: 'primary' },
-        [STATE.LISTENING]:  { txt: '✋ 送出',     disabled: false, cls: 'primary recording' },
-        [STATE.THINKING]:   { txt: '⏹ 中斷',     disabled: false, cls: 'primary danger' },
-        [STATE.SPEAKING]:   { txt: '⏹ 中斷',     disabled: false, cls: 'primary danger' },
+        [STATE.IDLE]:       { txt: '🔌 Reconnect',     disabled: false, cls: 'primary' },
+        [STATE.CONNECTING]: { txt: 'Connecting…',     disabled: true,  cls: 'primary' },
+        [STATE.READY]:      { txt: '🎤 Start Speaking', disabled: false, cls: 'primary' },
+        [STATE.LISTENING]:  { txt: '✋ Send',           disabled: false, cls: 'primary recording' },
+        [STATE.THINKING]:   { txt: '⏹ Interrupt',      disabled: false, cls: 'primary danger' },
+        [STATE.SPEAKING]:   { txt: '⏹ Interrupt',      disabled: false, cls: 'primary danger' },
     };
     const btn = btnByState[state] || btnByState[STATE.IDLE];
     primaryBtn.textContent = btn.txt;
@@ -379,7 +379,7 @@ function renderUI() {
     primaryBtn.disabled = btn.disabled || sysBlocks;
     primaryBtn.classList.toggle('gated', sysBlocks);
     primaryBtn.title = sys.trainingActive
-        ? '訓練進行中，無法對話 (training in progress)'
+        ? 'Training in progress — chat disabled'
         : (sys.ttsReady === false ? 'TTS engine loading…'
         : (sys.asrReady === false ? 'ASR engine loading…' : ''));
 
@@ -398,7 +398,7 @@ function addMessage(role, text, emotion) {
     if (emotion) {
         const e = document.createElement('div');
         e.className = 'emotion';
-        e.textContent = '情緒: ' + emotion;
+        e.textContent = 'Emotion: ' + emotion;
         div.appendChild(e);
     }
     convEl.appendChild(div);
@@ -417,7 +417,7 @@ function toggleDebug() {
 }
 
 function clearConversation() {
-    convEl.innerHTML = '<div class="placeholder">按 [🎤 開始說話] 或空白鍵開始對話...</div>';
+    convEl.innerHTML = '<div class="placeholder">Press [🎤 Start Speaking] or Space to begin...</div>';
     document.getElementById('thinkingIndicator').style.display = 'none';
     log('Conversation cleared');
 }
@@ -555,7 +555,7 @@ async function loadVersions() {
         const activeData = await activeRes.json();
         const activeVersionId = activeData.version?.version_id;
 
-        versionSelect.innerHTML = '<option value="">系統預設</option>';
+        versionSelect.innerHTML = '<option value="">System Default</option>';
         const fmt = window.formatVersionName || ((x) => x);
         versions.forEach(v => {
             if (v.status === 'ready') {
@@ -583,7 +583,7 @@ function updateVersionInfo(version) {
     const versionInfo = document.getElementById('versionInfo');
     if (!version) { versionInfo.textContent = ''; return; }
     const loss = version.final_loss ? ` loss: ${version.final_loss.toFixed(4)}` : '';
-    const date = version.completed_at ? new Date(version.completed_at).toLocaleDateString('zh-TW') : '';
+    const date = version.completed_at ? new Date(version.completed_at).toLocaleDateString('en-US') : '';
     versionInfo.textContent = `${loss} ${date}`;
 }
 
@@ -595,7 +595,7 @@ async function onVersionChange() {
         try {
             await fetch(`/api/training/versions/${versionId}/activate`, { method: 'POST' });
             log(`Version ${versionId} activated`);
-            showToast(`已切換至: ${versionSelect.options[versionSelect.selectedIndex].text}`, 'success');
+            showToast(`Switched to: ${versionSelect.options[versionSelect.selectedIndex].text}`, 'success');
             loadVersions();
             // Trigger an immediate status-bar refresh so the top pill
             // reflects the new active version within ~1s instead of
@@ -608,7 +608,7 @@ async function onVersionChange() {
             }, 500);
         } catch (e) {
             log(`Failed to activate version: ${e.message}`, 'error');
-            showToast('切換版本失敗', 'error');
+            showToast('Failed to switch version', 'error');
         }
     }
 }
@@ -701,7 +701,7 @@ function onTtsModelChange() {
     const modelEl = document.getElementById('tts_model');
     if (!modelEl) return;
     const modelValue = modelEl.value;
-    const modelLabel = modelValue === '0.6B' ? '0.6B (快速)' : '1.7B (高品質)';
+    const modelLabel = modelValue === '0.6B' ? '0.6B (fast)' : '1.7B (high quality)';
     if (hintEl) {
         const hintValEl = document.getElementById('ttsModelHintValue');
         if (hintValEl) hintValEl.textContent = modelLabel;
@@ -792,7 +792,7 @@ function handleMessage(msg) {
         if (msg.emotion) {
             let e = aiMsg.querySelector('.emotion');
             if (!e) { e = document.createElement('div'); e.className = 'emotion'; aiMsg.appendChild(e); }
-            e.textContent = '情緒: ' + msg.emotion;
+            e.textContent = 'Emotion: ' + msg.emotion;
         }
         convEl.scrollTop = convEl.scrollHeight;
     }
@@ -976,7 +976,7 @@ async function startRecording() {
         // Toast + log instead so the audience sees nothing dramatic and
         // the operator can retry by clicking the button again.
         log('Mic error: ' + e.message);
-        showToast('Mic 啟動失敗，再按一次試試: ' + e.message, 'error');
+        showToast('Mic failed to start — try again: ' + e.message, 'error');
         transition(STATE.READY, 'startRecording failed');
     } finally {
         isStartingRecording = false;
@@ -1061,7 +1061,7 @@ async function demoReset() {
         accumulatedChunks = [];
         // 6. Clear the conversation DOM
         if (convEl) {
-            convEl.innerHTML = '<div style="text-align:center;color:#666;padding:24px;">對話已重置</div>';
+            convEl.innerHTML = '<div style="text-align:center;color:#666;padding:24px;">Conversation reset</div>';
             setTimeout(() => { if (convEl) convEl.innerHTML = ''; }, 1500);
         }
         // 7. Re-send config so the server's session state is in sync

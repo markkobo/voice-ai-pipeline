@@ -87,11 +87,11 @@
             const cancelBtn = document.getElementById('cancelTrainingBtn');
             if (isTraining) {
                 startBtn.disabled = true;
-                startBtn.textContent = '訓練中...';
+                startBtn.textContent = 'Training...';
                 if (cancelBtn) cancelBtn.style.display = '';
             } else {
                 startBtn.disabled = false;
-                startBtn.textContent = '開始訓練';
+                startBtn.textContent = 'Start Training';
                 if (cancelBtn) cancelBtn.style.display = 'none';
                 currentTraining = null;
             }
@@ -102,7 +102,7 @@
                 log('No active training to cancel', 'warning');
                 return;
             }
-            if (!confirm('確定要取消正在進行的訓練？已寫到 disk 的 epoch 進度會丟失。')) return;
+            if (!confirm('Cancel the in-progress training? Epoch progress already written to disk will be lost.')) return;
             const vid = currentTraining;
             log(`Cancelling training: ${vid}`);
             try {
@@ -112,7 +112,7 @@
                     throw new Error(err.detail || err.message || `HTTP ${r.status}`);
                 }
                 log(`Training cancelled: ${vid}`);
-                showToast('已取消訓練', 'success');
+                showToast('Training cancelled', 'success');
                 stopPolling();
                 if (eventSource) { try { eventSource.close(); } catch (_) {} eventSource = null; }
                 progressSection.classList.remove('visible');
@@ -120,7 +120,7 @@
                 loadVersions();
             } catch (e) {
                 log(`Cancel failed: ${e.message}`, 'error');
-                showToast('取消失敗: ' + e.message, 'error');
+                showToast('Cancel failed: ' + e.message, 'error');
             }
         }
 
@@ -193,7 +193,7 @@
             // startTraining()).
             const allOpt = document.createElement('option');
             allOpt.value = '';
-            allOpt.textContent = '— 全部人格（請選擇要訓練的人格）—';
+            allOpt.textContent = '— All Personas (select the persona to train) —';
             personaSelect.appendChild(allOpt);
             personas.forEach(p => {
                 const opt = document.createElement('option');
@@ -210,7 +210,7 @@
 
         function buildListenerFilter() {
             const current = listenerFilter.value;
-            listenerFilter.innerHTML = '<option value="">全部聆聽者</option>';
+            listenerFilter.innerHTML = '<option value="">All Listeners</option>';
             listeners.forEach(l => {
                 const opt = document.createElement('option');
                 opt.value = l.listener_id;
@@ -221,13 +221,13 @@
         }
 
         function getPersonaName(personaId) {
-            if (!personaId) return '未設定';
+            if (!personaId) return 'Unset';
             const p = personas.find(x => x.persona_id === personaId);
             return p ? p.name : personaId;
         }
 
         function getListenerName(listenerId) {
-            if (!listenerId) return '未設定';
+            if (!listenerId) return 'Unset';
             const l = listeners.find(x => x.listener_id === listenerId);
             return l ? l.name : listenerId;
         }
@@ -243,7 +243,7 @@
                 log(`Loaded ${recordings.length} recordings`);
             } catch (e) {
                 log(`Failed to load recordings: ${e.message}`, 'error');
-                treeView.innerHTML = '<div class="empty-state">載入失敗</div>';
+                treeView.innerHTML = '<div class="empty-state">Failed to load</div>';
             }
         }
 
@@ -269,19 +269,19 @@
 
             if (filtered.length === 0) {
                 const conds = [];
-                if (personaId) conds.push('人格: ' + getPersonaName(personaId));
-                if (listenerId) conds.push('聆聽者: ' + getListenerName(listenerId));
-                const suffix = conds.length ? `（${conds.join('、')}）` : '';
-                treeView.innerHTML = `<div class="empty-state">沒有符合條件的錄音${suffix}</div>`;
+                if (personaId) conds.push('Persona: ' + getPersonaName(personaId));
+                if (listenerId) conds.push('Listener: ' + getListenerName(listenerId));
+                const suffix = conds.length ? ` (${conds.join(', ')})` : '';
+                treeView.innerHTML = `<div class="empty-state">No matching recordings${suffix}</div>`;
                 document.getElementById('recordingsCount').textContent = '';
                 return;
             }
 
             const labelBits = [];
-            if (personaId) labelBits.push('人格: ' + getPersonaName(personaId));
-            if (listenerId) labelBits.push('聆聽者: ' + getListenerName(listenerId));
+            if (personaId) labelBits.push('Persona: ' + getPersonaName(personaId));
+            if (listenerId) labelBits.push('Listener: ' + getListenerName(listenerId));
             document.getElementById('recordingsCount').textContent =
-                `共 ${filtered.length} 個錄音${labelBits.length ? ' (' + labelBits.join('、') + ')' : ''}`;
+                `${filtered.length} recording(s)${labelBits.length ? ' (' + labelBits.join(', ') + ')' : ''}`;
 
             treeView.innerHTML = filtered.map(r => renderRecordingFolder(r)).join('');
 
@@ -368,13 +368,13 @@
             }
             let folderAuditBadge = '';
             if (aggLevel) {
-                const label = aggLevel === 'good' ? '✓ 音質良好' :
-                              aggLevel === 'marginal' ? '⚠ 音質勉強' :
-                              aggLevel === 'bad' ? '✕ 不適合訓練' : '';
+                const label = aggLevel === 'good' ? '✓ Good Audio' :
+                              aggLevel === 'marginal' ? '⚠ Marginal Audio' :
+                              aggLevel === 'bad' ? '✕ Not Suitable for Training' : '';
                 const cls = aggLevel === 'good' ? 'va-good' :
                             aggLevel === 'marginal' ? 'va-marginal' :
                             aggLevel === 'bad' ? 'va-bad' : '';
-                folderAuditBadge = `<span class="voice-audit-badge ${cls}" title="展開查看詳細音質分析">${label}</span>`;
+                folderAuditBadge = `<span class="voice-audit-badge ${cls}" title="Expand to see detailed audio analysis">${label}</span>`;
             }
 
             return `
@@ -390,7 +390,7 @@
                         <span class="recording-duration">${durationText}</span>
                     </div>
                     <div class="tree-segments" id="segments-${r.recording_id}">
-                        ${speakerGroups.length === 0 ? '<div style="padding:8px;color:#666;font-size:0.85rem;">無片段</div>' : ''}
+                        ${speakerGroups.length === 0 ? '<div style="padding:8px;color:#666;font-size:0.85rem;">No segments</div>' : ''}
                         ${speakerGroups.map(g => renderSpeakerGroupRow(r, g)).join('')}
                     </div>
                 </div>
@@ -419,7 +419,7 @@
                 ? (quality >= 0.8 ? 'quality-excellent' : quality >= 0.6 ? 'quality-good' : quality >= 0.4 ? 'quality-fair' : 'quality-poor')
                 : '';
             const qualityLabel = quality !== null && quality !== undefined
-                ? (quality >= 0.8 ? '優秀' : quality >= 0.6 ? '良好' : quality >= 0.4 ? '一般' : '惡劣')
+                ? (quality >= 0.8 ? 'Excellent' : quality >= 0.6 ? 'Good' : quality >= 0.4 ? 'Fair' : 'Poor')
                 : '';
             const qualityBadge = quality !== null && quality !== undefined
                 ? `<span class="quality-badge ${qualityBadgeClass}">${qualityLabel} ${(quality * 100).toFixed(0)}%</span>`
@@ -427,10 +427,10 @@
 
             // Quality flags display
             const flagsHtml = [];
-            if (qualityFlags.has_overlap) flagsHtml.push('<span class="quality-flag active">重疊</span>');
-            if (qualityFlags.low_energy) flagsHtml.push('<span class="quality-flag active">低能量</span>');
-            if (qualityFlags.high_noise) flagsHtml.push('<span class="quality-flag active">高噪音</span>');
-            if (qualityFlags.too_short) flagsHtml.push('<span class="quality-flag active">太短</span>');
+            if (qualityFlags.has_overlap) flagsHtml.push('<span class="quality-flag active">Overlap</span>');
+            if (qualityFlags.low_energy) flagsHtml.push('<span class="quality-flag active">Low energy</span>');
+            if (qualityFlags.high_noise) flagsHtml.push('<span class="quality-flag active">Noisy</span>');
+            if (qualityFlags.too_short) flagsHtml.push('<span class="quality-flag active">Too short</span>');
             const flagsDisplay = flagsHtml.length > 0 ? `<div class="quality-flags">${flagsHtml.join('')}</div>` : '';
 
             // Voice-cloning audit badge — surfaces effective_bandwidth /
@@ -444,9 +444,9 @@
             let voiceAuditBadge = '';
             if (va && va.level) {
                 const level = va.level;
-                const label = level === 'good' ? '✓ 音質良好' :
-                              level === 'marginal' ? '⚠ 音質勉強' :
-                              level === 'bad' ? '✕ 不適合訓練' : '?';
+                const label = level === 'good' ? '✓ Good Audio' :
+                              level === 'marginal' ? '⚠ Marginal Audio' :
+                              level === 'bad' ? '✕ Not Suitable for Training' : '?';
                 const cls = level === 'good' ? 'va-good' :
                             level === 'marginal' ? 'va-marginal' :
                             level === 'bad' ? 'va-bad' : '';
@@ -463,7 +463,7 @@
 
             const truncated = transcript.length > 50 ? transcript.substring(0, 50) + '...' : transcript;
             const countBadge = segCount > 1
-                ? `<span class="quality-badge" style="background:#37475a;color:#bcd;">${segCount} 段</span>`
+                ? `<span class="quality-badge" style="background:#37475a;color:#bcd;">${segCount} segments</span>`
                 : '';
 
             return `
@@ -476,7 +476,7 @@
                     <div class="segment-info">
                         <span class="segment-speaker">${group.speaker_id}</span>
                         <div class="segment-meta">
-                            人格: ${getPersonaName(personaId)} | 對: ${getListenerName(listenerId)}
+                            Persona: ${getPersonaName(personaId)} | To: ${getListenerName(listenerId)}
                         </div>
                         ${transcript ? `<div class="segment-transcript">${truncated}</div>` : ''}
                         ${flagsDisplay}
@@ -575,7 +575,7 @@
                 })
                 .catch(e => {
                     log(`Failed to play segment: ${e.message}`, 'error');
-                    showToast('播放失敗: ' + e.message, 'error');
+                    showToast('Playback failed: ' + e.message, 'error');
                 });
         }
 
@@ -631,7 +631,7 @@
             const personaId = personaSelect.value;
 
             if (selectedSegments.size === 0) {
-                previewList.innerHTML = '<div class="empty-state">選擇片段以查看預覽</div>';
+                previewList.innerHTML = '<div class="empty-state">Select segments to preview</div>';
                 startBtn.disabled = true;
                 return;
             }
@@ -671,7 +671,7 @@
                     segCount: matching.length,
                     segId
                 });
-                log(`Preview: ${recId}/${actualSpeakerId} = ${duration.toFixed(1)}s (${matching.length} 段)`, 'info', 'TRAINING');
+                log(`Preview: ${recId}/${actualSpeakerId} = ${duration.toFixed(1)}s (${matching.length} segments)`, 'info', 'TRAINING');
             });
 
             const personaName = getPersonaName(personaId);
@@ -681,23 +681,23 @@
             const seconds = Math.round(estimatedTime % 60);
 
             previewList.innerHTML = `
-                <div style="font-size: 0.9rem; margin-bottom: 10px;">將訓練「${personaName}」:</div>
+                <div style="font-size: 0.9rem; margin-bottom: 10px;">Training "${personaName}":</div>
                 ${items.map(item => `
                     <div class="preview-item">
-                        <span>• ${item.recName} - ${item.speakerId} (${item.duration.toFixed(1)}s${item.segCount > 1 ? `, ${item.segCount} 段` : ''})</span>
+                        <span>• ${item.recName} - ${item.speakerId} (${item.duration.toFixed(1)}s${item.segCount > 1 ? `, ${item.segCount} segments` : ''})</span>
                     </div>
                 `).join('')}
                 <div style="border-top: 1px solid #333; margin-top: 8px; padding-top: 8px;">
                     <div class="preview-item">
-                        <span>總計:</span>
-                        <span>~${totalDuration.toFixed(1)}s, ${items.length} 個片段</span>
+                        <span>Total:</span>
+                        <span>~${totalDuration.toFixed(1)}s, ${items.length} segments</span>
                     </div>
                     <div class="preview-item">
-                        <span>預計時間:</span>
-                        <span>約 ${minutes}m ${seconds}s</span>
+                        <span>Estimated time:</span>
+                        <span>~${minutes}m ${seconds}s</span>
                     </div>
                 </div>
-                ${totalDuration < 10 ? '<div style="color: #ffcc00; margin-top: 10px;">⚠️ 建議至少 10s</div>' : ''}
+                ${totalDuration < 10 ? '<div style="color: #ffcc00; margin-top: 10px;">⚠️ At least 10s recommended</div>' : ''}
             `;
 
             startBtn.disabled = totalDuration < 10;
@@ -719,10 +719,10 @@
 
         // ==================== START TRAINING ====================
         async function startTraining() {
-            if (gateIfTraining('開始訓練')) return;
+            if (gateIfTraining('start training')) return;
             const personaId = personaSelect.value;
             if (!personaId) {
-                showToast('請先在上方選擇要訓練的人格', 'error');
+                showToast('Please select a persona to train above', 'error');
                 personaSelect.focus();
                 return;
             }
@@ -738,7 +738,7 @@
 
             const segmentIds = Array.from(selectedSegments);
             if (segmentIds.length === 0) {
-                showToast('請選擇至少一個片段', 'error');
+                showToast('Please select at least one segment', 'error');
                 return;
             }
 
@@ -758,7 +758,7 @@
             });
 
             if (totalDuration < 10) {
-                showToast('音頻總時長不足 10 秒', 'error');
+                showToast('Total audio is under 10 seconds', 'error');
                 return;
             }
 
@@ -800,7 +800,7 @@
 
             } catch (e) {
                 log(`Training failed: ${e.message}`, 'error');
-                showToast('訓練失敗: ' + e.message, 'error');
+                showToast('Training failed: ' + e.message, 'error');
                 setTrainingUI(false);
                 progressSection.classList.remove('visible');
             }
@@ -833,7 +833,7 @@
                         stopPolling();
                         progressSection.classList.remove('visible');
                         setTrainingUI(false);
-                        showNotification('訓練完成！', `版本 ${versionId} 訓練成功`);
+                        showNotification('Training Complete', `Version ${versionId} trained successfully`);
                         switchTab('versions');
                         loadVersions(versionId);
                     } else if (v.status === 'failed') {
@@ -841,7 +841,7 @@
                         stopPolling();
                         progressSection.classList.remove('visible');
                         setTrainingUI(false);
-                        showNotification('訓練失敗', v.error_message || '未知錯誤');
+                        showNotification('Training Failed', v.error_message || 'Unknown error');
                     }
                 } catch (e) {
                     log(`Progress poll error: ${e.message}`, 'warning');
@@ -883,7 +883,7 @@
                     progressSection.classList.remove('visible');
                     setTrainingUI(false);
                     eventSource.close();
-                    showNotification('訓練完成！', `版本 ${data.version_id || versionId} 訓練成功`);
+                    showNotification('Training Complete', `Version ${data.version_id || versionId} trained successfully`);
                     switchTab('versions');
                     loadVersions(data.version_id || versionId);
                 } else if (data.event === 'error') {
@@ -891,7 +891,7 @@
                     progressSection.classList.remove('visible');
                     setTrainingUI(false);
                     eventSource.close();
-                    showNotification('訓練失敗', data.error || '未知錯誤');
+                    showNotification('Training Failed', data.error || 'Unknown error');
                 }
                 // `connected` and other events: just keep the connection alive.
             };
@@ -959,7 +959,7 @@
                 (recordingsData.recordings || []).forEach(r => recordingsMap[r.recording_id] = r);
 
                 if (versions.length === 0) {
-                    versionsList.innerHTML = '<div class="empty-state">尚無訓練版本</div>';
+                    versionsList.innerHTML = '<div class="empty-state">No training versions yet</div>';
                     return;
                 }
 
@@ -975,8 +975,8 @@
                     const isNew = v.version_id === newVersionId;
                     const lossStr = v.final_loss ? v.final_loss.toFixed(4) : '-';
                     const completedDate = v.completed_at
-                        ? new Date(v.completed_at).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
-                        : (v.created_at ? new Date(v.created_at).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '-');
+                        ? new Date(v.completed_at).toLocaleString('en-US', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+                        : (v.created_at ? new Date(v.created_at).toLocaleString('en-US', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '-');
 
                     // Get segment info from manifest
                     const manifest = v.manifest || {};
@@ -1014,26 +1014,26 @@
                                 <div class="version-name-row">
                                     <span class="nickname-display" onclick="editNickname('${v.version_id}', '${v.nickname || ''}')">${displayName}</span>
                                     <div class="version-badges">
-                                        ${isActive ? '<span class="version-badge active-tag">當前啟用</span>' : ''}
-                                        ${isNew ? '<span class="version-badge new-tag">剛完成</span>' : ''}
+                                        ${isActive ? '<span class="version-badge active-tag">Active</span>' : ''}
+                                        ${isNew ? '<span class="version-badge new-tag">Just finished</span>' : ''}
                                         <span class="version-badge">(${v.persona_id})</span>
                                         ${modelTypeBadge}
                                     </div>
                                 </div>
                                 <div class="version-meta">
-                                    ${v.status === 'training' ? '🔄 訓練中' : v.status === 'merging' ? '⚙️ 合併中' : v.status === 'ready' ? '✓ 就緒' : '✕ 失敗'} |
-                                    完成: ${completedDate}
+                                    ${v.status === 'training' ? '🔄 Training' : v.status === 'merging' ? '⚙️ Merging' : v.status === 'ready' ? '✓ Ready' : '✕ Failed'} |
+                                    Completed: ${completedDate}
                                 </div>
                                 ${v.status === 'failed' && v.error_message ? `
                                     <div class="version-error" title="${String(v.error_message).replace(/"/g, '&quot;')}">
-                                        失敗原因: ${String(v.error_message).slice(0, 140)}${String(v.error_message).length > 140 ? '…' : ''}
+                                        Reason: ${String(v.error_message).slice(0, 140)}${String(v.error_message).length > 140 ? '…' : ''}
                                     </div>
                                 ` : ''}
                                 <div class="version-stats">
-                                    <span title="Loss 數值單獨看沒意義 — 按右側 ▶ 預覽 聽實際音質才是真正的判斷依據">Loss: ${lossStr}</span> | Epochs: ${v.num_epochs} | LR: ${lrStr} ${batchInfo}
+                                    <span title="Loss alone is not meaningful — click ▶ Preview on the right to judge by actual audio quality">Loss: ${lossStr}</span> | Epochs: ${v.num_epochs} | LR: ${lrStr} ${batchInfo}
                                 </div>
                                 <div style="font-size: 0.8rem; margin-top: 5px; color: #666;">
-                                    片段: ${recordingCount} 個錄音, ${segmentCount} 個片段
+                                    ${recordingCount} recording(s), ${segmentCount} segment(s)
                                 </div>
                                 ${trainingSummary}
                                 <div class="version-details" id="details-${v.version_id}" style="display: none;">
@@ -1041,14 +1041,14 @@
                                 </div>
                             </div>
                             <div class="version-actions">
-                                ${v.status === 'ready' && !isActive ? `<button class="btn-activate" onclick="activateVersion('${v.version_id}')">啟用</button>` : ''}
-                                ${v.status === 'ready' ? `<button class="btn-preview" data-preview-btn="${v.version_id}" title="試聽此版本的音色 (Loss 不能反映音質，請以此為準) — 再按一次停止" onclick="previewVersion('${v.version_id}')">▶ 預覽</button>` : ''}
-                                <button class="btn-details" onclick="toggleDetails('${v.version_id}')" title="顯示完整 metadata (路徑、IDs、時間戳)">詳細</button>
+                                ${v.status === 'ready' && !isActive ? `<button class="btn-activate" onclick="activateVersion('${v.version_id}')">Activate</button>` : ''}
+                                ${v.status === 'ready' ? `<button class="btn-preview" data-preview-btn="${v.version_id}" title="Preview this version's voice (judge by audio, not loss) — click again to stop" onclick="previewVersion('${v.version_id}')">▶ Preview</button>` : ''}
+                                <button class="btn-details" onclick="toggleDetails('${v.version_id}')" title="Show full metadata (paths, IDs, timestamps)">Details</button>
                                 ${v.status !== 'training' ? `
                                     <button class="btn-delete" id="delbtn-${v.version_id}" onclick="confirmDelete('${v.version_id}')">✕</button>
                                     <span id="delcfm-${v.version_id}" class="delete-confirm" style="display: none;">
-                                        確定？<a href="#" onclick="doDelete('${v.version_id}'); return false;">刪除</a>
-                                        <a href="#" class="cancel-link" onclick="cancelDelete('${v.version_id}'); return false;">取消</a>
+                                        Sure? <a href="#" onclick="doDelete('${v.version_id}'); return false;">Delete</a>
+                                        <a href="#" class="cancel-link" onclick="cancelDelete('${v.version_id}'); return false;">Cancel</a>
                                     </span>
                                 ` : ''}
                             </div>
@@ -1080,7 +1080,7 @@
             input.type = 'text';
             input.className = 'nickname-edit';
             input.value = currentNickname || '';
-            input.placeholder = '輸入暱稱...';
+            input.placeholder = 'Enter nickname...';
             input.maxLength = 50;
 
             const save = async () => {
@@ -1092,11 +1092,11 @@
                         body: JSON.stringify({ nickname: newNickname || null })
                     });
                     if (!res.ok) throw new Error('Update failed');
-                    showToast('暱稱已更新', 'success');
+                    showToast('Nickname updated', 'success');
                     loadVersions();
                 } catch (e) {
                     log(`Failed to update nickname: ${e.message}`, 'error');
-                    showToast('更新失敗: ' + e.message, 'error');
+                    showToast('Update failed: ' + e.message, 'error');
                 }
             };
 
@@ -1118,7 +1118,7 @@
         // ==================== VERSION DETAILS ====================
         function fmtDate(iso) {
             if (!iso) return '—';
-            try { return new Date(iso).toLocaleString('zh-TW'); }
+            try { return new Date(iso).toLocaleString('en-US'); }
             catch (e) { return iso; }
         }
         function fmtDuration(seconds) {
@@ -1182,12 +1182,12 @@
 
         // ==================== VERSION ACTIONS ====================
         async function activateVersion(versionId) {
-            if (gateIfTraining('啟用模型')) return;
+            if (gateIfTraining('activate model')) return;
             try {
                 const response = await fetch(`/api/training/versions/${versionId}/activate`, { method: 'POST' });
                 if (!response.ok) throw new Error('Activation failed');
                 log(`Activated: ${versionId}`);
-                showToast(`版本 ${versionId} 已啟用`, 'success');
+                showToast(`Version ${versionId} activated`, 'success');
                 // Find the activated version's persona to query correct active version
                 const versRes = await fetch('/api/training/versions');
                 const versData = await versRes.json();
@@ -1198,7 +1198,7 @@
                 loadVersions(null, personaId);
             } catch (e) {
                 log(`Activation failed: ${e.message}`, 'error');
-                showToast('啟用失敗: ' + e.message, 'error');
+                showToast('Activation failed: ' + e.message, 'error');
             }
         }
 
@@ -1217,12 +1217,12 @@
                 const response = await fetch(`/api/training/versions/${versionId}`, { method: 'DELETE' });
                 if (!response.ok) throw new Error('Delete failed');
                 log(`Deleted: ${versionId}`);
-                showToast(`版本已刪除`, 'success');
+                showToast(`Version deleted`, 'success');
                 cancelDelete(versionId);
                 loadVersions();
             } catch (e) {
                 log(`Delete failed: ${e.message}`, 'error');
-                showToast('刪除失敗: ' + e.message, 'error');
+                showToast('Delete failed: ' + e.message, 'error');
                 cancelDelete(versionId);
             }
         }
@@ -1244,7 +1244,7 @@
                 } catch (_) {}
                 if (currentPreviewVersionId) {
                     const btn = document.querySelector(`[data-preview-btn="${currentPreviewVersionId}"]`);
-                    if (btn) btn.textContent = '▶ 預覽';
+                    if (btn) btn.textContent = '▶ Preview';
                 }
             }
             currentPreviewAudio = null;
@@ -1252,7 +1252,7 @@
         }
 
         async function previewVersion(versionId) {
-            if (gateIfTraining('預覽語音')) return;
+            if (gateIfTraining('preview voice')) return;
             // If THIS version is the one playing, button click = stop. If a
             // DIFFERENT version is playing, stop it first then start new one.
             if (currentPreviewVersionId === versionId && currentPreviewAudio) {
@@ -1261,10 +1261,10 @@
             }
             stopPreview();
 
-            const previewText = document.getElementById('previewText').value.trim() || '你好，這是我的聲音測試。';
+            const previewText = document.getElementById('previewText').value.trim() || 'Hello, this is a test of my voice.';
             log(`Generating preview for ${versionId}: "${previewText}"...`);
             const btn = document.querySelector(`[data-preview-btn="${versionId}"]`);
-            if (btn) btn.textContent = '⏳ 生成中…';
+            if (btn) btn.textContent = '⏳ Generating…';
             try {
                 const response = await fetch(`/api/training/versions/${versionId}/preview`, {
                     method: 'POST',
@@ -1291,12 +1291,12 @@
                     }
                 });
                 audio.play();
-                if (btn) btn.textContent = '⏹ 停止';
+                if (btn) btn.textContent = '⏹ Stop';
                 log(`Preview playing for ${versionId} (click again to stop)`);
             } catch (e) {
-                if (btn) btn.textContent = '▶ 預覽';
+                if (btn) btn.textContent = '▶ Preview';
                 log(`Preview failed: ${e.message}`, 'error');
-                showToast('預覽失敗: ' + e.message, 'error');
+                showToast('Preview failed: ' + e.message, 'error');
             }
         }
 
