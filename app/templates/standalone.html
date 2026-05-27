@@ -60,6 +60,18 @@
             <button onclick="loadVersions()" style="background: #333; color: #aaa; border: none; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 0.75rem; margin-left: auto;">🔄</button>
         </div>
 
+        <!-- Persona-listener tone chip — shows the audience that switching
+             the dropdown changes the AI's relationship to whoever it's
+             talking to. Updates instantly on dropdown change via
+             onListenerChange / onPersonaChange handlers. -->
+        <div id="toneChip" style="background: linear-gradient(135deg, #2a1d3a, #1d2a3a); border-radius: 20px; padding: 6px 14px; margin-bottom: 12px; font-size: 0.85rem; display: inline-flex; align-items: center; gap: 6px; color: #c89efa;">
+            <span style="opacity: 0.7;">💬 正在以</span>
+            <span id="toneChipPersona" style="font-weight: 600; color: #fff;">—</span>
+            <span style="opacity: 0.7;">的口氣對</span>
+            <span id="toneChipListener" style="font-weight: 600; color: #fff;">—</span>
+            <span style="opacity: 0.7;">說話</span>
+        </div>
+
         <!-- Single-button FSM control row (refactor 2026-05-20).
              The old four-button row (開始對話/停止對話/開始錄音/停止錄音/強制送出/取消)
              collapsed into ONE primary button whose label is driven by the
@@ -70,6 +82,10 @@
                 <input type="checkbox" id="autoContinueChk" checked>
                 <span>自動繼續對話</span>
             </label>
+            <button id="demoResetBtn" onclick="demoReset()" title="Demo reset — clear conversation, stop everything, restore active version, return to ready"
+                    style="background: transparent; color: #555; border: 1px solid #333; padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 0.75rem; margin-left: auto;">
+                ↺ reset
+            </button>
         </div>
 
         <div class="conversation" id="conversation">

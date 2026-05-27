@@ -272,11 +272,25 @@ class FasterQwenTTSEngine:
         # half-swapped state (was a documented race pre-Phase-2: two
         # callers both observed is_loaded=False and both triggered loads,
         # leaking model memory).
+        needs_warmup = False
         with self._load_lock:
             if self._is_loaded:
                 self._is_loaded = False
                 self._warmed_up = False
                 self._ensure_loaded_locked()
+                needs_warmup = True
+
+        # After model swap, re-capture CUDA graphs for the new model so
+        # the first generate_streaming() call doesn't pay the 5-7s graph-
+        # capture cost. Called outside the load_lock to avoid deadlocking
+        # (warmup() acquires _load_lock via _ensure_loaded()).
+        if needs_warmup:
+            try:
+                log.info(f"[TTS] Re-warming model after activation: {merged_path}")
+                self.warmup()
+                log.info(f"[TTS] Re-warm complete")
+            except Exception as e:
+                log.warning(f"[TTS] Re-warm failed (first generation will be slow): {e}")
 
     def deactivate_lora(self):
         """Deactivate merged model and use base VoiceDesign model."""

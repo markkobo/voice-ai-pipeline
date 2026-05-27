@@ -969,8 +969,12 @@ async function startRecording() {
         log('start_speech sent');
         transition(STATE.LISTENING, 'startRecording');
     } catch (e) {
+        // No alert() — modal popup mid-demo would be catastrophic on
+        // stage if Chrome happens to throw a permission/notfound error.
+        // Toast + log instead so the audience sees nothing dramatic and
+        // the operator can retry by clicking the button again.
         log('Mic error: ' + e.message);
-        alert('無法訪問麥克風: ' + e.message);
+        showToast('Mic 啟動失敗，再按一次試試: ' + e.message, 'error');
         transition(STATE.READY, 'startRecording failed');
     } finally {
         isStartingRecording = false;
@@ -1021,6 +1025,72 @@ function resendConfig(reason) {
     log('Config resent (' + reason + '): persona=' + personaEl.value + ' listener=' + listenerEl.value);
 }
 
+// Nuclear reset for live demos — if mid-demo state goes sideways
+// (stuck SPEAKING, runaway TTS, sticky mic indicator, ghost cancel
+// state), this button restores READY in one click without a full
+// page refresh (which would drop the WS + lose the worklet warmup).
+// Stops everything, clears the conversation, re-sends config to the
+// server, returns FSM to READY.
+async function demoReset() {
+    log('=== DEMO RESET ===');
+    try {
+        // 1. Kill any in-flight TTS audio
+        if (audioWorkletNode) {
+            try { audioWorkletNode.port.postMessage({ type: 'abort' }); } catch (_) {}
+        }
+        audioDrained = true;
+        // 2. Cancel any pending finish-response grace timer
+        if (typeof _maybeFinishTimer !== 'undefined' && _maybeFinishTimer) {
+            clearTimeout(_maybeFinishTimer);
+            _maybeFinishTimer = null;
+        }
+        // 3. Tell server to drop any in-flight LLM/TTS task
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            try { ws.send(JSON.stringify({ type: 'control', action: 'cancel' })); } catch (_) {}
+        }
+        // 4. Tear down mic completely
+        teardownMic();
+        // 5. Reset response-tracking counters so a stale late event can't fire callbacks
+        ttsStartCount = 0;
+        ttsDoneCount = 0;
+        llmDoneSeen = false;
+        ttsText = '';
+        ttsEmotion = '';
+        accumulatedChunks = [];
+        // 6. Clear the conversation DOM
+        if (convEl) {
+            convEl.innerHTML = '<div style="text-align:center;color:#666;padding:24px;">對話已重置</div>';
+            setTimeout(() => { if (convEl) convEl.innerHTML = ''; }, 1500);
+        }
+        // 7. Re-send config so the server's session state is in sync
+        resendConfig('demo reset');
+        // 8. Force FSM back to READY (or LISTENING-ready if ws is closed)
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            transition(STATE.READY, 'demo reset');
+        } else {
+            transition(STATE.IDLE, 'demo reset (ws closed)');
+        }
+        log('Demo reset complete');
+    } catch (e) {
+        log('Demo reset error: ' + e.message);
+    }
+}
+window.demoReset = demoReset;
+
+// Update the visible tone chip ("正在以 X 的口氣對 Y 說話") whenever
+// the persona OR listener selection changes. Pure visual reinforcement
+// for the demo audience — proves that the dropdowns aren't decorative
+// and that the AI's relationship to the listener is real state.
+function updateToneChip() {
+    const pEl = document.getElementById('toneChipPersona');
+    const lEl = document.getElementById('toneChipListener');
+    if (!pEl || !lEl) return;
+    const pOpt = personaEl.options[personaEl.selectedIndex];
+    const lOpt = listenerEl.options[listenerEl.selectedIndex];
+    pEl.textContent = pOpt ? (pOpt.textContent || pOpt.value) : '—';
+    lEl.textContent = lOpt ? (lOpt.textContent || lOpt.value) : '—';
+}
+
 personaEl.addEventListener('change', () => {
     // The server uses persona_id from the LAST config message to resolve
     // which TTS model to activate (custom_voice vs voice_clone). Without
@@ -1033,6 +1103,8 @@ personaEl.addEventListener('change', () => {
     // when persona changes.
     resendConfig('persona changed');
     loadVersions();
+    updateToneChip();
+    log('Persona switched to ' + personaEl.value + ' — new relationship-block applied for listener=' + listenerEl.value);
     // Server's eager-activation on config receipt swaps the model
     // synchronously, so a quick /api/system/status hit ~500ms later
     // will reflect the new active_version. The status bar normally
@@ -1044,6 +1116,8 @@ personaEl.addEventListener('change', () => {
 
 listenerEl.addEventListener('change', () => {
     resendConfig('listener changed');
+    updateToneChip();
+    log('Listener switched to ' + listenerEl.value + ' — persona will adapt tone (same voice)');
 });
 
 document.addEventListener('keydown', (e) => {
@@ -1138,4 +1212,5 @@ connect();
 (async () => {
     await Promise.all([loadPersonasIntoSelect(), loadListenersIntoSelect()]);
     loadVersions();
+    updateToneChip();  // initial chip render once dropdowns are populated
 })();
