@@ -403,7 +403,7 @@ class FasterQwenTTSEngine:
         self,
         text: str,
         instruct: Optional[str] = None,
-        language: str = "Chinese",
+        language: str = "auto",
         reference_audio: Optional[str] = None,
         voice_clone_prompt=None,
     ) -> AsyncIterator[TTSStreamEvent]:
@@ -413,7 +413,14 @@ class FasterQwenTTSEngine:
         Args:
             text: Text to synthesize
             instruct: Emotion instruct string (e.g., "(gentle, warm)")
-            language: Language code
+            language: Language code. Default "auto" — no codec language
+                token is injected (modeling_qwen3_tts.py:2135-2140), so
+                the trained code_predictor + speaker_embedding fully
+                determine prosody. Previously hardcoded "Chinese", which
+                injects codec_language_id["chinese"]=2055 as a codec
+                prefix and biases generation toward Beijing-accent
+                patterns even with spk_is_dialect=False. Symptom: clones
+                of Taiwan-accent speakers still sounded Beijing-ish.
             reference_audio: Path to reference audio for voice cloning
             voice_clone_prompt: Pre-built voice clone prompt (not needed with merged model)
         """
