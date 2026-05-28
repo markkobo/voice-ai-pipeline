@@ -49,9 +49,22 @@ multi-listener voice routing.
 
 Migrate to an OSS Chinese end-to-end speech-to-speech model **only when**
 one ships with voice cloning. Abstracted `BaseConversationEngine`
-interface (§4) makes this a swap, not a rewrite. Watch list: Chroma
-Chinese forks, future Qwen3.5-Omni iterations, community attempts to add
-a cloning head to Qwen Omni.
+interface (§4) makes this a swap, not a rewrite. **Step-Audio 2 mini
+(Apache 2.0, native CN, zero-shot cloning via text-audio token
+interleaving) is the leading open-weight bet today** and the primary
+M13 target. Watch list also: Kimi-Audio, LLaMA-Omni 2, Chroma Chinese
+forks, future Qwen3.5-Omni iterations.
+
+The **highest-leverage single action** is a 1-day Qwen3.5-Omni-Light
+cloning eval spike — Light has open weights on HF as of 2026-03-30. If
+cloning quality matches the paper benchmarks, M12 (hybrid) and M13
+(E2E S2S) collapse into one week of deployment instead of a 6-12 month
+wait. See M12a below.
+
+A new **M-Consent** milestone (§M-Consent, inserted before M7) covers
+consent capture, revocation, audio watermarking, and audit trail —
+NO FAKES Act / EU AI Act / CA AB 1836 are now a commercial blocker for
+both B2C and B2B sale.
 
 ### Single-line stance
 
@@ -145,6 +158,73 @@ Hardware target: DGX Spark 128 GB unified (per hardware_targets memory)
 
 ---
 
+### M-Consent — Voice Cloning Consent, Revocation, and Compliance (2026-06, PARALLEL TO M7)
+
+**Goal.** Build consent capture + revocation flow + audio watermarking
++ audit trail. Required for B2B sales (eldercare / hospice / memorial
+SaaS) and exposed B2C in regulated markets. **Currently absent from
+the roadmap entirely** — implied by `project_legacy_product_vision`
+memory but never written up in any prior RFC.
+
+**Dependencies.** M-Demo done. Can run parallel to M7 (different code
+surfaces).
+
+**Regulatory drivers.**
+
+- **NO FAKES Act (US, 2025)** — prohibits unauthorized digital
+  replicas of voice/likeness; lifetime + 70 years post-mortem.
+- **EU AI Act** (in effect 2024-2026) — voice cloning classified
+  high-risk; transparency / watermarking obligations for
+  AI-generated content.
+- **California AB 1836 (2026)** — post-mortem voice and likeness
+  rights, 70-year duration. **California AB 2602 (Jan 2025)** —
+  strengthens informed-consent requirements for digital replicas.
+- Diaspora ICP includes US (California is the largest single market).
+
+**Reference paper.** **The Making of Digital Ghosts: Designing Ethical
+AI Afterlives** ([arXiv:2511.20094](https://arxiv.org/pdf/2511.20094),
+Nov 2025) — ethical framework for deceased-person modeling. Covers
+consent, psychological harm (esp. to children), identity distortion.
+EverHome IS this category; we need a written ethical position before
+customer onboarding.
+
+**Deliverables.**
+
+- **Consent form UI** in `/ui/recordings` — per-recording opt-in,
+  listener-scope selector (who is allowed to hear this voice?),
+  expiration date, jurisdiction tag at intake.
+- **Revocation API** — `DELETE /api/consent/{recording_id}` with
+  persistent tombstone. Recordings deleted but **trained model
+  retraining required** (LoRA derived from revoked data is itself
+  revoked — surface this honestly in the UI per `feedback_fail_loud`).
+- **Audio watermarking** on synthesized output —
+  - Audible disclosure option for B2C (configurable per persona)
+  - Inaudible audit-trail watermark for B2B (compliance trail)
+- **Audit log** — who generated what voice for what listener when;
+  exportable per persona for legal discovery.
+- **Pre-mortem vs post-mortem path** — explicit UI distinction. For
+  living personas, consent is revocable by the person themselves. For
+  deceased, consent stewardship transfers to the designated family
+  steward per the consent record.
+
+**Cross-references.** Touches `RFC_M6` Phase 0 (corpus consent
+metadata). Informs M10 listener routing (listener-scope is a consent
+property, not just a routing key).
+
+**Risks.**
+
+| Risk | Mitigation |
+|---|---|
+| Without this milestone, B2B (eldercare / hospice / memorial SaaS) won't buy | Compliance is medical-grade required; ship before B2B sales motion |
+| Watermark library quality varies wildly | Use SilentCipher or AudioSeal class libraries; document choice + key rotation |
+| Revocation requires LoRA retraining → costly | Document expected retraining latency; queue revocation-triggered retrains; surface "model rebuilding" status in UI |
+| Pre-mortem clone of a still-living person — consent revocability over time | Per [Digital Doppelgangers, arXiv:2502.21248](https://arxiv.org/html/2502.21248v1) — revocability flow must be one-click + reversible-during-grace-period |
+
+**Effort estimate.** 2-3 weeks (UI + backend + watermark library
+integration). Can be parallel to M7.
+
+---
+
 ### M7 — Text / Ebook / Image ingestion (2026-06)
 
 **Goal.** Implement the ingestion pipeline that `RFC_M6_PERSONA_LLM_LEGACY.md`
@@ -158,12 +238,19 @@ into corpus chunks that feed RAG (and later persona-LoRA training).
 | Input | Pipeline |
 |---|---|
 | `.txt`, `.md` | Encoding normalize → segment to chunks |
-| `.pdf` | pdfplumber / PyMuPDF extract → fallback to Tesseract `chi_tra` OCR for image-only PDFs |
+| `.pdf` | **MinerU 2.5-Pro** (VLM-based, handles layout / tables / charts / cross-page merge; Chinese-native, image-in-table OCR) → markdown chunks |
 | `.epub` | ebooklib → chapter splits |
 | `.docx` | python-docx |
-| Photos of letters (JPG/PNG/HEIC) | Tesseract `chi_tra` → corpus chunk with `source_kind=letter_photo` |
+| Photos of letters (JPG/PNG/HEIC) | **PaddleOCR-VL 1.5** (94.5% OmniDocBench; supports simplified + traditional Chinese, pinyin, handwriting, vertical text) → corpus chunk with `source_kind=letter_photo` |
 | Family photos (JPG/PNG/HEIC) | EXIF metadata + optional LLM-generated caption; stored as RAG side-context |
 | WhatsApp `.txt` / Line `.txt` / WeChat CSV+HTML | Platform-specific parser → per-message rows |
+
+**OCR/PDF stack rationale.** The 2026 SOTA for Chinese + handwriting +
+complex layout has moved to VLM-based unified parsers. PaddleOCR-VL 1.5
++ MinerU 2.5-Pro together replace pdfplumber + PyMuPDF + Tesseract
+`chi_tra` in a single tool surface. Handwritten elder letters — the M7
+known weakness — are now in-scope rather than requiring `quality=low`
+admission of defeat.
 
 **New endpoints** (extend `RFC_M6` Phase 0):
 - `POST /api/corpus/upload?persona_id=&kind=` — multipart upload
@@ -183,9 +270,9 @@ unsupported formats, and partial parses must surface in the UI — never
 
 | Risk | Mitigation |
 |---|---|
-| Tesseract `chi_tra` poor on handwritten | Document fallback to commercial OCR (ABBYY-class) but ship printed-OCR first; flag handwritten as `quality=low` in manifest |
+| PaddleOCR-VL VRAM cost on A10G alongside other models | VLM is ~1-2 GB; profile during M7 build; can run on CPU at lower throughput if needed |
 | Large PDFs / EPUBs blow memory | Stream-chunk extraction; per-file size limit (default 100 MB) with override |
-| Mixed Traditional / Simplified | Both supported by Qwen tokenizer; no conversion at ingest time |
+| Mixed Traditional / Simplified | Both supported by Qwen tokenizer + PaddleOCR-VL natively; no conversion at ingest time |
 
 **Cross-references.** Subsumes `RFC_M6` Phase 0 slice 2. Cross-cuts
 `RFC_M6` Phase 4 (photo→letter OCR moves earlier).
@@ -202,22 +289,44 @@ prompt at conversation time.
 
 **Dependencies.** M7 (corpus must exist to index).
 
-**Architecture (per `persona_llm_architecture` memory + `RFC_M6` §3 Phase 1).**
+**Architecture (per `persona_llm_architecture` memory + `RFC_M6` §3 Phase 1 + 2026 research).**
+
+Primary architecture is now **ID-RAG** (Identity Retrieval-Augmented
+Generation, [arXiv:2509.25299](https://arxiv.org/abs/2509.25299), Sept
+2025) — grounds the agent persona in a dynamic identity knowledge graph
+(beliefs, traits, values) explicitly retrieved each turn. This replaces
+the plain dual-index BGE-M3 design.
 
 ```
-Style index    ← verbatim quips, retrieved as few-shot examples
-Stance index   ← (topic, stance, evidence, source) tuples extracted by LLM
+Identity graph (ID-RAG)   ← beliefs / traits / values, retrieved each turn
+Semantic facts (HippoRAG 2) ← multi-hop knowledge graph + Personalized PageRank
+Style index               ← verbatim quips, retrieved as few-shot examples
+Conversation memory       ← A-MEM or Mem0 layer, consolidates per-turn
 
-Embedding:     BGE-M3 (Chinese-native, hybrid dense+sparse)
+Embedding:     BGE-M3 (Chinese-native, hybrid dense+sparse) — retained as primitive
 Vector store:  LanceDB (Apache 2.0, embedded, Parquet-backed)
 Chunking:      Anthropic contextual prefix (~49% fewer top-20 misses)
 ```
 
+- **ID-RAG** — identity knowledge graph per persona; queried every
+  utterance to anchor "who is this person" before retrieval over facts.
+- **HippoRAG 2** ([arXiv:2502.14802](https://arxiv.org/html/2502.14802v1))
+  retained as the semantic-facts retriever — knowledge graph +
+  Personalized PageRank, higher multi-hop F1/Recall@5 than vanilla
+  top-k, lower indexing cost than GraphRAG / RAPTOR / LightRAG.
+- **A-MEM** ([arXiv:2502.12110](https://arxiv.org/pdf/2502.12110)) or
+  **Mem0** ([arXiv:2504.19413](https://arxiv.org/pdf/2504.19413)) for
+  conversation-time memory consolidation — "every chat with grandma
+  adds to her memory of you," not just static-corpus retrieval. Pick
+  one after a small bake-off; Mem0 is more turnkey, A-MEM is more
+  surgical.
+
 **Deliverables.**
 
-- `app/services/rag/` package: `indexer.py`, `retriever.py`,
-  `contextual_chunker.py`
+- `app/services/rag/` package: `id_graph.py`, `hippo_retriever.py`,
+  `conversation_memory.py`, `contextual_chunker.py`
 - LanceDB schema per persona: `data/personas/<persona_id>/lancedb/`
+- ID-graph store per persona: `data/personas/<persona_id>/id_graph/`
 - `POST /api/rag/reindex?persona_id=` — rebuild from corpus
 - Retrieval call inserted into `ws_asr.py` LLM-streaming path (replaces
   the stub `rag_retrieval_seconds` metric)
@@ -235,6 +344,7 @@ questions.
 | BGE-M3 weights size on Spark VRAM budget | 568 MB at FP16; fits |
 | Retrieval latency adds to E2E pipeline | Pre-warm + parallelize with LLM TTFT; target ≤80ms top-5 retrieval |
 | LLM hallucinates outside retrieved context | Persona-drift mitigation (anchor reinjection per `RFC_M6` §9 ref) deferred to M9 |
+| **Persona fidelity degrades over 100+ rounds** ([arXiv:2512.12775](https://arxiv.org/pdf/2512.12775)) — especially goal-oriented dialogue; elder users will accumulate 1000s of turns over months | Explicit identity anchor reinjection per turn (matches `RFC_M6` §9 already, validated by this paper); ID-RAG architecture above is the structural mitigation |
 
 **Cross-references.** Subsumes `RFC_M6` Phase 1-2.
 
@@ -260,17 +370,39 @@ against adversarial prompts.
 - For low-data personas (<500 organic turns) Constitutional-AI
   synthetic expansion is the recipe — per the OpenCharacter paper.
 
-**Paper reference.**
+**Paper reference — TWO complementary OpenCharacter papers.**
 
-- **OpenCharacter / Open Character Training** — arXiv **2511.01689**
-  (Nov 2025). First open implementation of character training via
-  Constitutional AI + synthetic introspective dialogue. 3-stage process
-  validated on Llama 3.1 8B, Qwen 2.5 7B, Gemma 3 4B. More robust to
-  adversarial prompting than system-prompt-only.
-- Repo: <https://anonymous.4open.science/r/OpenCharacterTraining>
-- HF: <https://huggingface.co/papers/2511.01689>
-- Methodology source: Anthropic Constitutional AI (Bai et al. 2022,
+There are two distinct "OpenCharacter" papers, easy to confuse, that we
+combine:
+
+- **OpenCharacter (Salesforce, Jan 2025)** — [arXiv:2501.15427](https://arxiv.org/abs/2501.15427).
+  Synthesizes 326K character-aligned instruction-response pairs from
+  PersonaHub via response-rewrite (`-R`) and response-generate (`-G`)
+  strategies; SFT on LLaMA-3 8B matches GPT-4o on role-play. HF
+  dataset: `xywang1/OpenCharacter` (326K rows, 1.19 GB). Use this
+  dataset as the persona-instruction mix.
+- **Open Character Training (Constitutional AI, Nov 2025)** —
+  [arXiv:2511.01689](https://arxiv.org/abs/2511.01689). First open
+  implementation of character training via Constitutional AI +
+  synthetic introspective dialogue. 3-stage process validated on
+  Llama 3.1 8B, Qwen 2.5 7B, Gemma 3 4B. More robust to adversarial
+  prompting than system-prompt-only. Repo:
+  <https://anonymous.4open.science/r/OpenCharacterTraining>; HF:
+  <https://huggingface.co/papers/2511.01689>.
+- **Methodology source:** Anthropic Constitutional AI (Bai et al. 2022,
   arXiv 2212.08073).
+
+**Combined recipe:** Salesforce 326K dataset as the general persona
+instruction mix, blended at 30-50% to combat catastrophic forgetting,
+then the Nov 2025 Constitutional AI + introspective-dialogue → SFT →
+DPO pipeline on top.
+
+**PersonaHub** (Tencent, [GitHub](https://github.com/tencent-ailab/persona-hub))
+— 1B synthetic personas; 370M elite subset released 2025. Solves the
+"elder won't have 326K examples" problem via data augmentation: sample-
+condition on demographically-similar PersonaHub personas to augment an
+elder's 50 organic turns into a synthetic 5K-turn corpus before LoRA
+training.
 
 **Dependencies.** M7 (corpus). M8 helpful but not strictly required —
 RAG provides facts; OpenCharacter provides voice/stance.
@@ -284,19 +416,36 @@ RAG provides facts; OpenCharacter provides voice/stance.
   with Taiwanese particles 啦 / 咧 / 蛤".
 - 3-stage training pipeline in `app/services/training_service/persona_llm/`:
   1. Generate introspective dialogue from constitution + corpus
-     seeds (Constitutional AI step)
-  2. SFT LoRA on Qwen 2.5 7B base, mixed with 30-50% general
-     instruction data
+     seeds (Constitutional AI step). For low-data personas, also
+     augment via PersonaHub demographically-similar sampling.
+  2. SFT LoRA on **Qwen 3 8B** base, mixed with 30-50% general
+     instruction data (Salesforce OpenCharacter 326K dataset).
   3. DPO on (in-character, off-character) preference pairs from a
-     self-critic
+     self-critic.
 - OPLoRA orthogonality (arXiv 2510.13003) applied to protect base
   capabilities.
 - Per-persona LoRA file at `data/personas/<persona_id>/persona_lora/`.
-- Switch from OpenAI gpt-4o-mini → local Qwen 2.5 7B (vLLM or llama.cpp)
+- Switch from OpenAI gpt-4o-mini → local Qwen 3 8B (vLLM or llama.cpp)
   on the same call. Mirrors `RFC_M6` Phase 2.
 
-**Choice of base.** Qwen 2.5 7B Instruct (per `chinese_support_stack`
-memory: CMMLU-leading, Chinese-native, AWQ-Q4 fits in 6 GB VRAM).
+**Choice of base.** **Qwen 3 8B** (updated from Qwen 2.5 7B). Same
+VRAM budget, current generation, better Chinese, better
+instruction-following. Per `chinese_support_stack` memory: Qwen line
+remains CMMLU-leading and Chinese-native; the persona-LoRA recipe
+transfers cleanly. Apache 2.0; supports vLLM / SGLang / llama.cpp /
+Ollama / MLX / KTransformers.
+
+**Acceptance gate.** **CharacterEval** ([arXiv:2401.01275](https://arxiv.org/abs/2401.01275))
+— Chinese-native persona benchmark built on Chinese novels/scripts;
+suits EverHome's domain better than English-only role-play evals. Run
+the trained persona LoRA against CharacterEval as M9 acceptance.
+
+**Evaluation methodology.** **Memory-Driven Role-Playing**
+([arXiv:2603.19313](https://arxiv.org/pdf/2603.19313)) decomposes
+role-playing memory use into 4 stages (cue → retrieve → integrate →
+respond) with per-stage diagnostic metrics. Use this to diagnose
+*where* a persona fails when CharacterEval scores drop, not just
+*that* it failed.
 
 **Risks & mitigations.**
 
@@ -307,19 +456,50 @@ memory: CMMLU-leading, Chinese-native, AWQ-Q4 fits in 6 GB VRAM).
 | Per-person LoRA proliferation | LRU loader: keep N most-recent in VRAM, swap on demand; document N-family-members ceiling |
 | Synthetic data leaks frontier-model style into the persona | Privacy ratchet (per `RFC_M6` §4.1) — soft default, opt-in per persona; show generated samples in UI before training |
 
+**Optional advanced add-on — M9.5: FinePE (Mixture of LoRA Experts).**
+
+[FinePE](https://www.sciencedirect.com/science/article/abs/pii/S1568494626003911)
+proposes MoLE-style routing across personality-subtrait LoRAs —
+separate adapters for e.g. "writing style", "factual memory", "speech
+mannerisms", gated at inference. Directly addresses persona-LoRA
+composition for richer characters.
+
+- ⚠ **Unverified for our domain.** Promising on paper, no public
+  validation on Chinese-elder-persona use case yet.
+- Mark as M9.5 (post-M9 enhancement). Don't block M9 on it; revisit
+  after M9 ships and CharacterEval baselines exist.
+
 **Cross-references.** Subsumes `RFC_M6` Phase 3. Independent of M10 but
 shares the per-persona artifact directory.
 
 **Effort estimate.** 6-8 weeks. (Heaviest milestone in this plan.)
+M9.5 FinePE add-on +2-3 weeks if pursued.
 
 ---
 
-### M10 — Multi-listener TTS routing (2026-08 → 2026-09)
+### M10 — Multi-listener voice routing (2026-08 → 2026-09)
 
 **Goal.** Finish the listener-routing path in `RFC_M5_MULTI_ADAPTER_VOICE_CLONING.md`
 that's currently 40% built (per `RFC_M5` §15).
 
-**Dependencies.** None hard; can interleave with M9.
+**Scope split — what survives an S2S pivot vs what doesn't.** The first
+60% of the routing work (config schema, listener taxonomy, persona ×
+listener matrix at the API surface) **survives any S2S pivot** — S2S
+Talker models still need to know "which persona, addressing which
+listener." The actual `set_active_adapter()` LoRA-swap mechanics
+(`RFC_M5` §15 line 5) may become **obsolete** if we move to an S2S
+model with system-prompt-style speaker selection (Qwen3.5-Omni-style,
+see M13).
+
+**Recommendation.** Build the persona/listener selection logic now (it
+pays off regardless). **Defer the deep LoRA-swap engineering until after
+M11 (TTS abstraction) ships and the M12a Step-Audio 2 mini eval
+clarifies the long-term architecture.** A `set_speaker_prompt()` call
+to an S2S Talker is structurally simpler than `set_active_adapter()`
+LoRA swap — don't over-engineer the swap if it's about to be replaced.
+
+**Dependencies.** None hard; can interleave with M9. Sequence M11
+ahead.
 
 **What's already done (per `RFC_M5` §15).**
 - `audio_resolver.py` filters segments by `(persona, listener)` pair
@@ -367,11 +547,25 @@ per-listener LoRA storage clean.
 
 ---
 
-### M11 — TTS engine abstraction (LOW PRIORITY, ANY TIME)
+### M11 — TTS engine abstraction (MEDIUM-HIGH PRIORITY — SHIP BEFORE M10/M12)
+
+**Priority change (2026-05-28).** Bumped from LOW → **MEDIUM-HIGH**.
+`BaseTTSEngine` is the **migration insurance policy** for the entire
+TTS swap roadmap (Qwen3-TTS → IndexTTS-2 → Step-Audio 2 → Qwen3.5-Omni
+when open). Without the abstraction, every swap requires invasive
+surgery in `app/services/tts/qwen_tts_engine.py` and
+`app/api/ws_asr.py`. Ship M11 **before or alongside M10/M12**, not
+after.
 
 **Goal.** Carve out a `BaseTTSEngine` interface so swapping TTS models
-(CosyVoice 2, future Qwen iterations, hypothetical OSS clones) is
-plug-and-play.
+(IndexTTS-2, Step-Audio 2 mini, CosyVoice 2, future Qwen iterations,
+hypothetical OSS clones) is plug-and-play.
+
+**Immediate TTS upgrade candidate.** **IndexTTS-2** (Bilibili,
+[GitHub](https://github.com/index-tts/index-tts)) — 3-10s reference
+audio, emotion control, duration control, native CN/EN/JP. Drop-in
+replacement for Qwen3-TTS via the new abstraction; independent of any
+S2S migration. Worth a parallel eval track once `BaseTTSEngine` lands.
 
 **Dependencies.** None.
 
@@ -397,18 +591,43 @@ Future `CosyVoiceEngine`, `ChromaEngine` etc. fit the same protocol.
 
 **Risk.** None — refactor only, behavior unchanged.
 
-**Effort estimate.** 1-2 hours.
+**Effort estimate.** 1-2 hours for the refactor itself; +1-3 days for
+a first parallel implementation (IndexTTS-2 wrapper) to validate the
+interface.
 
-**Why we're not blocking on it.** No swap on the horizon for 1-2
-months. Doing the refactor now costs little; deferring costs little.
-Plumb it in as a coding-hygiene pass when convenient.
+**Why this is now priority.** Multiple swap candidates are live
+(IndexTTS-2 today; Step-Audio 2 mini for M12a; Qwen3.5-Omni when open).
+Without the abstraction, each evaluation requires invasive `ws_asr.py`
+surgery and risks breaking the shipped pipeline. Ship M11 first.
 
 ---
 
 ### M12 — Hybrid pipeline with Qwen 2.5 Omni 7B (2026-09 → 2026-10)
 
-**Goal.** Eliminate the ASR→LLM hop by collapsing ASR and LLM into
-**Qwen 2.5 Omni 7B**. Retain Qwen3-TTS for voice cloning. Target
+**Sequencing change (2026-05-28).** Before committing to M12, run two
+spikes:
+
+- **M12a: Step-Audio 2 mini evaluation track** (Apache 2.0, native CN,
+  zero-shot voice cloning via text-audio token interleaving; CER 3.11%,
+  URO-Bench CN 83.3% win-rate; [Repo](https://github.com/stepfun-ai/Step-Audio2)
+  / [Tech Report arXiv:2507.16632](https://arxiv.org/pdf/2507.16632)).
+  Run before or in parallel to M12. If passes CharacterEval + voice-
+  quality gate, **leapfrogs both M12 and M13** — Step-Audio 2 mini is
+  the only currently-shippable open-weight S2S with native cloning.
+- **Qwen3.5-Omni-Light cloning spike (1-day eval)** — **highest-
+  leverage single action.** Light has open weights on HF as of
+  2026-03-30 ([Tech Report arXiv:2604.15804](https://arxiv.org/abs/2604.15804)).
+  Spend one day testing zero-shot cloning quality on existing test/v11
+  source audio. If quality lands at paper-claimed level, **M12 and M13
+  collapse into one week of deployment** instead of a 6-12 month wait.
+  Step-Audio 2 mini remains the parallel fallback if Light's cloning
+  underperforms on Traditional Chinese / Taiwan accent.
+
+Update M12 dependencies: **spike first → decide architecture → execute.**
+
+**Goal (if both spikes negative / inconclusive).** Eliminate the
+ASR→LLM hop by collapsing ASR and LLM into **Qwen 2.5 Omni 7B**.
+Retain Qwen3-TTS (or IndexTTS-2 via M11) for voice cloning. Target
 end-to-end sub-1s latency.
 
 **Why this hybrid (per `qwen_omni_evaluation` memory).**
@@ -457,13 +676,19 @@ swap the entire pipeline behind the `BaseConversationEngine` interface.
 
 **Dependencies.** M11 + M12 (so the swap is genuinely plug-and-play).
 
-**Watch list (per recent conversation + `qwen_omni_evaluation` Phase 3).**
+**Watch list (re-ranked 2026-05-28 by relevance to Chinese use case).**
 
-| Candidate | Signal | Status |
-|---|---|---|
-| Qwen3.5-Omni (future) | Iteration of Omni line; cloning request open upstream | TBD |
-| Chroma Chinese fork | FlashLabs FlashAI 2.0 is built on Chroma but no cloning; community fork rumored | TBD |
-| OSS cloning head on Qwen Omni (community or ours) | Architecture-level patch | Speculative |
+| # | Candidate | Signal | Status |
+|---|---|---|---|
+| 1 | **Step-Audio 2 / Step-Audio 2 mini (StepFun)** | Apache 2.0, native CN, zero-shot cloning via text-audio token interleaving; CER 3.11%, URO-Bench CN 83.3% | **Currently evaluable — primary M12a target** |
+| 2 | **Qwen3.5-Omni-Light** | Open weights on HF as of 2026-03-30; system-prompt-style cloning; zero-shot from 10-30s ref audio | **Currently evaluable — 1-day spike (highest leverage)** |
+| 3 | **Kimi-Audio-7B (Moonshot)** | Built on Qwen 2.5 base — M9 persona LoRA may transfer with adapter surgery; ~14 GB; partial cloning | Evaluable |
+| 4 | **LLaMA-Omni 2 (ICT-CAS)** | Built on Qwen 2.5 + CosyVoice2; 226-583ms latency; cloning inherits from CosyVoice2 | Evaluable |
+| 5 | **GLM-4-Voice-9B (Zhipu/Tsinghua)** | Native CN+EN; instruction-controlled prosody (not ref-audio clone); good for prosody control | Evaluable |
+| 6 | **Step-Audio 2.5 Realtime (StepFun)** | **Closed (API only)** — roleplay-specific RLHF + 10k+ persona training; closest-in-spirit to EverHome | **Reference / quality-ceiling benchmark** (don't use; cite as gold standard) |
+| 7 | Chroma 1.0 (FlashLabs) | English-trained but **architecture is language-agnostic** (correction from earlier roadmap claim — was "English-only"); Chinese fine-tune may be feasible | Watch |
+| 8 | Future Qwen3.5-Omni Plus/Flash open release | If/when QwenLM open-sources Plus/Flash, M12+M13 collapse fully | Watch |
+| 9 | OSS cloning head on Qwen Omni (community or ours) | Architecture-level patch | Speculative |
 
 **Triggers to actually migrate.**
 
@@ -485,10 +710,34 @@ abstracted).
 
 Three interfaces + one watch script. None costs more than half a day.
 
-### 4.1 `BaseTTSEngine` (sketched in §M11)
+### 4.0 Migration risk table — what survives an S2S pivot
 
-Lets us swap Qwen3-TTS for CosyVoice 2 / future iterations without
-touching `ws_asr.py`. Minimum surface:
+Per the migration analysis in `RESEARCH_VERIFY_S2S_PERSONA.md` §4, here
+is the milestone-by-milestone exposure to an S2S pivot in 6 months
+(Step-Audio 2 mini or Qwen3.5-Omni-Light if cloning eval passes):
+
+| Milestone | Survives S2S? | Investment recommendation |
+|---|---|---|
+| **M-Consent** | ✓✓ Survives. Compliance is model-agnostic. | Build now, full speed. |
+| **M7** Text/ebook/image ingestion | ✓✓ Untouched by S2S. Corpus is upstream of any model. | Build now, full speed. |
+| **M8** Memory RAG | ✓✓ Survives. ID-RAG architecture maps cleanly onto S2S. | Build now, full speed. |
+| **M9** OpenCharacter persona LLM | ✓ Data + technique survive. LoRA target model may change (Qwen 3 8B → Step-Audio 2 base → Qwen3.5-Omni base). | Build the data pipeline and eval harness now. Train LoRA against current backbone but design for backbone-swap. |
+| **M10** Multi-listener voice routing | ⚠ First 60% (config, routing, persona × listener matrix) survives. LoRA-swap mechanics may be replaced by S2S `set_speaker_prompt()`. | Build routing logic now, defer deep LoRA-swap until after M12a. |
+| **M11** TTS engine abstraction | ✓✓ **Critical.** This *is* the migration insurance policy. | **Bumped to MEDIUM-HIGH priority. Ship before M10/M12.** |
+| **M12** Qwen2.5-Omni hybrid | ⚠ At risk — Step-Audio 2 mini may be a better target. | Run M12a Step-Audio 2 mini + Qwen3.5-Omni-Light spike before committing M12. |
+| **M13** OSS E2E S2S w/ cloning | The whole point. Was opportunistic; **upgrade to definite if Step-Audio 2 cloning works.** | Run Step-Audio 2 mini Apache-2.0 pilot in parallel with M12. Don't wait. |
+
+**TTS LoRA freeze recommendation.** Per the migration analysis, the
+shipped Qwen3-TTS LoRA (`talker.model` code_predictor) is the stage
+most likely to be obsoleted by an S2S cutover. **Don't add features**
+to TTS LoRA training after current shipping state; reroute bandwidth
+to M8 RAG / M9 persona LLM where the work compounds across architectures.
+
+### 4.1 `BaseTTSEngine` (sketched in §M11) — CRITICAL, SHIP BEFORE ANY S2S EVAL
+
+Lets us swap Qwen3-TTS for IndexTTS-2 / Step-Audio 2 / Qwen3.5-Omni
+(when open) / CosyVoice 2 / future iterations without touching
+`ws_asr.py`. Minimum surface:
 
 ```python
 class BaseTTSEngine(Protocol):
@@ -591,18 +840,37 @@ SKU. Not on near-term roadmap.
 
 | Paper / Project | arXiv / URL | Use in roadmap |
 |---|---|---|
-| **Open Character Training** | arXiv 2511.01689 (Nov 2025) | M9 — persona LoRA training recipe |
+| **OpenCharacter (Salesforce)** | [arXiv 2501.15427](https://arxiv.org/abs/2501.15427) (Jan 2025) | M9 — 326K-row persona-instruction dataset for SFT mix |
+| **Open Character Training (Constitutional AI)** | [arXiv 2511.01689](https://arxiv.org/abs/2511.01689) (Nov 2025) | M9 — Constitutional AI methodology, 3-stage SFT→DPO recipe |
 | Anthropic Constitutional AI | arXiv 2212.08073 (Bai et al. 2022) | M9 — methodology foundation |
 | OPLoRA | arXiv 2510.13003 | M9 — orthogonal LoRA, preserves base |
-| BGE-M3 | HuggingFace `BAAI/bge-m3` | M8 — Chinese-native hybrid embedding |
+| **Tencent PersonaHub** | [GitHub](https://github.com/tencent-ailab/persona-hub) | M9 — 1B synthetic personas, 370M elite subset, data augmentation for low-data elders |
+| **CharacterEval (CN benchmark)** | [arXiv 2401.01275](https://arxiv.org/abs/2401.01275) | M9 — Chinese-native persona benchmark, acceptance gate |
+| **Memory-Driven Role-Playing** | [arXiv 2603.19313](https://arxiv.org/pdf/2603.19313) | M9 — 4-stage evaluation methodology (cue → retrieve → integrate → respond) |
+| **AMADEUS / CharacterRAG dataset** | [arXiv 2508.02016](https://arxiv.org/pdf/2508.02016) | M9 — training-free RP eval harness, 15-character/450-QA dataset |
+| **Persistent Personas? (extended interactions)** | [arXiv 2512.12775](https://arxiv.org/pdf/2512.12775) | M8/M9 — persona fidelity degrades over 100+ rounds; mitigation = identity anchor reinjection |
+| **FinePE (MoLE persona editing)** | [ScienceDirect](https://www.sciencedirect.com/science/article/abs/pii/S1568494626003911) | M9.5 — Mixture of LoRA Experts for persona-subtrait composition (⚠ unverified) |
+| **ID-RAG (Identity RAG)** | [arXiv 2509.25299](https://arxiv.org/abs/2509.25299) (Sept 2025) | M8 — primary architecture; identity knowledge graph retrieved each turn |
+| **HippoRAG 2 (From RAG to Memory)** | [arXiv 2502.14802](https://arxiv.org/html/2502.14802v1) | M8 — semantic-facts retriever (KG + Personalized PageRank) |
+| **A-MEM (Agentic Memory)** | [arXiv 2502.12110](https://arxiv.org/pdf/2502.12110) | M8 — conversation-time memory consolidation candidate |
+| **Mem0 (Scalable Long-Term Memory)** | [arXiv 2504.19413](https://arxiv.org/pdf/2504.19413) | M8 — conversation memory candidate (alt to A-MEM) |
+| BGE-M3 | HuggingFace `BAAI/bge-m3` | M8 — Chinese-native hybrid embedding (retained as primitive) |
 | Anthropic Contextual Retrieval | anthropic.com/news/contextual-retrieval | M8 — chunk-prefix-with-context |
 | Persona Drift | arXiv 2402.10962 | M9 — drift measurement + anchor reinjection |
-| Qwen 2.5 Omni 7B | huggingface.co/Qwen | M12 — hybrid ASR+LLM |
+| **PaddleOCR-VL 1.5** | [HF PaddlePaddle/PaddleOCR-VL](https://huggingface.co/PaddlePaddle/PaddleOCR-VL) ([tech report arXiv 2507.05595](https://arxiv.org/html/2507.05595v1)) | M7 — OCR (handwriting + CN simplified/traditional + pinyin + vertical text) |
+| **MinerU 2.5-Pro** | [GitHub opendatalab/MinerU](https://github.com/opendatalab/MinerU) | M7 — PDF/document parser (Chinese-native, VLM-based) |
+| **IndexTTS-2** | [GitHub index-tts/index-tts](https://github.com/index-tts/index-tts) | M11 — immediate TTS upgrade candidate (3-10s ref audio, emotion + duration control) |
+| **Step-Audio 2 mini** | [arXiv 2507.16632](https://arxiv.org/pdf/2507.16632) / [GitHub stepfun-ai/Step-Audio2](https://github.com/stepfun-ai/Step-Audio2) | M12a / M13 — primary open-weight S2S candidate, Apache 2.0 |
+| **Step-Audio 2.5 Realtime** | [MarkTechPost](https://www.marktechpost.com/2026/05/24/stepfun-releases-stepaudio-2-5-realtime-an-end-to-end-voice-model-with-roleplay-specific-rlhf-and-paralinguistic-comprehension/) | M13 — closed API; benchmark / quality-ceiling reference (10k+ persona RLHF) |
+| **Qwen3.5-Omni Technical Report** | [arXiv 2604.15804](https://arxiv.org/html/2604.15804v1) | M12a / M13 — Light variant open-weight on HF as of 2026-03-30; cloning spike target |
+| Qwen 2.5 Omni 7B | huggingface.co/Qwen | M12 — hybrid ASR+LLM (fallback if M12a spikes inconclusive) |
 | Qwen 3 Omni 30B-A3B | huggingface.co/Qwen | NOT used — doesn't fit hardware budget |
-| Chroma (FlashLabs) | flashlabs.ai | M13 — watch list, no cloning today |
+| Chroma (FlashLabs) | flashlabs.ai | M13 — watch list (English-trained, architecture language-agnostic — correction from earlier roadmap) |
 | LanceDB | lancedb.com (Apache 2.0) | M8 — vector store |
-| Qwen 2.5 7B Instruct | huggingface.co/Qwen | M9 — persona LoRA base |
-| Qwen3-TTS 1.7B VoiceDesign | huggingface.co/Qwen | All milestones — TTS retained for cloning |
+| **Qwen 3 8B** | [QwenLM/Qwen3](https://github.com/QwenLM/Qwen3) | M9 — persona LoRA base (replaces Qwen 2.5 7B) |
+| Qwen3-TTS 1.7B VoiceDesign | huggingface.co/Qwen | All milestones — TTS retained for cloning until M11 swap |
+| **The Making of Digital Ghosts** | [arXiv 2511.20094](https://arxiv.org/pdf/2511.20094) (Nov 2025) | M-Consent — ethical framework for deceased-person modeling |
+| **Digital Doppelgangers (pre-mortem clones)** | [arXiv 2502.21248](https://arxiv.org/html/2502.21248v1) | M-Consent — revocability flow for still-living personas |
 
 ---
 
@@ -681,6 +949,17 @@ strategic side-note). They have no cloning — we do.
 | `RFC_2_2_Addendum_Persona_Factory.md` | Persona-as-data JSON loader | Shipped | Folded into M9 (UI authoring for personas + constitution) |
 | `RFC_2_3_Adaptive_Voice_Cloning.md` | Per-listener reference-audio cloning | Superseded in practice by LoRA path (`RFC_M4`) | **M10** completes listener routing via adapter, not reference audio |
 
+**Priority changes 2026-05-28:**
+
+- **M11 (TTS engine abstraction) bumped from LOW → MEDIUM-HIGH.**
+  Ship before M10/M12. Without it, every TTS swap evaluation (IndexTTS-2,
+  Step-Audio 2 mini, Qwen3.5-Omni-Light) requires invasive surgery in
+  `ws_asr.py`.
+- **M-Consent inserted before M7** (parallel track). Compliance is a
+  commercial blocker for B2B sales.
+- **M12a (Step-Audio 2 mini + Qwen3.5-Omni-Light spikes) added** as a
+  prerequisite gate to M12.
+
 ---
 
 ## 10. Sequencing at a glance
@@ -693,32 +972,38 @@ strategic side-note). They have no cloning — we do.
 ├─ JUN 02  ─┘  ← NY Tech Week demo
 │
 ├─ JUN     ─┐
-│           ├─ M7 — Text / ebook / image ingestion
+│           ├─ M-Consent (consent / revocation / watermark / audit) — parallel to M7
+│           ├─ M7 — Text / ebook / image ingestion (PaddleOCR-VL + MinerU 2.5-Pro)
 ├─ JUL     ─┘
 │
+│           ★ M11 — TTS engine abstraction (BUMPED priority — ship here, before M10/M12)
+│
 ├─ JUL     ─┐
-│           ├─ M8 — Memory RAG (BGE-M3 + LanceDB + dual index)
+│           ├─ M8 — Memory RAG (ID-RAG + HippoRAG 2 + A-MEM/Mem0)
 ├─ AUG     ─┘
 │
 ├─ JUL     ─┐
-│           ├─ M9 — OpenCharacter persona LoRA + Qwen 2.5 7B local
+│           ├─ M9 — OpenCharacter persona LoRA + Qwen 3 8B local + CharacterEval gate
 ├─ AUG     ─┘
 │
 ├─ AUG     ─┐
-│           ├─ M10 — Multi-listener TTS routing (adapter_registry.json)
+│           ├─ M10 — Multi-listener voice routing (build routing, defer LoRA-swap engineering)
 ├─ SEP     ─┘
 │
-│           M11 — TTS engine abstraction (1-2 hr, slot in any time)
+├─ AUG     ─┐
+│           ├─ M12a — Step-Audio 2 mini eval + Qwen3.5-Omni-Light cloning spike
+├─ SEP     ─┘    (highest-leverage single action; may collapse M12+M13)
 │
 ├─ SEP     ─┐
-│           ├─ M12 — Hybrid pipeline (Qwen 2.5 Omni 7B + Qwen3-TTS)
-├─ OCT     ─┘
+│           ├─ M12 — Hybrid pipeline (Qwen 2.5 Omni 7B + IndexTTS-2/Qwen3-TTS)
+├─ OCT     ─┘   — IF M12a spikes inconclusive
 │
-└─ Q4 +     M13 — OSS E2E S2S migration (opportunistic, when model ships)
+└─ Q4 +     M13 — OSS E2E S2S migration (Step-Audio 2 primary; Chroma watch)
 ```
 
 Milestones M8 and M9 run in parallel (different code paths, share corpus
-from M7).
+from M7). M-Consent and M7 run in parallel (different code surfaces).
+M12a precedes M12 and may obviate it.
 
 ---
 
