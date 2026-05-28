@@ -703,6 +703,45 @@
             startBtn.disabled = totalDuration < 10;
         }
 
+        // Learning-rate options per training_type. Both default to 1e-5
+        // (the safer default empirically — SFT at 1e-6 stalled v10, LoRA
+        // at 1e-4 caused runaway training). LoRA tops out at 1e-4 (with
+        // a "catastrophic" label) because that's the historical breaking
+        // point; SFT tops out at 5e-5 which is the "test if 1e-5 stalls"
+        // ceiling. See task description for empirical context.
+        const LR_OPTIONS = {
+            sft: [
+                { value: '1e-6', label: '1e-6 (very conservative — may stall)' },
+                { value: '5e-6', label: '5e-6 (conservative)' },
+                { value: '1e-5', label: '1e-5 (default)' },
+                { value: '2e-5', label: '2e-5 (aggressive)' },
+                { value: '5e-5', label: '5e-5 (ceiling — test if 1e-5 stalls)' },
+            ],
+            lora: [
+                { value: '1e-6', label: '1e-6 (very conservative)' },
+                { value: '5e-6', label: '5e-6 (conservative)' },
+                { value: '1e-5', label: '1e-5 (default, safer)' },
+                { value: '5e-5', label: '5e-5 (risky)' },
+                { value: '1e-4', label: '1e-4 (experimental — has caused runaway)' },
+            ],
+        };
+        const DEFAULT_LR = '1e-5';
+
+        // Preserve user's previously chosen LR across training_type
+        // switches when possible (the option exists in the new list);
+        // otherwise fall back to DEFAULT_LR.
+        function populateLearningRateOptions(trainingType, preserveValue) {
+            const sel = document.getElementById('learningRateSelect');
+            if (!sel) return;
+            const opts = LR_OPTIONS[trainingType] || LR_OPTIONS.sft;
+            const valid = opts.some(o => o.value === preserveValue);
+            const target = valid ? preserveValue : DEFAULT_LR;
+            sel.innerHTML = opts.map(o => {
+                const sel = o.value === target ? ' selected' : '';
+                return `<option value="${o.value}"${sel}>${o.label}</option>`;
+            }).join('');
+        }
+
         // Hide/show LoRA-rank field + experimental warning based on
         // selected training type. The LoRA path is currently unstable
         // (forward_sub_talker_finetune only reaches code_predictor) so
@@ -715,7 +754,20 @@
             const isLora = (ttype === 'lora');
             if (rankGroup) rankGroup.style.display = isLora ? '' : 'none';
             if (warning) warning.style.display = isLora ? '' : 'none';
+            // Repopulate LR dropdown for the new training_type, keeping
+            // the user's current choice if still valid.
+            const lrSel = document.getElementById('learningRateSelect');
+            const currentLr = lrSel ? lrSel.value : DEFAULT_LR;
+            populateLearningRateOptions(ttype, currentLr);
         }
+
+        // Initial population on page load (SFT default). Must run after
+        // the DOM has the <select> — this script is loaded at the bottom
+        // of training.html so the element is guaranteed to exist.
+        populateLearningRateOptions(
+            document.getElementById('trainingTypeSelect')?.value || 'sft',
+            DEFAULT_LR
+        );
 
         // ==================== START TRAINING ====================
         async function startTraining() {
@@ -730,6 +782,11 @@
             const epochs = parseInt(document.getElementById('epochsSelect').value);
             const rank = parseInt(document.getElementById('rankSelect').value);
             const batchSize = parseInt(document.getElementById('batchSizeSelect').value);
+            // Learning rate: parseFloat handles scientific notation
+            // ("1e-5" → 0.00001). Backend (CreateTrainingRequest in
+            // app/api/training.py) accepts learning_rate: Optional[float].
+            const lrRaw = document.getElementById('learningRateSelect').value;
+            const learningRate = lrRaw ? parseFloat(lrRaw) : null;
             // Empty string ("不指定") → null → backend writes Python False
             // into spk_is_dialect[persona]. Non-empty → string like
             // "chinese" / "english" that the backend bakes verbatim.
@@ -777,6 +834,7 @@
                     batch_size: batchSize,
                     training_type: trainingType,
                     language_token: languageToken,
+                    learning_rate: learningRate,
                 };
                 console.log('DEBUG payload:', JSON.stringify(payload));
 

@@ -95,6 +95,12 @@
                             </select>
                         </div>
                         <div class="form-group">
+                            <label title="Learning rate for the optimizer. 1e-5 is the safer default for both SFT and LoRA. Higher values train faster but may diverge (LoRA at 1e-4 has caused runaway training; lower values may stall — SFT at 1e-6 left v10 barely moved).">Learning Rate</label>
+                            <select id="learningRateSelect" style="min-width:160px;">
+                                <!-- populated by onTrainingTypeChange() -->
+                            </select>
+                        </div>
+                        <div class="form-group">
                             <label title="Controls whether to lock Qwen3-TTS to a specific codec language token during bake. 'Auto' writes spk_is_dialect=false so inference uses the speaker's original accent; other options force that language's codec, which may impose a Beijing accent on Taiwan-accented sources.">Language</label>
                             <select id="languageTokenSelect">
                                 <option value="" selected>Auto (recommended — preserves accent)</option>
