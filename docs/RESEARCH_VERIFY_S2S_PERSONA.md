@@ -9,7 +9,7 @@
 
 ## 1. Verdict on Qwen3.5-Omni cloning
 
-**Verdict: TRUE in the technical report, but PRACTICALLY UNAVAILABLE today.** The arXiv paper (Qwen3.5-Omni Technical Report, [arXiv:2604.15804](https://arxiv.org/abs/2604.15804), 2026-04-22) does claim zero-shot voice cloning. From the paper itself, retrieved via the arXiv HTML render:
+**Verdict: TRUE in the technical report. Qwen3.5-Omni-Light open-weight as of 2026-03-30 (Plus/Flash remain API-only).** The arXiv paper (Qwen3.5-Omni Technical Report, [arXiv:2604.15804](https://arxiv.org/abs/2604.15804), 2026-04-22) does claim zero-shot voice cloning. **Correction applied 2026-05-28 follow-up:** the Light variant has open weights on HuggingFace, contradicting an earlier draft of this section that said "weights not open today." [CLAIM] Light retains zero-shot cloning at the same quality as Plus/Flash [/CLAIM] — needs hands-on eval before relying on it. If yes, M12+M13 collapse is real and one-week deployable, not 6-12 months out — recommend a Light-variant cloning eval spike before committing M12. From the paper itself, retrieved via the arXiv HTML render:
 
 > "Beyond preset voices, the model enables zero-shot voice cloning from user-provided samples."
 
@@ -156,7 +156,7 @@ EverHome's current persona-data pipeline (5 stages):
 
 4. **Redesign M8 around ID-RAG** ([arXiv:2509.25299](https://arxiv.org/abs/2509.25299)). Dual-index isn't enough — need explicit identity knowledge graph that survives long dialogue (per [arXiv:2512.12775](https://arxiv.org/pdf/2512.12775) showing persona fidelity degrades over 100+ rounds). This is the highest-leverage change for the elder use case where dialogues will run for months.
 
-5. **Don't wait for Qwen3.5-Omni open-source.** The paper architecture is what we want (system-prompt speaker control beats speaker_embedding bake for thin-data elders) but [CLAIM] open-weights timeline [/CLAIM] — couldn't independently confirm. Plan as if it's 6-12 months out. Until then, Step-Audio 2 mini is the open-weight bet and IndexTTS-2 is the in-pipeline TTS upgrade.
+5. **Run a Qwen3.5-Omni-Light cloning spike NOW (highest-leverage single action).** Light is open-weight on HF since 2026-03-30 (confirmed). Spend one day testing zero-shot cloning quality on the existing test/v11 source audio. If quality lands at the paper-claimed level, M12 (Qwen2.5-Omni hybrid) and M13 (E2E S2S w/ cloning) **collapse into a one-week deployment milestone** instead of a 6-12 month wait. Step-Audio 2 mini remains the parallel open-weight fallback if Light's cloning underperforms on Traditional Chinese / Taiwan accent.
 
 ---
 
