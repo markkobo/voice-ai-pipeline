@@ -132,6 +132,90 @@ async def root():
     }
 
 
+# ---------------------------------------------------------------------------
+# Phone-friendly Markdown viewer for /docs/*.md files in the repo. Added
+# 2026-05-28 so the user can read the 1024-line ROADMAP + research notes on
+# mobile without GitHub gists (PAT lacks gist scope).
+# ---------------------------------------------------------------------------
+from pathlib import Path as _Path  # noqa: E402
+from fastapi.responses import HTMLResponse, PlainTextResponse  # noqa: E402
+
+_DOCS_DIR = _app_root.parent / "docs"
+_DOCS_CSS = """
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         max-width: 760px; margin: 0 auto; padding: 16px 18px 60px;
+         line-height: 1.6; font-size: 16px; }
+  h1 { font-size: 1.6rem; margin-top: 1.2em; border-bottom: 1px solid #888; padding-bottom: 6px; }
+  h2 { font-size: 1.3rem; margin-top: 1.4em; }
+  h3 { font-size: 1.12rem; margin-top: 1em; }
+  h4 { font-size: 1rem; margin-top: 0.8em; }
+  pre, code { font-family: ui-monospace, Menlo, monospace; font-size: 0.85rem; }
+  pre { background: #1a1a2e; color: #d9e1f2; padding: 12px; border-radius: 8px;
+        overflow-x: auto; }
+  code { background: rgba(127,127,127,0.18); padding: 1px 5px; border-radius: 4px; }
+  pre code { background: transparent; padding: 0; }
+  table { border-collapse: collapse; display: block; overflow-x: auto;
+          margin: 0.8em 0; font-size: 0.92rem; }
+  th, td { border: 1px solid #888; padding: 6px 10px; text-align: left;
+           vertical-align: top; }
+  th { background: rgba(127,127,127,0.18); }
+  blockquote { border-left: 3px solid #888; margin: 0.6em 0; padding: 4px 12px;
+               color: #888; }
+  a { color: #007aff; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  hr { border: 0; border-top: 1px solid #888; margin: 1.5em 0; }
+  ul, ol { padding-left: 1.4em; }
+  .doc-nav { background: rgba(127,127,127,0.1); padding: 10px 14px;
+             border-radius: 8px; margin-bottom: 20px; font-size: 0.92rem; }
+  .doc-nav a { margin-right: 14px; }
+</style>
+"""
+
+
+def _docs_nav() -> str:
+    items = []
+    if _DOCS_DIR.exists():
+        for f in sorted(_DOCS_DIR.glob("*.md")):
+            items.append(f'<a href="/docs-md/{f.name}">{f.stem}</a>')
+    return f'<div class="doc-nav">📄 {" · ".join(items)}</div>' if items else ""
+
+
+@app.get("/docs-md", response_class=HTMLResponse)
+async def docs_index():
+    """Phone-friendly index of repo /docs/*.md files."""
+    if not _DOCS_DIR.exists():
+        return HTMLResponse("<p>No docs/ directory.</p>", status_code=404)
+    items = sorted(_DOCS_DIR.glob("*.md"))
+    body = "<h1>EverHome — Documents</h1>" + "<ul>"
+    for f in items:
+        line_count = sum(1 for _ in f.open())
+        body += f'<li><a href="/docs-md/{f.name}">{f.stem}</a> <small>({line_count} lines)</small></li>'
+    body += "</ul>"
+    return HTMLResponse(f"<!doctype html><meta name='viewport' content='width=device-width, initial-scale=1'>{_DOCS_CSS}{_docs_nav()}{body}")
+
+
+@app.get("/docs-md/{name}", response_class=HTMLResponse)
+async def docs_view(name: str):
+    """Render a single repo doc file as phone-friendly HTML."""
+    if "/" in name or ".." in name or not name.endswith(".md"):
+        return HTMLResponse("Bad name", status_code=400)
+    fp = _DOCS_DIR / name
+    if not fp.exists():
+        return HTMLResponse(f"<p>Not found: {name}</p>", status_code=404)
+    try:
+        from markdown_it import MarkdownIt
+        md = MarkdownIt("commonmark", {"breaks": True, "html": False, "linkify": True}).enable("table")
+        html = md.render(fp.read_text())
+    except Exception as e:
+        return PlainTextResponse(f"Render error: {e}\n\n{fp.read_text()}", status_code=200)
+    return HTMLResponse(
+        f"<!doctype html><meta name='viewport' content='width=device-width, initial-scale=1'>"
+        f"<title>{fp.stem} — EverHome docs</title>{_DOCS_CSS}{_docs_nav()}{html}"
+    )
+
+
 def create_app() -> FastAPI:
     """Factory for creating the app (used by uvicorn and Gradio)."""
     return app
