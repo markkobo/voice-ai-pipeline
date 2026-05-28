@@ -362,12 +362,17 @@ async def run_llm_stream(
     listener_id: Optional[str],
     llm_model: Optional[str],
     utterance_seq: int = 0,
+    system_prompt_suffix: Optional[str] = None,
 ) -> None:
     """
     Run LLM streaming and parse emotion tags.
 
     When first emotion is detected, send tts_ready with stream URL.
     This task is registered in StateManager so it can be cancelled on barge-in.
+
+    `system_prompt_suffix` is appended to the persona-aware system prompt
+    when present — used by the auto_continue demo gimmick to instruct the
+    LLM to speak in the user's first-person voice for a few seconds.
     """
     client = get_llm_client()
     cancellation_event = asyncio.Event()
@@ -382,11 +387,20 @@ async def run_llm_stream(
             utterance_seq=utterance_seq,
         )
 
-    # Get persona-aware system prompt
+    # Get persona-aware system prompt; auto_continue path adds a suffix
+    # that flips the LLM into "speak in first person AS the user" mode.
     system_prompt = prompt_manager.get_prompt(
         persona_id=persona_id or "xiao_s",
         listener_id=listener_id,
     )
+    if system_prompt_suffix:
+        system_prompt = system_prompt + "\n\n" + system_prompt_suffix
+
+    # Multi-turn memory — splice the rolling history between the system
+    # prompt and the new user turn. Without this, OpenAI API forgets every
+    # prior turn (it's stateless). Cap is enforced inside state_manager
+    # (CONVERSATION_HISTORY_MAX_TURNS).
+    conversation_history = state_manager.get_conversation_history(session_id)
 
     e2e_start = time.perf_counter()
     accumulated_text = ""
@@ -413,6 +427,7 @@ async def run_llm_stream(
         async for event in client.stream(
             prompt=asr_text,
             system_prompt=system_prompt,
+            conversation_history=conversation_history,
             cancellation_event=cancellation_event,
             model=llm_model,
         ):
@@ -626,6 +641,17 @@ async def run_llm_stream(
                     },
                 })
 
+                # Persist this turn-pair into the session's rolling memory
+                # so the next request sees the conversation context.
+                # We store the EMOTION-STRIPPED assistant text — the model
+                # shouldn't be conditioned on its own [E:寵溺] markup.
+                if asr_text and clean_text:
+                    state_manager.append_to_history(
+                        session_id,
+                        user_text=asr_text,
+                        assistant_text=clean_text,
+                    )
+
             elif event.event.value == "cancelled":
                 metrics.llm_tokens_total.labels(
                     component="llm",
@@ -808,6 +834,65 @@ async def websocket_endpoint(websocket: WebSocket):
                         # Explicit cancel from client
                         state_manager.cancel_llm_task(session_id, origin="ws_explicit_cancel")
                         log.info(f"[{session_id}] Explicit cancel")
+
+                    elif msg_type == "control" and payload.get("action") == "clear_history":
+                        # Wipe conversation memory (demo reset path).
+                        state_manager.clear_history(session_id)
+                        log.info(f"[{session_id}] Conversation history cleared")
+
+                    elif msg_type == "control" and payload.get("action") == "auto_continue":
+                        # Demo gimmick (2026-05-28): user stops talking, clicks
+                        # button → LLM continues IN FIRST PERSON as if it were
+                        # the user, in the user's cloned voice. ~20-30s of
+                        # natural continuation. Audience-facing voice Turing
+                        # test moment.
+                        state = state_manager.get_session(session_id)
+                        if not state or not state.is_configured:
+                            log.warning(f"[{session_id}] auto_continue requested but session not configured")
+                            continue
+
+                        persona_id = state.persona_id
+                        listener_id = state.listener_id
+                        llm_model = state.llm_model
+
+                        # Build a synthetic user prompt that asks the LLM to
+                        # continue the prior user turn. The conversation
+                        # history (set above) gives it the context.
+                        auto_prompt = "[CONTINUE_IN_USER_VOICE]"
+                        auto_suffix = (
+                            "🎭 DEMO MODE: 'Auto-continue' active.\n"
+                            "The user clicked a button asking you to continue speaking "
+                            "AS THEM in the FIRST PERSON for ~20 seconds.\n"
+                            "Rules:\n"
+                            "1. Speak as the user (use 我/I, NOT 你/AI).\n"
+                            "2. Continue the topic from the previous user turn naturally.\n"
+                            "3. Conversational, slightly thoughtful tone. ~60-80 字 / tokens.\n"
+                            "4. Start mid-thought (no 'Let me continue' / '好的'). Just keep "
+                            "talking as if you never paused.\n"
+                            "5. End with a complete sentence — don't trail off.\n"
+                            "6. Use ONE emotion tag at the start: [E:溫和] or [E:認真] "
+                            "(matches a thoughtful person reflecting aloud).\n"
+                            "When you see the prompt '[CONTINUE_IN_USER_VOICE]', "
+                            "execute this mode."
+                        )
+
+                        utterance_seq = state_manager.begin_utterance(session_id)
+                        log.info(f"[{session_id}] auto_continue triggered, seq={utterance_seq}")
+
+                        _llm_bg_task = asyncio.create_task(
+                            run_llm_stream(
+                                websocket=websocket,
+                                session_id=session_id,
+                                asr_text=auto_prompt,
+                                persona_id=persona_id,
+                                listener_id=listener_id,
+                                llm_model=llm_model,
+                                utterance_seq=utterance_seq,
+                                system_prompt_suffix=auto_suffix,
+                            )
+                        )
+                        _llm_task_refs.add(_llm_bg_task)
+                        _llm_bg_task.add_done_callback(_llm_task_refs.discard)
 
                     elif msg_type == "control" and payload.get("action") == "start_speech":
                         # Client clicked the mic — reset audio buffer + VAD for

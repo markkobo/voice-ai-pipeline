@@ -101,6 +101,23 @@ class SessionState:
         # Model
         self.llm_model = None
 
+        # Conversation history for multi-turn memory (2026-05-28).
+        # OpenAI API is stateless — every request previously sent only the
+        # current ASR transcript, so the model had zero memory of earlier
+        # turns. For the 06/02 demo (and the auto_continue gimmick that
+        # depends on context), we keep an in-memory rolling window of
+        # (user, assistant) messages per session and inject them into the
+        # next request as `conversation_history`.
+        # Sliding window cap: keep the most recent 20 turn-pairs (40 msgs)
+        # so a demo session can't grow the prompt unboundedly.
+        self.conversation_history: list[dict] = []
+
+
+# Max (user, assistant) pairs kept in SessionState.conversation_history.
+# 20 pairs ≈ 40 messages ≈ comfortably under gpt-4o-mini's 128k context
+# even with verbose Chinese responses + persona system prompts.
+CONVERSATION_HISTORY_MAX_TURNS = 20
+
 
 class StateManager:
     """Manages WebSocket sessions, audio buffers, utterance tracking, and LLM/TTS tasks."""
@@ -528,6 +545,51 @@ class StateManager:
             state.llm_pending_cancel = False
             state.llm_pending_cancel_seq = None
             state.llm_cancellation_event = None
+
+    # -------------------------------------------------------------------------
+    # Conversation history (2026-05-28 — multi-turn memory for demo)
+    # -------------------------------------------------------------------------
+
+    def get_conversation_history(self, session_id: str) -> list[dict]:
+        """Return a copy of the rolling conversation history for the session.
+
+        Returned as a list of {"role": "user"|"assistant", "content": str}
+        dicts ready to splice into an OpenAI `messages` payload between
+        the system prompt and the new user turn.
+        """
+        state = self._sessions.get(session_id)
+        if not state:
+            return []
+        return list(state.conversation_history)
+
+    def append_to_history(
+        self, session_id: str, user_text: str, assistant_text: str
+    ) -> None:
+        """Append a (user, assistant) turn-pair to the session history.
+
+        Trims to CONVERSATION_HISTORY_MAX_TURNS pairs (FIFO drop). The
+        emotion tag is expected to already be stripped from
+        `assistant_text` by the caller — we don't want the [E:寵溺] markup
+        appearing in the next turn's context, the model would learn to
+        echo it.
+        """
+        state = self._sessions.get(session_id)
+        if not state:
+            return
+        if not user_text or not assistant_text:
+            return
+        state.conversation_history.append({"role": "user", "content": user_text})
+        state.conversation_history.append({"role": "assistant", "content": assistant_text})
+        # Trim — keep last 2 * MAX_TURNS messages.
+        max_msgs = 2 * CONVERSATION_HISTORY_MAX_TURNS
+        if len(state.conversation_history) > max_msgs:
+            state.conversation_history = state.conversation_history[-max_msgs:]
+
+    def clear_history(self, session_id: str) -> None:
+        """Wipe the conversation history. Called on demo reset / explicit clear."""
+        state = self._sessions.get(session_id)
+        if state:
+            state.conversation_history = []
 
     # -------------------------------------------------------------------------
     # TTS Task Management

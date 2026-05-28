@@ -1046,9 +1046,10 @@ async function demoReset() {
             clearTimeout(_maybeFinishTimer);
             _maybeFinishTimer = null;
         }
-        // 3. Tell server to drop any in-flight LLM/TTS task
+        // 3. Tell server to drop any in-flight LLM/TTS task + clear memory
         if (ws && ws.readyState === WebSocket.OPEN) {
             try { ws.send(JSON.stringify({ type: 'control', action: 'cancel' })); } catch (_) {}
+            try { ws.send(JSON.stringify({ type: 'control', action: 'clear_history' })); } catch (_) {}
         }
         // 4. Tear down mic completely
         teardownMic();
@@ -1078,6 +1079,58 @@ async function demoReset() {
     }
 }
 window.demoReset = demoReset;
+
+// 2026-05-28 voice Turing test demo gimmick.
+// User clicks "Let AI continue" → server starts an LLM stream with a
+// first-person continuation prompt, conversation history provides
+// context, TTS speaks in the currently-active cloned voice.
+// The user shuts up for ~20s; audience can't tell when the switch
+// happened. After the response finishes, mic re-opens automatically
+// per the auto-continue checkbox.
+async function autoContinueSpeak() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        log('autoContinue: ws not open');
+        return;
+    }
+    // Tear down mic so we're not capturing the user while AI speaks.
+    teardownMic();
+    log('autoContinue: requesting AI continuation in user voice');
+    try {
+        ws.send(JSON.stringify({ type: 'control', action: 'auto_continue' }));
+    } catch (e) {
+        log('autoContinue send failed: ' + e.message);
+    }
+    // Visual feedback on the button itself.
+    const btn = document.getElementById('autoContinueBtn');
+    if (btn) {
+        btn.disabled = true;
+        const orig = btn.innerHTML;
+        btn.innerHTML = '🎙️ AI speaking…';
+        // Restore once TTS done. The llm_done/tts_done handlers normally
+        // transition back to READY; we piggyback on that.
+        const restore = () => {
+            btn.disabled = false;
+            btn.innerHTML = orig;
+        };
+        // Bound timer in case llm_done never fires (network glitch).
+        setTimeout(restore, 30000);
+        // Also restore on the next FSM transition into READY.
+        const origTransition = window.transition;
+        if (origTransition && !window._autoContinueRestoreHooked) {
+            window._autoContinueRestoreHooked = true;
+            window.transition = function (st, reason) {
+                const r = origTransition.call(this, st, reason);
+                if (st === window.STATE?.READY || st === 0) {
+                    restore();
+                    window._autoContinueRestoreHooked = false;
+                    window.transition = origTransition;
+                }
+                return r;
+            };
+        }
+    }
+}
+window.autoContinueSpeak = autoContinueSpeak;
 
 // Update the visible tone chip ("正在以 X 的口氣對 Y 說話") whenever
 // the persona OR listener selection changes. Pure visual reinforcement
