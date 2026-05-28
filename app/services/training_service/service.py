@@ -107,7 +107,12 @@ class _NullVramCoordinator:
 # convergence but does NOT fully fix the underlying forward-path issue.
 # LoRA remains experimental until forward_talker_finetune lands.
 DEFAULT_LORA_LEARNING_RATE = 1e-5
-DEFAULT_SFT_LEARNING_RATE = 1e-6
+# SFT was 1e-6 — empirically too low. v10 (30 epochs, 422s audio) ended
+# at loss 9.44; converged SFT runs should plateau in the 2-4 range, so
+# the model barely moved. Bumping to 1e-5 (same as LoRA) for meaningful
+# steps while still well below the 5e-5 catastrophic-forgetting band
+# for code_predictor. Re-evaluate if next training also stalls.
+DEFAULT_SFT_LEARNING_RATE = 1e-5
 TIME_PER_AUDIO_SECOND = 0.5
 TRAINING_OVERHEAD_FACTOR = 1.3
 SFT_TIME_MULTIPLIER = 5.0
