@@ -1378,6 +1378,60 @@
             qualityIndicator.style.color = '#888';
         }
 
+        // Fail-loud upload: returns parsed result on success, throws with a
+        // human-readable message on failure (HTTP status + body, or a
+        // tunnel-timeout hint if Cloudflare's edge killed the request).
+        async function postUpload(formData, sizeBytes) {
+            const viaTunnel = /\.trycloudflare\.com$/i.test(window.location.hostname);
+            let response;
+            try {
+                response = await fetch('/api/recordings/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+            } catch (netErr) {
+                // Network-layer failure (connection dropped mid-upload). On the
+                // trycloudflare quick tunnel this is the most common symptom of
+                // hitting the ~100s edge timeout for large bodies.
+                if (viaTunnel) {
+                    throw new Error(
+                        `Network error during upload (likely Cloudflare tunnel timeout — quick tunnels ` +
+                        `drop slow uploads ~100s in). File: ${(sizeBytes / 1024 / 1024).toFixed(1)} MB. ` +
+                        `Underlying: ${netErr.message}`
+                    );
+                }
+                throw new Error(`Network error during upload: ${netErr.message}`);
+            }
+
+            if (response.ok) {
+                return await response.json();
+            }
+
+            // Non-2xx: surface status + body so the user sees what actually failed.
+            let bodyText = '';
+            try { bodyText = await response.text(); } catch (_) { /* ignore */ }
+            const snippet = bodyText.length > 200 ? bodyText.slice(0, 200) + '…' : bodyText;
+            let detail = snippet;
+            try {
+                const parsed = JSON.parse(bodyText);
+                if (parsed && parsed.detail) detail = parsed.detail;
+            } catch (_) { /* not JSON, keep raw snippet */ }
+
+            // Cloudflare-specific status codes — most likely path for big files
+            // on the trycloudflare quick tunnel.
+            if (response.status === 524) {
+                throw new Error(
+                    `HTTP 524 (Cloudflare tunnel timeout). The quick-tunnel edge gave up ` +
+                    `before the server responded. ${(sizeBytes / 1024 / 1024).toFixed(1)} MB file ` +
+                    `is too slow over this link — try a smaller file or upload via the local URL.`
+                );
+            }
+            if (response.status === 413) {
+                throw new Error(`HTTP 413 (Payload Too Large). File ${(sizeBytes / 1024 / 1024).toFixed(1)} MB exceeded a size cap. ${detail}`);
+            }
+            throw new Error(`HTTP ${response.status} ${response.statusText}: ${detail || '(no body)'}`);
+        }
+
         async function uploadBlob(blob) {
             const listenerId = listenerSelect.value;
             const personaId = personaSelect.value;
@@ -1391,22 +1445,11 @@
             formData.append('persona_id', personaId);
 
             try {
-                const response = await fetch('/api/recordings/upload', {
-                    method: 'POST',
-                    body: formData
-                });
-
-                if (!response.ok) {
-                    const err = await response.json();
-                    throw new Error(err.detail || 'Upload failed');
-                }
-
-                const result = await response.json();
+                const result = await postUpload(formData, blob.size || 0);
                 log(`Upload complete: recording_id=${result.recording_id}`, 'info', 'UPLOAD');
                 showToast('Recording uploaded — processing...', 'success');
                 loadRecordings();
                 await triggerProcessing(result.recording_id);
-
             } catch (e) {
                 log(`Upload failed: ${e.message}`, 'error', 'UPLOAD');
                 showToast('Upload failed: ' + e.message, 'error');
@@ -1485,27 +1528,33 @@
         });
 
         async function handleFiles(files) {
+            const viaTunnel = /\.trycloudflare\.com$/i.test(window.location.hostname);
+            const TUNNEL_WARN_BYTES = 25 * 1024 * 1024;  // ~25 MB — empirically near the trycloudflare safe upload window
             let successCount = 0;
             let failCount = 0;
+            let lastErrMsg = '';
             for (const file of files) {
                 log(`Uploading file: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`, 'info', 'UPLOAD');
+                if (viaTunnel && file.size > TUNNEL_WARN_BYTES) {
+                    log(
+                        `Warning: ${(file.size / 1024 / 1024).toFixed(1)} MB over trycloudflare ` +
+                        `quick tunnel may hit the ~100s edge timeout. If it fails, upload via the local URL.`,
+                        'warning', 'UPLOAD'
+                    );
+                }
                 const formData = new FormData();
                 formData.append('file', file);
                 formData.append('listener_id', listenerSelect.value);
                 formData.append('persona_id', personaSelect.value);
 
                 try {
-                    const response = await fetch('/api/recordings/upload', {
-                        method: 'POST',
-                        body: formData
-                    });
-                    if (!response.ok) throw new Error('Upload failed');
-                    const result = await response.json();
+                    const result = await postUpload(formData, file.size || 0);
                     log(`File uploaded: ${result.recording_id}`, 'info', 'UPLOAD');
                     await triggerProcessing(result.recording_id);
                     successCount++;
                 } catch (e) {
-                    log(`File upload failed: ${e.message}`, 'error', 'UPLOAD');
+                    log(`File upload failed: ${file.name}: ${e.message}`, 'error', 'UPLOAD');
+                    lastErrMsg = e.message;
                     failCount++;
                 }
             }
@@ -1513,7 +1562,11 @@
             if (failCount === 0 && successCount > 0) {
                 showToast(`${successCount} file(s) uploaded — processing...`, 'success');
             } else if (failCount > 0) {
-                showToast(`${failCount} file(s) failed to upload`, 'error');
+                // Surface the actual failure reason in the toast (not just a count).
+                const prefix = failCount === 1
+                    ? 'Upload failed'
+                    : `${failCount} file(s) failed (last error)`;
+                showToast(`${prefix}: ${lastErrMsg}`, 'error');
             }
         }
 
