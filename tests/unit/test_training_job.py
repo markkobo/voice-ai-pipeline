@@ -298,3 +298,246 @@ class TestTrainingTemplateSilentNoOpFix:
         assert result.sft_path == "/tmp/sft_model"
         assert result.final_loss == 9.6312
         assert result.training_time_seconds == 19440
+
+
+class TestCheckpointDetection:
+    """Tests for _detect_latest_checkpoint — used both by the auto-resume
+    path in TrainingJob._run_training and (indirectly, via the same
+    on-disk layout) by service.resume_training to fail-fast when no
+    checkpoint exists.
+    """
+
+    def test_returns_none_when_no_checkpoint_dir(self):
+        from app.services.training_service.training_job import _detect_latest_checkpoint
+        with tempfile.TemporaryDirectory() as tmp:
+            assert _detect_latest_checkpoint(Path(tmp)) is None
+
+    def test_returns_highest_complete_checkpoint(self):
+        from app.services.training_service.training_job import _detect_latest_checkpoint
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "checkpoints"
+            for epoch in (10, 20, 30):
+                d = root / f"epoch_{epoch}"
+                d.mkdir(parents=True)
+                (d / "model_state.safetensors").write_bytes(b"x")
+                (d / "optimizer.pt").write_bytes(b"x")
+                (d / "meta.json").write_text(f'{{"epoch":{epoch}}}')
+            detected = _detect_latest_checkpoint(Path(tmp))
+            assert detected is not None
+            assert detected[0] == 30
+            assert detected[1].name == "epoch_30"
+
+    def test_skips_partial_checkpoint(self):
+        """A checkpoint missing optimizer.pt (subprocess killed mid-save)
+        must be skipped — falling back to the next-older complete one
+        prevents an inconsistent resume."""
+        from app.services.training_service.training_job import _detect_latest_checkpoint
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "checkpoints"
+            good = root / "epoch_10"
+            good.mkdir(parents=True)
+            (good / "model_state.safetensors").write_bytes(b"x")
+            (good / "optimizer.pt").write_bytes(b"x")
+            partial = root / "epoch_20"
+            partial.mkdir(parents=True)
+            (partial / "model_state.safetensors").write_bytes(b"x")
+            # No optimizer.pt — partial
+            detected = _detect_latest_checkpoint(Path(tmp))
+            assert detected is not None
+            assert detected[0] == 10, "Should fall back to the latest complete checkpoint"
+
+    def test_ignores_non_epoch_dirs(self):
+        from app.services.training_service.training_job import _detect_latest_checkpoint
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "checkpoints"
+            root.mkdir(parents=True)
+            (root / "garbage").mkdir()
+            (root / "epoch_abc").mkdir()
+            assert _detect_latest_checkpoint(Path(tmp)) is None
+
+
+class TestResumeKwargsForwarded:
+    """TrainingJob accepts resume_from_epoch / resume_checkpoint_path and
+    stores them — they're forwarded into env vars at _run_training time.
+    """
+
+    def test_defaults_to_no_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            vd = Path(tmp)
+            cfg = TrainingConfig(rank=16, learning_rate=1e-4, num_epochs=10, batch_size=2)
+            job = TrainingJob(
+                version_id="v", version_dir=vd, audio_paths=[],
+                config=cfg, total_audio_duration=10.0, training_type="sft",
+            )
+            assert job.resume_from_epoch is None
+            assert job.resume_checkpoint_path is None
+
+    def test_accepts_resume_kwargs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            vd = Path(tmp)
+            cfg = TrainingConfig(rank=16, learning_rate=1e-4, num_epochs=10, batch_size=2)
+            ckpt = vd / "checkpoints" / "epoch_50"
+            ckpt.mkdir(parents=True)
+            job = TrainingJob(
+                version_id="v", version_dir=vd, audio_paths=[],
+                config=cfg, total_audio_duration=10.0, training_type="sft",
+                resume_from_epoch=50, resume_checkpoint_path=ckpt,
+            )
+            assert job.resume_from_epoch == 50
+            assert job.resume_checkpoint_path == ckpt
+
+
+class TestResumeServiceFlow:
+    """End-to-end tests for TrainingService.resume_training using a fake
+    job factory — verifies error mapping (404 / 409) and the resume kwarg
+    forwarding contract without spawning a subprocess.
+    """
+
+    def _make_service_with_failed_version(self, tmp_path, with_checkpoint: bool):
+        """Set up a TrainingService with a failed version. Optionally create
+        a checkpoint dir so the resume path can find it."""
+        from datetime import datetime, timezone
+        from app.services.training_service.service import TrainingService
+        from app.services.training_service.repository import JsonTrainingRepository
+        from app.services.training_service.models import (
+            TrainingVersion, TrainingManifest, ManifestRecording,
+            TrainingManifestConfig, VersionStatus, TrainingType,
+        )
+
+        models_dir = tmp_path / "models"
+        models_dir.mkdir()
+        repo = JsonTrainingRepository(models_dir)
+
+        captured = []
+
+        class _FakeJob:
+            def __init__(self, **kw):
+                self._kw = kw
+                captured.append(kw)
+            def start(self): pass
+            def cancel(self): pass
+            def is_running(self): return False
+
+        def factory(*, version, audio_paths, total_duration,
+                    resume_from_epoch=None, resume_checkpoint_path=None):
+            return _FakeJob(
+                version_id=version.version_id,
+                resume_from_epoch=resume_from_epoch,
+                resume_checkpoint_path=resume_checkpoint_path,
+            )
+
+        class _Validator:
+            def is_valid(self, x): return True
+            def list_ids(self): return {"xs"}
+
+        class _Resolver:
+            def resolve_segments(self, ids): return []
+
+        svc = TrainingService(
+            repository=repo,
+            persona_validator=_Validator(),
+            audio_resolver=_Resolver(),
+            models_dir=models_dir,
+            job_factory=factory,
+        )
+
+        vd = models_dir / "xs_v1_test"
+        vd.mkdir()
+        v = TrainingVersion(
+            version_id="v1_test", persona_id="xs",
+            status=VersionStatus.failed, training_type=TrainingType.sft,
+            rank=16, learning_rate=1e-5, num_epochs=100, batch_size=1,
+            lora_path=str(vd),
+            created_at=datetime.now(timezone.utc),
+        )
+        repo.save(v)
+        mf = TrainingManifest(
+            version_id="v1_test", persona_id="xs",
+            segment_ids=["s1"], training_type=TrainingType.sft,
+            recordings=[ManifestRecording(
+                recording_id="r1", folder_name="",
+                audio_path=str(vd / "a.wav"), duration_seconds=10.0,
+            )],
+            total_duration_seconds=10.0,
+            training_config=TrainingManifestConfig(
+                rank=16, learning_rate=1e-5, num_epochs=100, batch_size=1,
+                training_type=TrainingType.sft,
+            ),
+        )
+        repo.save_manifest("v1_test", mf)
+
+        if with_checkpoint:
+            ck = vd / "checkpoints" / "epoch_30"
+            ck.mkdir(parents=True)
+            (ck / "model_state.safetensors").write_bytes(b"x")
+            (ck / "optimizer.pt").write_bytes(b"x")
+            (ck / "meta.json").write_text('{"epoch":30,"loss":2.0}')
+
+        return svc, captured
+
+    def test_resume_404_when_no_checkpoint(self, tmp_path):
+        from app.api._errors import TrainingVersionNotFoundError
+        svc, _ = self._make_service_with_failed_version(tmp_path, with_checkpoint=False)
+        with pytest.raises(TrainingVersionNotFoundError):
+            svc.resume_training("v1_test")
+
+    def test_resume_happy_path_forwards_resume_kwargs(self, tmp_path):
+        from app.services.training_service.models import VersionStatus
+        svc, captured = self._make_service_with_failed_version(tmp_path, with_checkpoint=True)
+        result = svc.resume_training("v1_test")
+        assert result.resumed_from_epoch == 30
+        assert captured[0]["resume_from_epoch"] == 30
+        assert captured[0]["resume_checkpoint_path"].name == "epoch_30"
+        # Status is flipped back to training so the UI shows progress.
+        v = svc.repository.get("v1_test")
+        assert v.status == VersionStatus.training
+
+    def test_resume_409_when_already_training(self, tmp_path):
+        from app.api._errors import TrainingInProgressError
+        svc, _ = self._make_service_with_failed_version(tmp_path, with_checkpoint=True)
+        svc.resume_training("v1_test")  # first call flips status to training
+        with pytest.raises(TrainingInProgressError):
+            svc.resume_training("v1_test")
+
+
+class TestSubprocessTemplateHasCheckpointSupport:
+    """Source-level checks on the inline subprocess template — these
+    catch accidental regressions in the heredoc string without needing
+    to run the (GPU + 1.7B-model) training subprocess.
+    """
+
+    def _src(self):
+        return Path("app/services/training_service/training_job.py").read_text()
+
+    def test_template_defines_save_checkpoint(self):
+        src = self._src()
+        assert "_save_checkpoint(" in src
+        assert "CHECKPOINT_EVERY_N_EPOCHS" in src
+        assert "CHECKPOINT_RETENTION" in src
+
+    def test_template_handles_resume_env_vars(self):
+        src = self._src()
+        assert "RESUME_FROM_EPOCH" in src
+        assert "RESUME_CHECKPOINT_PATH" in src
+        assert "Resuming from epoch" in src
+        assert "start_epoch" in src
+
+    def test_template_writes_latest_checkpoint_epoch(self):
+        """progress.json must carry latest_checkpoint_epoch so the UI
+        can decide whether to surface the Resume button."""
+        src = self._src()
+        assert "latest_checkpoint_epoch" in src
+
+    def test_template_retention_prunes_old_checkpoints(self):
+        src = self._src()
+        # Retention logic must actually delete; check for rmtree call on
+        # checkpoint dirs.
+        assert "all_ckpts[CHECKPOINT_RETENTION:]" in src
+        assert "_shutil.rmtree(old)" in src
+
+    def test_template_bf16_cast_on_checkpoint_save(self):
+        """Same fp32-leak guard as the merge path — see training_pipeline_deferred
+        memory note. Checkpoint state_dict must be bf16-uniform."""
+        src = self._src()
+        # The casted dict construction inside _save_checkpoint.
+        assert "v.to(torch.bfloat16).cpu()" in src

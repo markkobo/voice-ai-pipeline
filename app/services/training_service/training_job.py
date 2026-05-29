@@ -37,6 +37,8 @@ class TrainingJob:
         training_type: str = "lora",
         persona_id: str = "persona_new",
         language_token: Optional[str] = None,
+        resume_from_epoch: Optional[int] = None,
+        resume_checkpoint_path: Optional[Path] = None,
     ):
         self.version_id = version_id
         self.version_dir = Path(version_dir)
@@ -45,6 +47,17 @@ class TrainingJob:
         self.total_audio_duration = total_audio_duration
         self.training_type = training_type
         self.persona_id = persona_id
+        # Resume support — when both are set, the subprocess template
+        # loads model_state.safetensors + optimizer.pt from
+        # `resume_checkpoint_path` and starts the epoch loop at
+        # `resume_from_epoch + 1`. When None (the common case), training
+        # starts from scratch. Detected automatically in
+        # `_run_training` by scanning <version_dir>/checkpoints/, or set
+        # explicitly by the resume API path.
+        self.resume_from_epoch = resume_from_epoch
+        self.resume_checkpoint_path = (
+            Path(resume_checkpoint_path) if resume_checkpoint_path else None
+        )
         # `language_token` is the user-selected codec language for
         # `spk_is_dialect[persona]`. `None` (UI "不指定") writes Python
         # `False` in the baked custom_voice config — i.e. no dialect
@@ -90,6 +103,40 @@ class TrainingJob:
             env = os.environ.copy()
             env["PYTHONPATH"] = str(Path(__file__).parent.parent.parent.parent)
 
+            # Resume detection: if the caller didn't explicitly pass
+            # resume_from_epoch but a checkpoint dir already exists, treat
+            # this launch as a resume. Picks the highest-numbered
+            # `epoch_{N}` subdir under <version_dir>/checkpoints/. The API
+            # `/resume` endpoint always sets these explicitly so this path
+            # mainly covers `create_version` re-runs that happen to point
+            # at an existing dir (rare, but cheap to defend against).
+            detected_resume = _detect_latest_checkpoint(self.version_dir)
+            if self.resume_from_epoch is None and detected_resume is not None:
+                self.resume_from_epoch, self.resume_checkpoint_path = detected_resume
+                logger.info(
+                    f"[TRAINING:{self.version_id[:8]}] Auto-detected checkpoint: "
+                    f"resuming from epoch {self.resume_from_epoch} "
+                    f"({self.resume_checkpoint_path})"
+                )
+
+            if self.resume_from_epoch is not None and self.resume_checkpoint_path:
+                env["RESUME_FROM_EPOCH"] = str(self.resume_from_epoch)
+                env["RESUME_CHECKPOINT_PATH"] = str(self.resume_checkpoint_path)
+            # Checkpoint policy — read by the subprocess template; safe
+            # defaults match the module-level constants in service.py.
+            from .service import (
+                DEFAULT_CHECKPOINT_EVERY_N_EPOCHS,
+                DEFAULT_CHECKPOINT_RETENTION,
+            )
+            env.setdefault(
+                "CHECKPOINT_EVERY_N_EPOCHS",
+                str(DEFAULT_CHECKPOINT_EVERY_N_EPOCHS),
+            )
+            env.setdefault(
+                "CHECKPOINT_RETENTION",
+                str(DEFAULT_CHECKPOINT_RETENTION),
+            )
+
             # Create training script
             train_script = self.version_dir / "train_lora.py"
             use_lora = (self.training_type == "lora")
@@ -134,6 +181,106 @@ VERSION_ID = "''' + self.version_id + '''"
 # None → write Python False (no dialect override). Otherwise a string like
 # "chinese" / "english" / etc. validated upstream in the service layer.
 LANGUAGE_TOKEN = ''' + ("None" if self.language_token is None else repr(self.language_token)) + '''
+
+# Checkpoint settings — read from env so the parent (training_job.py)
+# controls policy without re-rendering the template per run.
+# CHECKPOINT_EVERY_N_EPOCHS: save a resumable snapshot every N epochs
+# (and on the final epoch regardless). Default 10.
+# CHECKPOINT_RETENTION: keep only the latest K checkpoints — older
+# ones are deleted in-place to bound disk usage (~3-6 GB each at 1.7B
+# bf16 + AdamW optimizer state). Default 2.
+# RESUME_FROM_EPOCH / RESUME_CHECKPOINT_PATH: when both set, load the
+# model state_dict + optimizer state from the checkpoint and start
+# the loop at start_epoch = RESUME_FROM_EPOCH + 1. Unset = train from
+# scratch (the common case for a fresh `create_version` call).
+CHECKPOINT_EVERY_N_EPOCHS = int(os.environ.get("CHECKPOINT_EVERY_N_EPOCHS", "10"))
+CHECKPOINT_RETENTION = int(os.environ.get("CHECKPOINT_RETENTION", "2"))
+RESUME_FROM_EPOCH = os.environ.get("RESUME_FROM_EPOCH")
+RESUME_FROM_EPOCH = int(RESUME_FROM_EPOCH) if RESUME_FROM_EPOCH else None
+RESUME_CHECKPOINT_PATH = os.environ.get("RESUME_CHECKPOINT_PATH")
+CHECKPOINTS_DIR = Path(OUTPUT_DIR) / "checkpoints"
+
+
+def _save_checkpoint(model, optimizer, epoch, loss, best_loss, total_epochs):
+    """Save a resumable checkpoint at <output_dir>/checkpoints/epoch_{N}/.
+
+    Layout:
+      epoch_{N}/
+        model_state.safetensors   # full model state_dict, bf16-cast
+        optimizer.pt              # AdamW state (needed for true resume)
+        meta.json                 # {epoch, loss, best_loss, timestamp, total_epochs}
+
+    Old checkpoints beyond CHECKPOINT_RETENTION are deleted in-place.
+    Bf16 cast mirrors the merge-time guard at training_job.py line ~792:
+    AdamW + gradient flow silently promotes some attention weights to
+    fp32 during training even though the model loaded in bf16. Casting
+    here keeps the checkpoint dtype-uniform so a later resume doesn't
+    inherit a mixed fp32/bf16 model.
+    """
+    import shutil as _shutil
+    from safetensors.torch import save_file as _save_file
+    CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
+    ckpt_dir = CHECKPOINTS_DIR / f"epoch_{epoch}"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        # Cast all float tensors to bf16 for the saved model state. We
+        # build a dedicated dict (not a view) so the in-memory model
+        # keeps its native dtype for the next training step.
+        state_dict = model.state_dict()
+        casted = {}
+        for k, v in state_dict.items():
+            if v.is_floating_point() and v.dtype != torch.bfloat16:
+                casted[k] = v.to(torch.bfloat16).cpu()
+            else:
+                casted[k] = v.cpu()
+        _save_file(casted, str(ckpt_dir / "model_state.safetensors"))
+        # Optimizer state — torch.save not safetensors because optimizer
+        # state contains nested Python dicts/Tensors that safetensors
+        # can't serialize.
+        torch.save(optimizer.state_dict(), str(ckpt_dir / "optimizer.pt"))
+        with open(ckpt_dir / "meta.json", "w") as f:
+            json.dump({
+                "epoch": int(epoch),
+                "loss": float(loss) if loss is not None else None,
+                "best_loss": float(best_loss) if best_loss is not None else None,
+                "timestamp": time.time(),
+                "total_epochs": int(total_epochs),
+            }, f)
+        logger.info(f"[CHECKPOINT] Saved epoch {epoch} → {ckpt_dir}")
+
+        # Update progress.json with the latest_checkpoint_epoch so the
+        # UI/API can surface "Last checkpoint: epoch N" and decide
+        # whether to show the Resume button on a failed/cancelled run.
+        try:
+            if TRACKER_PATH.exists():
+                with open(TRACKER_PATH) as f:
+                    prog = json.load(f)
+                prog["latest_checkpoint_epoch"] = int(epoch)
+                with open(TRACKER_PATH, "w") as f:
+                    json.dump(prog, f)
+        except Exception as pe:
+            logger.warning(f"[CHECKPOINT] Failed to update progress.json: {pe}")
+
+        # Retention — keep latest CHECKPOINT_RETENTION, delete older.
+        # Each checkpoint is ~3-6 GB for a 1.7B SFT model; without
+        # this the disk fills within 5-10 saves on a long run.
+        all_ckpts = sorted(
+            [p for p in CHECKPOINTS_DIR.iterdir() if p.is_dir() and p.name.startswith("epoch_")],
+            key=lambda p: int(p.name.split("_")[1]),
+            reverse=True,
+        )
+        for old in all_ckpts[CHECKPOINT_RETENTION:]:
+            try:
+                _shutil.rmtree(old)
+                logger.info(f"[CHECKPOINT] Pruned old checkpoint: {old.name}")
+            except Exception as pe:
+                logger.warning(f"[CHECKPOINT] Failed to prune {old}: {pe}")
+    except Exception as ce:
+        # Don't crash training on checkpoint failure — log and continue.
+        # The user keeps in-memory progress; worst case they re-train
+        # from the last good checkpoint that did survive.
+        logger.exception(f"[CHECKPOINT] Save failed at epoch {epoch}: {ce}")
+
 
 # Initialize progress.json before training starts
 def init_progress():
@@ -413,6 +560,51 @@ def main():
         logger.info(f"Starting training: {len(dataset)} samples, {NUM_EPOCHS} epochs")
         logger.info(f"Using forward_sub_talker_finetune for proper loss computation")
 
+        # Resume: load model state + optimizer from a saved checkpoint.
+        # `start_epoch` is the next epoch to run; if we resumed from N,
+        # we want the loop to begin at N+1. If neither env var is set,
+        # we start fresh at epoch 0 (the default).
+        start_epoch = 0
+        if RESUME_FROM_EPOCH is not None and RESUME_CHECKPOINT_PATH:
+            ckpt = Path(RESUME_CHECKPOINT_PATH)
+            model_file = ckpt / "model_state.safetensors"
+            optim_file = ckpt / "optimizer.pt"
+            meta_file = ckpt / "meta.json"
+            if not (model_file.exists() and optim_file.exists()):
+                raise RuntimeError(
+                    f"Resume requested from {ckpt} but checkpoint is incomplete "
+                    f"(model_state.safetensors or optimizer.pt missing). Refusing to "
+                    f"silently fall back to a fresh run — would lose the resume guarantee."
+                )
+            try:
+                from safetensors.torch import load_file as _load_file
+                resumed_loss = None
+                if meta_file.exists():
+                    with open(meta_file) as f:
+                        meta = json.load(f)
+                    resumed_loss = meta.get("loss")
+                logger.info(f"Resuming from epoch {RESUME_FROM_EPOCH} (loss {resumed_loss})")
+                state = _load_file(str(model_file))
+                # strict=False because the model may have been wrapped in
+                # PEFT (LoRA) at training time but the checkpoint stores
+                # only the full state_dict; for SFT the keys match 1:1.
+                missing, unexpected = model.load_state_dict(state, strict=False)
+                if missing:
+                    logger.warning(f"[RESUME] {len(missing)} missing keys (first 3: {missing[:3]})")
+                if unexpected:
+                    logger.warning(f"[RESUME] {len(unexpected)} unexpected keys (first 3: {unexpected[:3]})")
+                optim_state = torch.load(str(optim_file), map_location="cpu")
+                optimizer.load_state_dict(optim_state)
+                start_epoch = int(RESUME_FROM_EPOCH) + 1
+                logger.info(
+                    f"[RESUME] Loaded checkpoint; continuing at epoch {start_epoch}/{NUM_EPOCHS}"
+                )
+            except Exception as re:
+                # Resume failures are fatal — falling back to a fresh run
+                # silently would defeat the entire point (user explicitly
+                # asked to continue from N).
+                raise RuntimeError(f"Resume from {ckpt} failed: {re}")
+
         start_time = time.time()
 
         # NOTE: the duplicate `if not USE_LORA` audio-loading block that
@@ -423,7 +615,7 @@ def main():
         # Cross-epoch batch counter — used by the post-loop fail-fast.
         total_batches = 0
 
-        for epoch in range(NUM_EPOCHS):
+        for epoch in range(start_epoch, NUM_EPOCHS):
             epoch_loss = 0.0
             num_batches = 0
             num_steps = 0
@@ -520,6 +712,28 @@ def main():
                         json.dump(prog, f)
             except Exception as e:
                 logger.error(f"Progress save error: {e}")
+
+            # Periodic checkpoint — save every CHECKPOINT_EVERY_N_EPOCHS
+            # AND on the final epoch (so the user can always resume even
+            # if N doesn't divide num_epochs cleanly). Loss-best tracking
+            # uses the value we just persisted to progress.json.
+            is_last_epoch = (epoch + 1) == NUM_EPOCHS
+            epoch_for_ckpt = epoch + 1  # 1-indexed to match progress.json
+            if (epoch_for_ckpt % CHECKPOINT_EVERY_N_EPOCHS == 0) or is_last_epoch:
+                try:
+                    with open(TRACKER_PATH) as f:
+                        _p = json.load(f)
+                    _best = _p.get("best_loss")
+                except Exception:
+                    _best = None
+                _save_checkpoint(
+                    model=model,
+                    optimizer=optimizer,
+                    epoch=epoch_for_ckpt,
+                    loss=avg_loss if not np.isnan(avg_loss) else None,
+                    best_loss=_best,
+                    total_epochs=NUM_EPOCHS,
+                )
 
         training_time = int(time.time() - start_time)
 
@@ -1173,6 +1387,46 @@ if __name__ == "__main__":
     def is_running(self) -> bool:
         """Check if training is still running."""
         return self._thread is not None and self._thread.is_alive()
+
+
+# =============================================================================
+# Checkpoint discovery
+# =============================================================================
+
+def _detect_latest_checkpoint(
+    version_dir: Path,
+) -> Optional[tuple[int, Path]]:
+    """Find the highest-numbered usable checkpoint under <version_dir>/checkpoints/.
+
+    Returns `(epoch_number, checkpoint_path)` or None if there is no
+    valid checkpoint. A checkpoint is considered usable only if BOTH
+    model_state.safetensors and optimizer.pt are present — a partial
+    checkpoint (subprocess killed mid-save) is skipped, and the next
+    older one is returned. This makes resume robust against the
+    "killed during checkpoint write" edge case.
+
+    The caller (TrainingJob.__init__) uses this to auto-resume on
+    subprocess launch. The /resume API path uses
+    `latest_checkpoint_epoch` from progress.json, which is what the UI
+    surfaces, but both paths converge on the same on-disk truth.
+    """
+    ckpt_root = Path(version_dir) / "checkpoints"
+    if not ckpt_root.exists():
+        return None
+    candidates: list[tuple[int, Path]] = []
+    for p in ckpt_root.iterdir():
+        if not p.is_dir() or not p.name.startswith("epoch_"):
+            continue
+        try:
+            n = int(p.name.split("_", 1)[1])
+        except (ValueError, IndexError):
+            continue
+        if (p / "model_state.safetensors").exists() and (p / "optimizer.pt").exists():
+            candidates.append((n, p))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0]
 
 
 # =============================================================================

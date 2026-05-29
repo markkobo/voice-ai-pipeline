@@ -150,6 +150,21 @@ class CancelResponse(BaseModel):
     version_id: str
 
 
+class ResumeTrainingRequest(BaseModel):
+    """Empty body — resume always continues from the latest on-disk checkpoint.
+
+    Kept as an explicit model (with `extra="forbid"`) so a misformed body
+    fails loudly instead of being silently accepted.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+
+class ResumeResponse(BaseModel):
+    status: str = "training"
+    version_id: str
+    resumed_from_epoch: int
+
+
 class ActiveVersionResponse(BaseModel):
     active: bool
     persona_id: str
@@ -502,6 +517,30 @@ async def cancel_training(
 ) -> CancelResponse:
     service.cancel_version(version_id)
     return CancelResponse(version_id=version_id)
+
+
+@router.post("/versions/{version_id}/resume", response_model=ResumeResponse)
+async def resume_training(
+    version_id: str,
+    body: Optional[ResumeTrainingRequest] = None,
+    service: TrainingService = Depends(get_training_service),
+) -> ResumeResponse:
+    """Resume a failed/cancelled training run from its latest checkpoint.
+
+    Continues the SAME version_id (no v(N+1) created) — manifest, persona,
+    LoRA rank, learning rate all stay the same. Picks up where the
+    subprocess last saved (every CHECKPOINT_EVERY_N_EPOCHS, default 10).
+
+    Errors:
+      - 404 version not found, or no usable checkpoint dir
+        (latest_checkpoint_epoch missing in progress.json)
+      - 409 training is already running (for any version)
+    """
+    result = service.resume_training(version_id)
+    return ResumeResponse(
+        version_id=result.version.version_id,
+        resumed_from_epoch=result.resumed_from_epoch,
+    )
 
 
 # ---------------------------------------------------------------------------

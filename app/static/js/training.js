@@ -1101,6 +1101,7 @@
                             <div class="version-actions">
                                 ${v.status === 'ready' && !isActive ? `<button class="btn-activate" onclick="activateVersion('${v.version_id}')">Activate</button>` : ''}
                                 ${v.status === 'ready' ? `<button class="btn-preview" data-preview-btn="${v.version_id}" title="Preview this version's voice (judge by audio, not loss) — click again to stop" onclick="previewVersion('${v.version_id}')">▶ Preview</button>` : ''}
+                                ${(v.status === 'failed' || v.status === 'cancelled') && v.progress && v.progress.latest_checkpoint_epoch != null ? `<button class="btn-resume" onclick="resumeVersion('${v.version_id}', ${v.progress.latest_checkpoint_epoch})" title="Continue training from epoch ${v.progress.latest_checkpoint_epoch}">↻ Resume (ep ${v.progress.latest_checkpoint_epoch})</button>` : ''}
                                 <button class="btn-details" onclick="toggleDetails('${v.version_id}')" title="Show full metadata (paths, IDs, timestamps)">Details</button>
                                 ${v.status !== 'training' ? `
                                     <button class="btn-delete" id="delbtn-${v.version_id}" onclick="confirmDelete('${v.version_id}')">✕</button>
@@ -1268,6 +1269,32 @@
         function cancelDelete(versionId) {
             document.getElementById('delbtn-' + versionId).style.display = '';
             document.getElementById('delcfm-' + versionId).style.display = 'none';
+        }
+
+        async function resumeVersion(versionId, lastEpoch) {
+            // Resume a failed/cancelled run from its last checkpoint. The
+            // API returns 409 if another training is already in flight —
+            // surface that as a toast so the user knows why nothing
+            // happened.
+            try {
+                log(`Resuming ${versionId} from epoch ${lastEpoch}...`);
+                const r = await fetch(`/api/training/versions/${versionId}/resume`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: '{}'
+                });
+                if (!r.ok) {
+                    const err = await r.json().catch(() => ({}));
+                    throw new Error(err.detail || err.message || `HTTP ${r.status}`);
+                }
+                const data = await r.json();
+                showToast(`Resumed from epoch ${data.resumed_from_epoch}`, 'success');
+                log(`Resumed: ${versionId} from epoch ${data.resumed_from_epoch}`);
+                loadVersions();
+            } catch (e) {
+                log(`Resume failed: ${e.message}`, 'error');
+                showToast('Resume failed: ' + e.message, 'error');
+            }
         }
 
         async function doDelete(versionId) {

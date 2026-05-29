@@ -117,6 +117,19 @@ TIME_PER_AUDIO_SECOND = 0.5
 TRAINING_OVERHEAD_FACTOR = 1.3
 SFT_TIME_MULTIPLIER = 5.0
 
+# Checkpoint settings — used by the subprocess template to save a
+# resumable mid-training snapshot every N epochs. Each checkpoint is
+# multi-GB (model_state.safetensors + optimizer.pt for a 1.7B SFT model
+# is roughly 3-6 GB in bf16), so retention is mandatory. Not exposed as
+# a user-facing parameter — the constants are the policy.
+#
+# The 28800s wall-clock-cap on v12 truncated the run at epoch 66/100
+# (commit 1eb5e05); without checkpoints the user lost 8h of progress.
+# At every-10-epoch save, the equivalent loss would have been at most
+# the work of the last 10 epochs.
+DEFAULT_CHECKPOINT_EVERY_N_EPOCHS = 10
+DEFAULT_CHECKPOINT_RETENTION = 2  # keep latest N to bound disk usage
+
 
 @dataclass(frozen=True)
 class CreatedVersion:
@@ -125,6 +138,19 @@ class CreatedVersion:
     version: TrainingVersion
     total_duration_seconds: float
     estimated_time_seconds: int
+
+
+@dataclass(frozen=True)
+class ResumedVersion:
+    """Result of a successful resume_training call.
+
+    Carries `resumed_from_epoch` so the API layer can echo "we picked up
+    at epoch N" back to the caller — useful for UI confirmation toasts
+    and for log forensics.
+    """
+
+    version: TrainingVersion
+    resumed_from_epoch: int
 
 
 # ---------------------------------------------------------------------------
@@ -438,6 +464,110 @@ class TrainingService:
         log.info("[TRAINING] Activated %s for persona %s", version_id, version.persona_id)
         return version
 
+    def resume_training(self, version_id: str) -> "ResumedVersion":
+        """Resume a paused/failed/cancelled training run from its latest checkpoint.
+
+        Behavior:
+          - 404 if version doesn't exist OR if no usable checkpoint exists
+            under <version_dir>/checkpoints/.
+          - 409 if any training is already running (any version, any persona —
+            same conflict policy as create_version: one subprocess at a time).
+          - Otherwise spawn a new subprocess for the SAME version_id (manifest
+            stays the same, no v(N+1)) with RESUME_FROM_EPOCH /
+            RESUME_CHECKPOINT_PATH set so the subprocess template loads
+            the model + optimizer state and starts at start_epoch = N+1.
+
+        Returns the version, the manifest's resolved audio paths, and the
+        epoch number being resumed from — the API layer needs the epoch
+        to put in the response.
+        """
+        from .training_job import _detect_latest_checkpoint  # local to avoid cycle
+
+        version = self.get_version(version_id)
+        if not version.lora_path:
+            raise TrainingVersionNotFoundError(
+                f"Version {version_id} has no on-disk training directory",
+                details={"version_id": version_id},
+            )
+        version_dir = Path(version.lora_path)
+        detected = _detect_latest_checkpoint(version_dir)
+        if detected is None:
+            # 404 matches the spec: "no checkpoint dir" → not-found, not
+            # not-ready. The UI button is only shown when
+            # latest_checkpoint_epoch is non-null, so this branch mostly
+            # catches racing API callers / stale UI state.
+            raise TrainingVersionNotFoundError(
+                f"No usable checkpoint for version {version_id}",
+                details={"version_id": version_id, "checkpoints_dir": str(version_dir / "checkpoints")},
+            )
+        resume_epoch, ckpt_path = detected
+
+        # Refuse if a training is already in flight — single-subprocess
+        # discipline (same as create_version step 3). Otherwise two
+        # subprocesses would fight for VRAM and both would OOM.
+        for existing in self.repository.list():
+            if existing.status == VersionStatus.training:
+                raise TrainingInProgressError(
+                    f"Training already in progress for version {existing.version_id}",
+                    details={
+                        "version_id": existing.version_id,
+                        "persona_id": existing.persona_id,
+                    },
+                )
+
+        # Re-resolve audio from the saved manifest. The manifest is
+        # immutable per version, so this gives us back the exact same
+        # segment set the original run used.
+        manifest = self.get_manifest(version_id)
+        audio_paths = [Path(r.audio_path) for r in manifest.recordings]
+        if not audio_paths:
+            raise NoTrainingAudioError(
+                f"Manifest for {version_id} has no audio recordings",
+                details={"version_id": version_id},
+            )
+        total_duration = manifest.total_duration_seconds
+
+        # Flip status back to `training` so the UI shows the right state
+        # and so a second /resume call hits the in-progress guard above.
+        def _mark_training(v: TrainingVersion) -> None:
+            v.status = VersionStatus.training
+            v.error_message = None
+            v.completed_at = None
+
+        self.repository.update(version_id, _mark_training)
+
+        # SFT-only VRAM unload — same as create_version.
+        if version.training_type == TrainingType.sft:
+            try:
+                self._vram.unload_for_training()
+            except Exception as e:
+                log.warning("[TRAINING] VRAM unload failed during resume: %s", e)
+
+        job = self._job_factory(
+            version=version,
+            audio_paths=audio_paths,
+            total_duration=total_duration,
+            resume_from_epoch=resume_epoch,
+            resume_checkpoint_path=ckpt_path,
+        )
+        with self._jobs_lock:
+            self._jobs[version_id] = job
+        try:
+            job.start()
+        except Exception:
+            with self._jobs_lock:
+                self._jobs.pop(version_id, None)
+            raise
+
+        log.info(
+            "[TRAINING] Resumed %s from epoch %d (ckpt=%s)",
+            version_id, resume_epoch, ckpt_path,
+        )
+        return ResumedVersion(
+            version=self.repository.get(version_id),
+            resumed_from_epoch=resume_epoch,
+        )
+
     def cancel_version(self, version_id: str) -> TrainingVersion:
         """Stop a running job (if any) and mark the version as cancelled."""
         # First touch the job registry so the subprocess gets the cancel
@@ -692,8 +822,16 @@ def _default_job_factory(
     version: TrainingVersion,
     audio_paths: list[Path],
     total_duration: float,
+    resume_from_epoch: Optional[int] = None,
+    resume_checkpoint_path: Optional[Path] = None,
 ) -> StartableJob:
-    """Build a real TrainingJob from the saved version + resolved audio."""
+    """Build a real TrainingJob from the saved version + resolved audio.
+
+    `resume_from_epoch` / `resume_checkpoint_path` are forwarded to the
+    subprocess template as env vars so a resumed run picks up at
+    `start_epoch = resume_from_epoch + 1` with the saved optimizer state.
+    Both None = fresh run (create_version path).
+    """
     from .lora_trainer import TrainingConfig
     from .sft_trainer import SFTConfig
     from .training_job import TrainingJob
@@ -722,4 +860,6 @@ def _default_job_factory(
         training_type=(version.training_type.value if version.training_type else "lora"),
         persona_id=version.persona_id,
         language_token=version.language_token,
+        resume_from_epoch=resume_from_epoch,
+        resume_checkpoint_path=resume_checkpoint_path,
     )

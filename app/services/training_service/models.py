@@ -187,6 +187,14 @@ class TrainingProgressSnapshot(BaseModel):
     training_type: Optional[TrainingType] = None
     final_loss: Optional[float] = None
     training_time_seconds: Optional[int] = None
+    # Highest epoch index whose checkpoint exists on disk under
+    # `<version_dir>/checkpoints/epoch_{N}/`. Lets the UI show "Last
+    # checkpoint: epoch N" and decide whether to surface the Resume
+    # button on a failed/cancelled version. `None` means no checkpoint
+    # has been written yet (training hasn't reached the first
+    # CHECKPOINT_EVERY_N_EPOCHS boundary, or this is a pre-checkpoint
+    # legacy run).
+    latest_checkpoint_epoch: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
