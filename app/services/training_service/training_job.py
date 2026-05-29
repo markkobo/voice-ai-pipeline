@@ -1306,6 +1306,23 @@ if __name__ == "__main__":
                                 f"[TRAINING:{self.version_id[:8]}] Failed to update repository: {vm_err}"
                             )
 
+                        # Auto-cleanup checkpoints once the merged model is
+                        # ready — they were resume artefacts, no longer needed.
+                        # ~10 GB each × 2 retention → reclaim ~20 GB per run.
+                        try:
+                            cp_dir = self.version_dir / "checkpoints"
+                            if cp_dir.exists():
+                                import shutil
+                                shutil.rmtree(cp_dir)
+                                logger.info(
+                                    f"[TRAINING:{self.version_id[:8]}] Cleaned up checkpoints/ "
+                                    f"after successful merge"
+                                )
+                        except Exception as cleanup_err:
+                            logger.warning(
+                                f"[TRAINING:{self.version_id[:8]}] Checkpoint cleanup skipped: {cleanup_err}"
+                            )
+
                         # Auto-activate the new merged model
                         try:
                             from app.services.tts import get_tts_engine
