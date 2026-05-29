@@ -905,9 +905,13 @@ if __name__ == "__main__":
             # Wait for process with timeout - read output in real-time
             stdout_lines = []
             start_time = time.time()
-            # SFT training is slow - full model training with chunked audio can take 4-8 hours
-            # Increase from 2 hours to 8 hours to allow full training
-            timeout_seconds = 28800  # 8 hour max for SFT training
+            # SFT training wall-clock cap. This is a "kill stuck process" backstop,
+            # NOT a feature — GPU is the real bottleneck. Previous 8h cap (28800s)
+            # killed v12 at epoch 66/100 on a ~44 min audio / 100-epoch SFT run
+            # (2026-05-29). Bumped to 24h to cover v12-class datasets (10-20h of
+            # audio at 30+ epochs still fits). Kept finite so a truly hung
+            # subprocess can't pin VRAM forever and block subsequent jobs.
+            timeout_seconds = 86400  # 24 hour max for SFT training
 
             # Read stdout in real-time using non-blocking reads
             import select
