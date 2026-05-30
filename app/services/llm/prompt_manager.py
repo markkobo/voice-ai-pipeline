@@ -185,6 +185,20 @@ class PersonaManager:
             if context_parts:
                 base_prompt += "\n" + "\n".join(context_parts)
 
+        # Final TTS-safety directive: the response is going through speech
+        # synthesis, so Markdown emphasis (**bold**, _italic_, ~~strike~~)
+        # produces no audible content and confuses the sentence segmenter
+        # — drop a single chars-worth of audio after each marker. User
+        # report 2026-05-30: speech dropped a few chars after `**`.
+        base_prompt += (
+            "\n\n[輸出規則]\n"
+            "你的回覆會直接送進 TTS 朗讀，請遵守：\n"
+            "1. **不要使用 Markdown 標記**（不要用 ** _ ~~ # > - * 等符號）\n"
+            "2. 不要用條列、表格、code block — 用自然語句\n"
+            "3. 不要加引號、括號、頓號等不會說出來的標點\n"
+            "4. 想強調某個字，用語氣詞或重複，不要用粗體斜體\n"
+        )
+
         return base_prompt
 
     def get_available_personas(self) -> list[str]:

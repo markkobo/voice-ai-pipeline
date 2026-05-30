@@ -100,6 +100,18 @@ async def _stream_tts_sentence(
     # Read engine's actual loaded model size for the metric label.
     model_size = getattr(engine, "model_size", "1.7B")
 
+    # Strip Markdown emphasis chars that LLM sometimes emits (`**bold**`,
+    # `_italic_`, `~~strike~~`). User report 2026-05-30 msg 1647: after
+    # an `**` in the text the spoken audio dropped a few chars. Root cause:
+    # TTS gets `**` as input and the speech tokenizer skips them but the
+    # stream-segmenter loses sync because asterisks can also be treated as
+    # punctuation. Easiest fix: strip them BEFORE the TTS call so the
+    # tokenizer never sees them. Single asterisks are also stripped — they
+    # never appear as legitimate Chinese/English speech content.
+    text = re.sub(r'\*+|_+|~~', '', text).strip()
+    if not text:
+        return
+
     # Phase 1 Path B: Use text enhancement instead of instruct strings
     enhanced_text_content = enhance_text(text.strip(), emotion)
 
