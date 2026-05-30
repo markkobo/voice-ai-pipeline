@@ -196,6 +196,21 @@ async def docs_index():
     return HTMLResponse(f"<!doctype html><meta name='viewport' content='width=device-width, initial-scale=1'>{_DOCS_CSS}{_docs_nav()}{body}")
 
 
+@app.get("/landing", response_class=HTMLResponse)
+@app.get("/landing/", response_class=HTMLResponse)
+async def landing_page():
+    """Serve docs/everhome_landing.html as-is (no markdown rendering).
+
+    User report msg 1748: the /docs-md viewer rejects non-.md files with
+    "Bad name" so the static landing HTML never reached the browser.
+    Dedicated route reads the file once and returns it raw.
+    """
+    fp = _DOCS_DIR / "everhome_landing.html"
+    if not fp.exists():
+        return HTMLResponse("<p>Landing page not found.</p>", status_code=404)
+    return HTMLResponse(fp.read_text())
+
+
 @app.get("/docs-md/{name}", response_class=HTMLResponse)
 async def docs_view(name: str):
     """Render a single repo doc file as phone-friendly HTML."""
