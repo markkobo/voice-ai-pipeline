@@ -196,22 +196,23 @@ async def _stream_tts_sentence(
         })
 
         first_chunk_sent = False
-        # 2026-05-30: switch from Path B (text-only enhancement via
-        # Chinese particles) to Path A (natural-language instruct string).
-        # User report msg 1687: emotion tag showed in UI but TTS didn't
-        # audibly shift. Root cause was instruct=None — the engine had
-        # no emotion signal. Now passing get_instruct_for_emotion(emotion)
-        # for each utterance.
-        # Also switched language="Chinese" → "auto": hardcoded "Chinese"
-        # injects codec_language_id["chinese"]=2055 (see
-        # tts_inference_language_gotcha memory) which biases the trained
-        # code_predictor toward Beijing-accent / Mandarin prosody even
-        # for English content. "auto" lets the trained code_predictor +
-        # speaker_embedding fully drive output language and accent.
-        tts_instruct = get_instruct_for_emotion(emotion) if emotion else None
+        # 2026-05-30 (msg 1697): REVERTED Path A — per-sentence varying
+        # instruct strings caused the SFT-trained voice to drift per
+        # sentence (each emotion's instruct character-modulates the
+        # custom_voice output enough that the user perceives a different
+        # speaker each turn). Back to instruct=None so the trained
+        # speaker_embedding fully drives timbre + prosody for stability.
+        # The listener differentiation is now LLM-word-choice + tone-chip
+        # visual only — acceptable for the 06/02 demo. If we want audible
+        # listener shift we'd need per-listener static instruct (not
+        # per-sentence) — deferred post-demo.
+        #
+        # Kept: language="auto" (the Beijing accent fix from commit
+        # 3cd1547 — still valid, the codec_language_id["chinese"]=2055
+        # bias is real regardless of instruct).
         async for event in engine.generate_streaming(
             text=enhanced_text_content,
-            instruct=tts_instruct,
+            instruct=None,
             language="auto",
             reference_audio=reference_audio,
         ):
