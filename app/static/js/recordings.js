@@ -355,12 +355,16 @@
         // ==================== RECORDINGS LOADING ====================
         async function loadRecordings() {
             try {
-                const response = await fetch('/api/recordings/');
+                // Bumped from server default (20) to 500 — the demo dataset
+                // already exceeds 20 segments and the user couldn't see the
+                // 5/24 recording suspected of contaminating the v15 training
+                // set. Pagination UI deferred post-demo.
+                const response = await fetch('/api/recordings/?limit=500');
                 const data = await response.json();
                 const recordings = Array.isArray(data) ? data : (data.recordings || []);
                 allRecordings = recordings;
                 filterAndRender();
-                log(`Loaded ${recordings.length} recordings`, 'info', 'UI');
+                log(`Loaded ${recordings.length} recordings (total=${data.total ?? recordings.length})`, 'info', 'UI');
 
                 const failed = recordings.filter(r => r.status === 'failed');
                 if (failed.length > 0) {
