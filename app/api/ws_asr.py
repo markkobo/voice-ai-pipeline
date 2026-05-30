@@ -888,6 +888,36 @@ async def websocket_endpoint(websocket: WebSocket):
                             log.warning(f"[{session_id}] auto_continue requested but session not configured")
                             continue
 
+                        # User report msg 1657: clicking the button before
+                        # the most-recent utterance got committed left it in
+                        # the audio buffer — conversation_history was stale,
+                        # so AI continued from earlier context instead of
+                        # what the user just said. If there's buffered audio,
+                        # commit it first so its ASR text lands in history
+                        # before we kick off the continuation prompt.
+                        if state.audio_buffer:
+                            try:
+                                pre_asr = await state_manager.commit_utterance(session_id)
+                                pre_text = (pre_asr or {}).get("text") if pre_asr else None
+                                if pre_text:
+                                    await safe_send_text(websocket, pre_asr)
+                                    # Mirror the listen_only history-append path:
+                                    # add the user's just-spoken text as a
+                                    # bare user turn so the continuation has it.
+                                    state.conversation_history.append(
+                                        {"role": "user", "content": pre_text}
+                                    )
+                                    from app.core.state_manager import CONVERSATION_HISTORY_MAX_TURNS
+                                    max_msgs = 2 * CONVERSATION_HISTORY_MAX_TURNS
+                                    if len(state.conversation_history) > max_msgs:
+                                        state.conversation_history = state.conversation_history[-max_msgs:]
+                                    log.info(
+                                        f"[{session_id}] auto_continue: flushed buffered utterance → history "
+                                        f"({len(pre_text)} chars)"
+                                    )
+                            except Exception as flush_err:
+                                log.warning(f"[{session_id}] auto_continue pre-flush failed: {flush_err}")
+
                         persona_id = state.persona_id
                         listener_id = state.listener_id
                         llm_model = state.llm_model

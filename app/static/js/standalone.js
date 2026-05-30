@@ -1113,6 +1113,13 @@ async function autoContinueSpeak() {
     }
     // Tear down mic so we're not capturing the user while AI speaks.
     teardownMic();
+    // Small delay so any in-flight audio chunks (still flying from the
+    // last ScriptProcessor onaudioprocess pump) reach the server before
+    // we send auto_continue. The server's handler now commits any buffered
+    // audio first (so the user's just-spoken text becomes the continuation
+    // seed) — but only what arrived in time. 80 ms is enough on a LAN/WAN
+    // round-trip and short enough to feel instant to the user.
+    await new Promise(r => setTimeout(r, 80));
     log('autoContinue: requesting AI continuation in user voice');
     try {
         ws.send(JSON.stringify({ type: 'control', action: 'auto_continue' }));
