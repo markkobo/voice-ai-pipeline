@@ -196,24 +196,29 @@ async def _stream_tts_sentence(
         })
 
         first_chunk_sent = False
-        # 2026-05-30 (msg 1697): REVERTED Path A — per-sentence varying
-        # instruct strings caused the SFT-trained voice to drift per
-        # sentence (each emotion's instruct character-modulates the
-        # custom_voice output enough that the user perceives a different
-        # speaker each turn). Back to instruct=None so the trained
-        # speaker_embedding fully drives timbre + prosody for stability.
-        # The listener differentiation is now LLM-word-choice + tone-chip
-        # visual only — acceptable for the 06/02 demo. If we want audible
-        # listener shift we'd need per-listener static instruct (not
-        # per-sentence) — deferred post-demo.
+        # 2026-05-30 (msg 1709): also revert language="auto" → "Chinese".
+        # User reported v15 voice "faster, higher pitch, more formal"
+        # after the language change. Tracing the model code:
+        #   - language="Chinese" injects codec_language_id["chinese"]=2055
+        #     into the talker's codec_prefill_list (4 tokens, "thinking"
+        #     mode).
+        #   - language="auto" omits the language id and uses a different
+        #     prefill (3 tokens, "no-think" mode).
+        # Different prefills produce materially different prosody. The
+        # SFT-trained model on Mark's audio was trained with the
+        # "Chinese" prefill in inference and that's the voice character
+        # the user has been listening to and calling "natural". Reverting.
         #
-        # Kept: language="auto" (the Beijing accent fix from commit
-        # 3cd1547 — still valid, the codec_language_id["chinese"]=2055
-        # bias is real regardless of instruct).
+        # The Beijing accent fix (commit 3cd1547 engine default → "auto")
+        # is OK to keep as the engine default — it's never reached because
+        # this call site overrides. The actual Beijing accent fix that
+        # worked was the spk_is_dialect=false patch (see commit dd33724
+        # and the language_token training UI option). Two fixes for the
+        # same problem; this revert keeps only the one that's needed.
         async for event in engine.generate_streaming(
             text=enhanced_text_content,
             instruct=None,
-            language="auto",
+            language="Chinese",
             reference_audio=reference_audio,
         ):
             if event.event == "audio_chunk" and event.audio_data:
