@@ -352,6 +352,149 @@ questions.
 
 ---
 
+### M8.5 — Instruction-conditioned TTS fine-tuning (2026-06 → 2026-07)
+
+**Why this comes before M9.** Industry best practice (per
+[EMORL-TTS arXiv:2510.05758](https://arxiv.org/abs/2510.05758),
+[Characteristic-Specific Partial Fine-Tuning arXiv:2501.14273](https://arxiv.org/abs/2501.14273))
+is to **define emotion vocabulary and label training data BEFORE the
+persona LLM fine-tune** — so the persona LLM in M9 can learn to emit
+only trained-vocabulary emotion tags, avoiding the "LLM emits emotion X,
+TTS doesn't recognize it" mismatch. M8.5 produces the emotion-conditioned
+TTS + a fixed vocabulary; M9 trains the persona LLM to emit only those
+tags.
+
+**Goal.** Enable audible emotion / listener tone shift in the cloned
+voice **without per-sentence voice drift**. Currently passing a varying
+`instruct` per sentence to a SFT-trained `custom_voice` model
+destabilizes prosody — each sentence sounds like a different person
+(observed during 06/02 demo prep; see §11 demo learnings). The SFT
+model was trained on `(audio, text)` pairs without instruct conditioning,
+so the `instruct` field at inference becomes an out-of-distribution
+perturbation rather than a controllable style axis.
+
+**Why this milestone exists.** Today's emotion routing path
+(`emotion_mapper.py` → `instruct=<style string>`) had to be reverted to
+`instruct=None` + `language="Chinese"` for demo stability. Listener
+tone-shift now relies on LLM word choice + tone-chip visual only — no
+audible voice differentiation. M9 (persona LLM) and M10 (multi-listener
+voice routing) both depend on audible differentiation; without M8.5, M9
+learns an undefined emotion vocabulary and M10 only ships visual +
+prompt-level tone changes.
+
+**Approach** (4 phases, ~1 month):
+
+- **Phase A (week 1, 2026-06) — Auto-emotion labeling of existing recordings.**
+  Run **emotion2vec** ([FunASR](https://github.com/modelscope/FunASR) /
+  modelscope `iic/emotion2vec_plus_large`) over current 小S corpus
+  segments. Produce `(segment_id, emotion_label, confidence)` rows in
+  `data/personas/<persona_id>/labels/emotion.jsonl`. Spot-check 50
+  segments by hand; expect ~70-80% classifier accuracy on Chinese.
+  Fallback / cross-check tools: **wav2vec2-emotion**
+  (`audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim`),
+  **openSMILE** (`eGeMAPSv02` feature set for emotion analysis).
+- **Phase B (week 2, 2026-06) — Gap-fill recording for under-represented
+  emotions.** From Phase A distribution, identify under-represented
+  emotions among the 4-6 core targets (`gentle`, `warm`, `focused`,
+  `reflective`, `upbeat`, `+1 reserved`). Record gap-filling content;
+  balance dataset across the 4-6 core emotions. Output: ~30-40 minutes
+  of labeled supplementary audio.
+- **Phase C (week 3, 2026-07) — Retrain SFT with mixed instruct conditioning.**
+  20-30% of training pairs carry an emotion-matched `instruct` string;
+  70-80% are left empty (`instruct=None`). Goal: preserve speaker
+  generalization (the 70-80% empty path) while teaching the model to
+  follow `instruct` when present (the 20-30% conditioned path). Dual-
+  loss training is the likely recipe per the CosyVoice 2 paper
+  ([arXiv:2412.10117](https://arxiv.org/abs/2412.10117)) — speaker-
+  identity loss alongside text-audio loss to prevent the cloned voice
+  from drifting when conditioned.
+- **Phase D (week 4, 2026-07) — LLM-side instruct vocabulary alignment + A/B
+  ablation.** Lock the final emotion vocabulary the retrained TTS
+  understands. This vocabulary is the **input contract for M9** — the
+  persona LLM SFT corpus must emit `[E:情緒]` tags drawn only from this
+  set. Run blind A/B on 8 utterances per (persona, listener, emotion)
+  with a family member — confirm (1) speaker still recognizable (no
+  drift); (2) emotion audibly distinguishable.
+
+**Industry references.**
+
+- **EMORL-TTS** — [arXiv:2510.05758](https://arxiv.org/abs/2510.05758)
+  — emotion-vocabulary-first methodology; train TTS on a closed set of
+  emotion labels before any downstream LLM/persona work.
+- **Characteristic-Specific Partial Fine-Tuning** —
+  [arXiv:2501.14273](https://arxiv.org/abs/2501.14273) — argues for
+  staged fine-tuning where downstream behaviors are conditioned on
+  upstream vocabularies, not co-trained.
+- **CosyVoice 2 (Alibaba)** — [arXiv:2412.10117](https://arxiv.org/abs/2412.10117)
+  — flagship paradigm for instruction-conditioned TTS: `(text,
+  style_prompt, audio)` tuples; instruct-following without speaker
+  drift via dual-loss training.
+- **Step-Audio 2 / 2.5 Realtime (StepFun)** — roleplay-specific RLHF +
+  10k+ persona-matrix training; closest-in-spirit gold standard for
+  emotion-controllable cloned voice (closed API only).
+- **StyleTTS 2** — [arXiv:2306.07691](https://arxiv.org/abs/2306.07691)
+  — adaptive style transfer via diffusion-based style sampling;
+  reference for "preserve speaker, vary style" architectural pattern.
+- **Bark / Suno-AI** — style-token approach to controllable TTS;
+  reference for vocabulary design (discrete style tokens vs free-form
+  instruct).
+- **emotion2vec** — speech emotion representation; primary auto-labeler
+  for Phase A.
+- **wav2vec2-emotion** — cross-check labeler.
+- **openSMILE** — paralinguistic feature extraction; manual review
+  support tool.
+
+**Dependencies.** Depends on M7 (corpus exists for emotion labeling).
+M11 (TTS engine abstraction) helpful so that retrained SFT model can be
+served behind `BaseTTSEngine`. Real `talker.model` LoRA (companion
+deliverable in M11) would compose naturally with instruct conditioning
+— train the talker LoRA on the same Phase C mixed-instruct corpus.
+
+**Blocks.** M8.5 **blocks M9** — the persona LLM in M9 must be trained
+to emit `[E:情緒]` tags drawn from the vocabulary this milestone locks
+at Phase D. Co-training risks the LLM emitting emotions the TTS does
+not recognize.
+
+**Deliverables.**
+
+- `app/services/training_service/emotion_labeling/` package wrapping
+  emotion2vec + wav2vec2-emotion + openSMILE behind a unified label-
+  writer interface.
+- `data/personas/<persona_id>/labels/emotion.jsonl` per persona.
+- Retrained SFT custom_voice model with mixed-instruct conditioning;
+  versioned as `talker_v<N>_instruct_conditioned`.
+- Updated `emotion_mapper.py` vocabulary aligned with trained
+  instruct strings (not the current free-form natural-language
+  strings).
+- **Locked emotion vocabulary spec** — `docs/EMOTION_VOCAB_v1.md` — the
+  input contract for M9 persona LLM SFT.
+- Blind A/B eval harness — `scripts/ab_eval_emotion.py` — records
+  family-member listener responses per (persona, listener, emotion).
+
+**Risks & mitigations.**
+
+| Risk | Mitigation |
+|---|---|
+| Mixed-instruct training destabilizes speaker identity | Dual-loss training (CosyVoice 2 recipe); validate after every 500 steps with speaker-similarity metric |
+| Auto-classifier accuracy ~70-80% on Chinese | Manual review pass on the ~30-40 min labeled dataset; spot-check before training |
+| Instruct vocabulary scope mismatch (LLM emits N emotions, training covers M) | Lock vocabulary at Phase D **before M9 SFT data generation begins**; out-of-distribution emotions fall back to `instruct=None` with logged warning per `feedback_fail_loud` |
+| 30-40 min supplementary recording requires scheduled studio time | Schedule before Phase A wraps; gap-fill list known by end of week 1 |
+
+**Acceptance gate.** Per (persona, listener, emotion) blind A/B with a
+family member — speaker recognized AND emotion audibly distinguishable
+on ≥6/8 utterances. Same gate doubles as the M8.5 deliverable for the
+close-relative-recognizable A/B from `RESEARCH_SFT_S2S.md` §"Top 3
+recommendations" item 3.
+
+**Cross-references.** Sits between M8 (Memory RAG) and M9 (persona LLM)
+because M9 SFT data generation must consume the vocabulary locked here.
+Composes with the real `talker.model` LoRA promoted in M11.
+
+**Effort estimate.** ~1 month (4 phases × 1 week each), with studio
+recording in week 2 as the calendar gate.
+
+---
+
 ### M9 — OpenCharacter persona LLM (2026-07 → 2026-08)
 
 **Goal.** Train per-person LoRA on a Chinese-capable base, using the
@@ -474,131 +617,6 @@ shares the per-persona artifact directory.
 
 **Effort estimate.** 6-8 weeks. (Heaviest milestone in this plan.)
 M9.5 FinePE add-on +2-3 weeks if pursued.
-
-> **Naming note.** The "FinePE M9.5 add-on" above is the *MoLE persona-
-> editing* speculative add-on (Mixture of LoRA Experts for persona
-> sub-traits). It is distinct from the **M9.5 — Instruction-conditioned
-> TTS fine-tuning** milestone defined immediately below, which is a
-> TTS-side milestone, not an LLM-side add-on. Both happen to share the
-> "9.5" label by historical accident; treat them as separate workstreams.
-
----
-
-### M9.5 — Instruction-conditioned TTS fine-tuning (2026-08 → 2026-09)
-
-**Goal.** Enable audible emotion / listener tone shift in the cloned
-voice **without per-sentence voice drift**. Currently passing a varying
-`instruct` per sentence to a SFT-trained `custom_voice` model
-destabilizes prosody — each sentence sounds like a different person
-(observed during 06/02 demo prep; see §11 demo learnings). The SFT
-model was trained on `(audio, text)` pairs without instruct conditioning,
-so the `instruct` field at inference becomes an out-of-distribution
-perturbation rather than a controllable style axis.
-
-**Why this milestone exists.** Today's emotion routing path
-(`emotion_mapper.py` → `instruct=<style string>`) had to be reverted to
-`instruct=None` + `language="Chinese"` for demo stability. Listener
-tone-shift now relies on LLM word choice + tone-chip visual only — no
-audible voice differentiation. M10 (multi-listener voice routing)
-depends on audible differentiation; without M9.5, M10 only ships visual
-+ prompt-level tone changes.
-
-**Approach** (4 phases, ~1 month):
-
-- **Phase A (week 1) — Auto-emotion labeling of existing recordings.**
-  Run **emotion2vec** ([FunASR](https://github.com/modelscope/FunASR) /
-  modelscope `iic/emotion2vec_plus_large`) over current 小S corpus
-  segments. Produce `(segment_id, emotion_label, confidence)` rows in
-  `data/personas/<persona_id>/labels/emotion.jsonl`. Spot-check 50
-  segments by hand; expect ~70-80% classifier accuracy on Chinese.
-  Fallback / cross-check tools: **wav2vec2-emotion**
-  (`audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim`),
-  **openSMILE** (`eGeMAPSv02` feature set for emotion analysis).
-- **Phase B (week 2) — Gap-fill recording for under-represented
-  emotions.** From Phase A distribution, identify under-represented
-  emotions among the 4-6 core targets (`gentle`, `warm`, `focused`,
-  `reflective`, `upbeat`, `+1 reserved`). Record gap-filling content;
-  balance dataset across the 4-6 core emotions. Output: ~30-40 minutes
-  of labeled supplementary audio.
-- **Phase C (week 3) — Retrain SFT with mixed instruct conditioning.**
-  20-30% of training pairs carry an emotion-matched `instruct` string;
-  70-80% are left empty (`instruct=None`). Goal: preserve speaker
-  generalization (the 70-80% empty path) while teaching the model to
-  follow `instruct` when present (the 20-30% conditioned path). Dual-
-  loss training is the likely recipe per the CosyVoice 2 paper
-  ([arXiv:2412.10117](https://arxiv.org/abs/2412.10117)) — speaker-
-  identity loss alongside text-audio loss to prevent the cloned voice
-  from drifting when conditioned.
-- **Phase D (week 4) — LLM-side instruct vocabulary alignment + A/B
-  ablation.** Align the LLM's `[E:情緒]` tag vocabulary with the
-  emotions the retrained TTS actually understands. Run blind A/B on 8
-  utterances per (persona, listener, emotion) with a family member —
-  confirm (1) speaker still recognizable (no drift); (2) emotion
-  audibly distinguishable.
-
-**Industry references.**
-
-- **CosyVoice 2 (Alibaba)** — [arXiv:2412.10117](https://arxiv.org/abs/2412.10117)
-  — flagship paradigm for instruction-conditioned TTS: `(text,
-  style_prompt, audio)` tuples; instruct-following without speaker
-  drift via dual-loss training.
-- **Step-Audio 2 / 2.5 Realtime (StepFun)** — roleplay-specific RLHF +
-  10k+ persona-matrix training; closest-in-spirit gold standard for
-  emotion-controllable cloned voice (closed API only).
-- **StyleTTS 2** — [arXiv:2306.07691](https://arxiv.org/abs/2306.07691)
-  — adaptive style transfer via diffusion-based style sampling;
-  reference for "preserve speaker, vary style" architectural pattern.
-- **Bark / Suno-AI** — style-token approach to controllable TTS;
-  reference for vocabulary design (discrete style tokens vs free-form
-  instruct).
-- **emotion2vec** — speech emotion representation; primary auto-labeler
-  for Phase A.
-- **wav2vec2-emotion** — cross-check labeler.
-- **openSMILE** — paralinguistic feature extraction; manual review
-  support tool.
-
-**Dependencies.** M11 (TTS engine abstraction) helpful so that
-retrained SFT model can be served behind `BaseTTSEngine`. Real
-`talker.model` LoRA (companion deliverable in M11) would compose
-naturally with instruct conditioning — train the talker LoRA on the
-same Phase C mixed-instruct corpus.
-
-**Deliverables.**
-
-- `app/services/training_service/emotion_labeling/` package wrapping
-  emotion2vec + wav2vec2-emotion + openSMILE behind a unified label-
-  writer interface.
-- `data/personas/<persona_id>/labels/emotion.jsonl` per persona.
-- Retrained SFT custom_voice model with mixed-instruct conditioning;
-  versioned as `talker_v<N>_instruct_conditioned`.
-- Updated `emotion_mapper.py` vocabulary aligned with trained
-  instruct strings (not the current free-form natural-language
-  strings).
-- Blind A/B eval harness — `scripts/ab_eval_emotion.py` — records
-  family-member listener responses per (persona, listener, emotion).
-
-**Risks & mitigations.**
-
-| Risk | Mitigation |
-|---|---|
-| Mixed-instruct training destabilizes speaker identity | Dual-loss training (CosyVoice 2 recipe); validate after every 500 steps with speaker-similarity metric |
-| Auto-classifier accuracy ~70-80% on Chinese | Manual review pass on the ~30-40 min labeled dataset; spot-check before training |
-| Instruct vocabulary scope mismatch (LLM emits N emotions, training covers M) | Lock vocabulary at Phase D; out-of-distribution emotions fall back to `instruct=None` with logged warning per `feedback_fail_loud` |
-| 30-40 min supplementary recording requires scheduled studio time | Schedule before Phase A wraps; gap-fill list known by end of week 1 |
-
-**Acceptance gate.** Per (persona, listener, emotion) blind A/B with a
-family member — speaker recognized AND emotion audibly distinguishable
-on ≥6/8 utterances. Same gate doubles as the M9.5 deliverable for the
-close-relative-recognizable A/B from `RESEARCH_SFT_S2S.md` §"Top 3
-recommendations" item 3.
-
-**Cross-references.** Sits between M9 (persona LLM) and M10 (multi-
-listener routing) because both depend on this for audible
-differentiation. Composes with the real `talker.model` LoRA promoted
-in M11.
-
-**Effort estimate.** ~1 month (4 phases × 1 week each), with studio
-recording in week 2 as the calendar gate.
 
 ---
 
@@ -843,7 +861,7 @@ roadmap said "weights not open today" — corrected here.
 2. License is permissive (Apache 2.0 / MIT preferred).
 3. Quality regression against M12 hybrid + current Qwen3-TTS-LoRA
    passes (50-prompt suite + per-(persona, listener) blind A/B with
-   family member, per M9.5).
+   family member, per M8.5).
 4. VRAM fits Spark 128 GB unified.
 
 **Until triggers fire:** stay on M12 hybrid for latency; stay on
@@ -890,7 +908,7 @@ Cloning depth via S2S is therefore **12+ months out**, not 6.
 Consequence: the shipped Qwen3-TTS LoRA path is **the moat**, not sunk
 cost. **Real `talker.model` LoRA** (per `training_pipeline_deferred`
 item 1) is **upgraded in priority** — it was deferred work; it should
-now be folded into M9.5 / M11 as a first-class deliverable. Zero-shot
+now be folded into M8.5 / M11 as a first-class deliverable. Zero-shot
 speaker prompts capture gross timbre + average prosody; SFT/LoRA on a
 dedicated TTS is the only architecture in our budget that captures
 close-relative-recognizable micro-features.
@@ -1033,12 +1051,14 @@ SKU. Not on near-term roadmap.
 | Qwen3-TTS 1.7B VoiceDesign | huggingface.co/Qwen | All milestones — TTS retained for cloning until M11 swap |
 | **The Making of Digital Ghosts** | [arXiv 2511.20094](https://arxiv.org/pdf/2511.20094) (Nov 2025) | M-Consent — ethical framework for deceased-person modeling |
 | **Digital Doppelgangers (pre-mortem clones)** | [arXiv 2502.21248](https://arxiv.org/html/2502.21248v1) | M-Consent — revocability flow for still-living personas |
-| **CosyVoice 2** | [arXiv 2412.10117](https://arxiv.org/abs/2412.10117) (Dec 2024) | M9.5 — flagship instruction-conditioned TTS paradigm; dual-loss training recipe to prevent speaker drift under instruct |
-| **StyleTTS 2** | [arXiv 2306.07691](https://arxiv.org/abs/2306.07691) | M9.5 — adaptive style transfer via diffusion; preserve-speaker-vary-style pattern |
-| **Bark (Suno-AI)** | [GitHub suno-ai/bark](https://github.com/suno-ai/bark) | M9.5 — style-token approach reference for controllable TTS vocabulary design |
-| **emotion2vec (FunASR)** | [GitHub modelscope/FunASR](https://github.com/modelscope/FunASR) / `iic/emotion2vec_plus_large` | M9.5 — primary auto-labeler for Phase A emotion labeling of recorded corpus |
-| **wav2vec2-emotion** | [HF audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim](https://huggingface.co/audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim) | M9.5 — cross-check emotion classifier |
-| **openSMILE (eGeMAPSv02)** | [audEERING openSMILE](https://github.com/audeering/opensmile) | M9.5 — paralinguistic feature extraction for manual review |
+| **EMORL-TTS** | [arXiv 2510.05758](https://arxiv.org/abs/2510.05758) | M8.5 — emotion-vocabulary-first methodology; train TTS on closed emotion set before downstream LLM/persona work |
+| **Characteristic-Specific Partial Fine-Tuning** | [arXiv 2501.14273](https://arxiv.org/abs/2501.14273) | M8.5 — staged fine-tuning rationale: downstream behaviors conditioned on upstream vocabularies, not co-trained |
+| **CosyVoice 2** | [arXiv 2412.10117](https://arxiv.org/abs/2412.10117) (Dec 2024) | M8.5 — flagship instruction-conditioned TTS paradigm; dual-loss training recipe to prevent speaker drift under instruct |
+| **StyleTTS 2** | [arXiv 2306.07691](https://arxiv.org/abs/2306.07691) | M8.5 — adaptive style transfer via diffusion; preserve-speaker-vary-style pattern |
+| **Bark (Suno-AI)** | [GitHub suno-ai/bark](https://github.com/suno-ai/bark) | M8.5 — style-token approach reference for controllable TTS vocabulary design |
+| **emotion2vec (FunASR)** | [GitHub modelscope/FunASR](https://github.com/modelscope/FunASR) / `iic/emotion2vec_plus_large` | M8.5 — primary auto-labeler for Phase A emotion labeling of recorded corpus |
+| **wav2vec2-emotion** | [HF audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim](https://huggingface.co/audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim) | M8.5 — cross-check emotion classifier |
+| **openSMILE (eGeMAPSv02)** | [audEERING openSMILE](https://github.com/audeering/opensmile) | M8.5 — paralinguistic feature extraction for manual review |
 | **SFT-on-S2S audit (internal)** | `docs/RESEARCH_SFT_S2S.md` (2026-05-28) | M11 / M12a / M13 — no open Chinese S2S supports SFT for new speakers; cloning depth stays on Qwen3-TTS-LoRA for 12+ months |
 
 ---
@@ -1151,13 +1171,13 @@ strategic side-note). They have no cloning — we do.
 │           ├─ M8 — Memory RAG (ID-RAG + HippoRAG 2 + A-MEM/Mem0)
 ├─ AUG     ─┘
 │
+├─ JUN     ─┐
+│           ├─ M8.5 — Instruction-conditioned TTS fine-tuning (emotion2vec labels → mixed-instruct SFT)
+├─ JUL     ─┘    ← locks emotion vocabulary; BLOCKS M9
+│
 ├─ JUL     ─┐
 │           ├─ M9 — OpenCharacter persona LoRA + Qwen 3 8B local + CharacterEval gate
-├─ AUG     ─┘
-│
-├─ AUG     ─┐
-│           ├─ M9.5 — Instruction-conditioned TTS fine-tuning (emotion2vec labels → mixed-instruct SFT)
-├─ SEP     ─┘
+├─ AUG     ─┘    ← LLM trained to emit only M8.5 vocabulary tags
 │
 ├─ AUG     ─┐
 │           ├─ M10 — Multi-listener voice routing (build routing, defer LoRA-swap engineering)
@@ -1174,10 +1194,11 @@ strategic side-note). They have no cloning — we do.
 └─ Q4 +     M13 — OSS E2E S2S migration (Step-Audio 2 primary; Chroma watch)
 ```
 
-Milestones M8 and M9 run in parallel (different code paths, share corpus
-from M7). M-Consent and M7 run in parallel (different code surfaces).
-M12a precedes M12 and may obviate it. M9.5 (TTS instruction conditioning)
-sits between M9 and M10 — M10 audible differentiation depends on it.
+M-Consent and M7 run in parallel (different code surfaces). M8.5 (TTS
+instruction conditioning) sits between M8 and M9 and **blocks M9** —
+the persona LLM must learn to emit only the emotion vocabulary M8.5
+locks. M8 and M8.5 can run in parallel (different code paths, share
+corpus from M7). M12a precedes M12 and may obviate it.
 
 ---
 
@@ -1192,7 +1213,7 @@ roadmap reflects observed behavior, not aspirational design.
   sounded like a different person. Reverted to `instruct=None` +
   `language="Chinese"`. Listener tone-shift now relies on LLM word
   choice + tone-chip visual only. **This is the motivating evidence
-  for M9.5** (instruction-conditioned TTS fine-tuning).
+  for M8.5** (instruction-conditioned TTS fine-tuning).
 - **Codec prefill matters: `"Chinese"` vs `"auto"` is not equivalent
   for SFT-trained models.** The SFT model was trained against the
   `"Chinese"` prefill (4 tokens with `codec_language_id=2055`);
