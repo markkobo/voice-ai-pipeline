@@ -808,6 +808,31 @@ async def websocket_endpoint(websocket: WebSocket):
                             index_name="default",
                         ).observe(rag_elapsed)
 
+                        # Listen-only mode: ASR runs but LLM does NOT respond.
+                        # The user's transcript is appended to conversation
+                        # history as a bare user turn (no assistant reply)
+                        # so that a subsequent auto_continue click uses
+                        # what was just said as its continuation seed.
+                        # Use case (demo): user speaks → AI silently listens
+                        # → user clicks "Let AI continue" → AI takes over
+                        # in user's voice continuing the user's just-spoken
+                        # thought. Without this, AI was responding to every
+                        # turn and auto_continue had to continue from AI's
+                        # last reply rather than user's last input.
+                        if state.listen_only:
+                            log.info(f"[{session_id}] listen_only: skipping LLM, history-only append")
+                            # Append a bare user turn so auto_continue has the seed.
+                            # We pair it with an empty assistant string — the
+                            # append_to_history helper rejects empty values,
+                            # so do it manually here.
+                            ch = state.conversation_history
+                            ch.append({"role": "user", "content": asr_result["text"]})
+                            from app.core.state_manager import CONVERSATION_HISTORY_MAX_TURNS
+                            max_msgs = 2 * CONVERSATION_HISTORY_MAX_TURNS
+                            if len(ch) > max_msgs:
+                                state.conversation_history = ch[-max_msgs:]
+                            continue
+
                         # Bump utterance seq BEFORE create_task so a cancel
                         # arriving immediately afterward stamps the right
                         # seq (review #21 stale-cancel-race fix).

@@ -112,6 +112,15 @@ class SessionState:
         # so a demo session can't grow the prompt unboundedly.
         self.conversation_history: list[dict] = []
 
+        # Listen-only mode (2026-05-30) — when True, ASR fires but LLM
+        # does NOT respond. ASR text is still pushed to the conversation
+        # history (as a user turn) so that a subsequent auto_continue
+        # button click can use it as the continuation seed. Demo flow:
+        # user speaks → AI silently transcribes → user clicks "Let AI
+        # continue" → AI takes over in user's voice continuing what was
+        # just said.
+        self.listen_only: bool = False
+
 
 # Max (user, assistant) pairs kept in SessionState.conversation_history.
 # 20 pairs ≈ 40 messages ≈ comfortably under gpt-4o-mini's 128k context
@@ -225,6 +234,11 @@ class StateManager:
         # LLM model
         if "model" in config:
             state.llm_model = config.get("model")
+
+        # Listen-only mode toggle (per-config or per-update; treat absent
+        # as no-change, explicit false as disable).
+        if "listen_only" in config:
+            state.listen_only = bool(config.get("listen_only"))
 
         # TTS model — legacy field (was 0.6B/1.7B base picker, removed
         # 2026-05-20 when SFT/LoRA shipped: the server now always uses the

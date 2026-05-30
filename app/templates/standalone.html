@@ -100,6 +100,10 @@
                 <input type="checkbox" id="autoContinueChk" checked>
                 <span>Auto-continue</span>
             </label>
+            <label class="auto-continue-toggle" title="Demo Turing-test prep: AI listens silently to what you say (no reply) until you click 'Let AI continue'">
+                <input type="checkbox" id="listenOnlyChk" onchange="onListenOnlyChange()">
+                <span>🎧 Listen-only</span>
+            </label>
             <button id="autoContinueBtn" onclick="autoContinueSpeak()"
                     title="Let AI continue speaking in your cloned voice for ~20s (demo gimmick — voice Turing test)"
                     style="background:#2a1d3a;color:#c89efa;border:1px solid rgba(200,158,250,0.4);padding:6px 12px;border-radius:6px;cursor:pointer;font-size:0.82rem;width:auto;">

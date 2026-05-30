@@ -1015,6 +1015,7 @@ listenerEl.addEventListener('change', () => {
 function resendConfig(reason) {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     const ttsModelEl = document.getElementById('tts_model');
+    const listenOnly = !!(document.getElementById('listenOnlyChk') && document.getElementById('listenOnlyChk').checked);
     ws.send(JSON.stringify({
         type: 'config',
         audio: { sample_rate: 24000, channels: 1, format: 'pcm' },
@@ -1022,10 +1023,28 @@ function resendConfig(reason) {
         listener_id: listenerEl.value,
         model: 'gpt-4o-mini',
         vad: document.getElementById('vad').value,
-        tts_model: ttsModelEl ? ttsModelEl.value : '1.7B'
+        tts_model: ttsModelEl ? ttsModelEl.value : '1.7B',
+        listen_only: listenOnly,
     }));
-    log('Config resent (' + reason + '): persona=' + personaEl.value + ' listener=' + listenerEl.value);
+    log('Config resent (' + reason + '): persona=' + personaEl.value + ' listener=' + listenerEl.value + ' listen_only=' + listenOnly);
 }
+
+// Toggle listen-only mode mid-session. When ON, ASR fires but LLM does NOT
+// respond — user speech goes into the conversation history as a bare user
+// turn so a subsequent "Let AI continue" click uses what was just said as
+// the continuation seed. Demo use case: silent listening pose, then dramatic
+// "AI takes over in my voice" reveal.
+function onListenOnlyChange() {
+    const chk = document.getElementById('listenOnlyChk');
+    if (!chk) return;
+    resendConfig(chk.checked ? 'listen-only ON' : 'listen-only OFF');
+    // Visual nudge so the user knows the mode is live.
+    const btn = document.getElementById('autoContinueBtn');
+    if (btn) {
+        btn.style.boxShadow = chk.checked ? '0 0 12px rgba(200,158,250,0.6)' : '';
+    }
+}
+window.onListenOnlyChange = onListenOnlyChange;
 
 // Nuclear reset for live demos — if mid-demo state goes sideways
 // (stuck SPEAKING, runaway TTS, sticky mic indicator, ghost cancel
