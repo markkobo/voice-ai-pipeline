@@ -475,6 +475,131 @@ shares the per-persona artifact directory.
 **Effort estimate.** 6-8 weeks. (Heaviest milestone in this plan.)
 M9.5 FinePE add-on +2-3 weeks if pursued.
 
+> **Naming note.** The "FinePE M9.5 add-on" above is the *MoLE persona-
+> editing* speculative add-on (Mixture of LoRA Experts for persona
+> sub-traits). It is distinct from the **M9.5 — Instruction-conditioned
+> TTS fine-tuning** milestone defined immediately below, which is a
+> TTS-side milestone, not an LLM-side add-on. Both happen to share the
+> "9.5" label by historical accident; treat them as separate workstreams.
+
+---
+
+### M9.5 — Instruction-conditioned TTS fine-tuning (2026-08 → 2026-09)
+
+**Goal.** Enable audible emotion / listener tone shift in the cloned
+voice **without per-sentence voice drift**. Currently passing a varying
+`instruct` per sentence to a SFT-trained `custom_voice` model
+destabilizes prosody — each sentence sounds like a different person
+(observed during 06/02 demo prep; see §11 demo learnings). The SFT
+model was trained on `(audio, text)` pairs without instruct conditioning,
+so the `instruct` field at inference becomes an out-of-distribution
+perturbation rather than a controllable style axis.
+
+**Why this milestone exists.** Today's emotion routing path
+(`emotion_mapper.py` → `instruct=<style string>`) had to be reverted to
+`instruct=None` + `language="Chinese"` for demo stability. Listener
+tone-shift now relies on LLM word choice + tone-chip visual only — no
+audible voice differentiation. M10 (multi-listener voice routing)
+depends on audible differentiation; without M9.5, M10 only ships visual
++ prompt-level tone changes.
+
+**Approach** (4 phases, ~1 month):
+
+- **Phase A (week 1) — Auto-emotion labeling of existing recordings.**
+  Run **emotion2vec** ([FunASR](https://github.com/modelscope/FunASR) /
+  modelscope `iic/emotion2vec_plus_large`) over current 小S corpus
+  segments. Produce `(segment_id, emotion_label, confidence)` rows in
+  `data/personas/<persona_id>/labels/emotion.jsonl`. Spot-check 50
+  segments by hand; expect ~70-80% classifier accuracy on Chinese.
+  Fallback / cross-check tools: **wav2vec2-emotion**
+  (`audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim`),
+  **openSMILE** (`eGeMAPSv02` feature set for emotion analysis).
+- **Phase B (week 2) — Gap-fill recording for under-represented
+  emotions.** From Phase A distribution, identify under-represented
+  emotions among the 4-6 core targets (`gentle`, `warm`, `focused`,
+  `reflective`, `upbeat`, `+1 reserved`). Record gap-filling content;
+  balance dataset across the 4-6 core emotions. Output: ~30-40 minutes
+  of labeled supplementary audio.
+- **Phase C (week 3) — Retrain SFT with mixed instruct conditioning.**
+  20-30% of training pairs carry an emotion-matched `instruct` string;
+  70-80% are left empty (`instruct=None`). Goal: preserve speaker
+  generalization (the 70-80% empty path) while teaching the model to
+  follow `instruct` when present (the 20-30% conditioned path). Dual-
+  loss training is the likely recipe per the CosyVoice 2 paper
+  ([arXiv:2412.10117](https://arxiv.org/abs/2412.10117)) — speaker-
+  identity loss alongside text-audio loss to prevent the cloned voice
+  from drifting when conditioned.
+- **Phase D (week 4) — LLM-side instruct vocabulary alignment + A/B
+  ablation.** Align the LLM's `[E:情緒]` tag vocabulary with the
+  emotions the retrained TTS actually understands. Run blind A/B on 8
+  utterances per (persona, listener, emotion) with a family member —
+  confirm (1) speaker still recognizable (no drift); (2) emotion
+  audibly distinguishable.
+
+**Industry references.**
+
+- **CosyVoice 2 (Alibaba)** — [arXiv:2412.10117](https://arxiv.org/abs/2412.10117)
+  — flagship paradigm for instruction-conditioned TTS: `(text,
+  style_prompt, audio)` tuples; instruct-following without speaker
+  drift via dual-loss training.
+- **Step-Audio 2 / 2.5 Realtime (StepFun)** — roleplay-specific RLHF +
+  10k+ persona-matrix training; closest-in-spirit gold standard for
+  emotion-controllable cloned voice (closed API only).
+- **StyleTTS 2** — [arXiv:2306.07691](https://arxiv.org/abs/2306.07691)
+  — adaptive style transfer via diffusion-based style sampling;
+  reference for "preserve speaker, vary style" architectural pattern.
+- **Bark / Suno-AI** — style-token approach to controllable TTS;
+  reference for vocabulary design (discrete style tokens vs free-form
+  instruct).
+- **emotion2vec** — speech emotion representation; primary auto-labeler
+  for Phase A.
+- **wav2vec2-emotion** — cross-check labeler.
+- **openSMILE** — paralinguistic feature extraction; manual review
+  support tool.
+
+**Dependencies.** M11 (TTS engine abstraction) helpful so that
+retrained SFT model can be served behind `BaseTTSEngine`. Real
+`talker.model` LoRA (companion deliverable in M11) would compose
+naturally with instruct conditioning — train the talker LoRA on the
+same Phase C mixed-instruct corpus.
+
+**Deliverables.**
+
+- `app/services/training_service/emotion_labeling/` package wrapping
+  emotion2vec + wav2vec2-emotion + openSMILE behind a unified label-
+  writer interface.
+- `data/personas/<persona_id>/labels/emotion.jsonl` per persona.
+- Retrained SFT custom_voice model with mixed-instruct conditioning;
+  versioned as `talker_v<N>_instruct_conditioned`.
+- Updated `emotion_mapper.py` vocabulary aligned with trained
+  instruct strings (not the current free-form natural-language
+  strings).
+- Blind A/B eval harness — `scripts/ab_eval_emotion.py` — records
+  family-member listener responses per (persona, listener, emotion).
+
+**Risks & mitigations.**
+
+| Risk | Mitigation |
+|---|---|
+| Mixed-instruct training destabilizes speaker identity | Dual-loss training (CosyVoice 2 recipe); validate after every 500 steps with speaker-similarity metric |
+| Auto-classifier accuracy ~70-80% on Chinese | Manual review pass on the ~30-40 min labeled dataset; spot-check before training |
+| Instruct vocabulary scope mismatch (LLM emits N emotions, training covers M) | Lock vocabulary at Phase D; out-of-distribution emotions fall back to `instruct=None` with logged warning per `feedback_fail_loud` |
+| 30-40 min supplementary recording requires scheduled studio time | Schedule before Phase A wraps; gap-fill list known by end of week 1 |
+
+**Acceptance gate.** Per (persona, listener, emotion) blind A/B with a
+family member — speaker recognized AND emotion audibly distinguishable
+on ≥6/8 utterances. Same gate doubles as the M9.5 deliverable for the
+close-relative-recognizable A/B from `RESEARCH_SFT_S2S.md` §"Top 3
+recommendations" item 3.
+
+**Cross-references.** Sits between M9 (persona LLM) and M10 (multi-
+listener routing) because both depend on this for audible
+differentiation. Composes with the real `talker.model` LoRA promoted
+in M11.
+
+**Effort estimate.** ~1 month (4 phases × 1 week each), with studio
+recording in week 2 as the calendar gate.
+
 ---
 
 ### M10 — Multi-listener voice routing (2026-08 → 2026-09)
@@ -600,6 +725,16 @@ interface.
 Without the abstraction, each evaluation requires invasive `ws_asr.py`
 surgery and risks breaking the shipped pipeline. Ship M11 first.
 
+**Companion deliverable — real `talker.model` LoRA (promoted from
+deferred).** Per `RESEARCH_SFT_S2S.md`, Qwen3-TTS-LoRA is the only
+architecture in our budget where speaker identity can be deepened via
+fine-tuning today. The `training_pipeline_deferred` item 1 (real
+`talker.model` LoRA vs current `code_predictor`-only ~5-layer LoRA)
+should land alongside M11 — not after M12a, not after M13. Expected
+investigation budget: ~1-2 days to scope, ~1-2 weeks to land if the
+gradient flow through `talker.model` is clean. This is the only
+remaining lever for close-relative-recognizable cloning quality.
+
 ---
 
 ### M12 — Hybrid pipeline with Qwen 2.5 Omni 7B (2026-09 → 2026-10)
@@ -611,17 +746,22 @@ spikes:
   zero-shot voice cloning via text-audio token interleaving; CER 3.11%,
   URO-Bench CN 83.3% win-rate; [Repo](https://github.com/stepfun-ai/Step-Audio2)
   / [Tech Report arXiv:2507.16632](https://arxiv.org/pdf/2507.16632)).
-  Run before or in parallel to M12. If passes CharacterEval + voice-
-  quality gate, **leapfrogs both M12 and M13** — Step-Audio 2 mini is
-  the only currently-shippable open-weight S2S with native cloning.
-- **Qwen3.5-Omni-Light cloning spike (1-day eval)** — **highest-
-  leverage single action.** Light has open weights on HF as of
-  2026-03-30 ([Tech Report arXiv:2604.15804](https://arxiv.org/abs/2604.15804)).
+  Run before or in parallel to M12. **Scope correction (per
+  `RESEARCH_SFT_S2S.md`): this is a latency / prosody / streaming eval,
+  NOT a cloning-depth eval.** Step-Audio 2 mini's cloning is zero-shot
+  only — no SFT/fine-tune recipe is exposed ([Issue #67](https://github.com/stepfun-ai/Step-Audio2/issues/67)
+  unanswered since 2025-10-08). If zero-shot quality isn't close-
+  relative-recognizable (likely outcome for elder personas), there is
+  no fine-tune escape hatch.
+- **Qwen3.5-Omni-Light cloning spike (1-day eval)** — Light has open
+  weights on HF as of 2026-03-30 ([Tech Report arXiv:2604.15804](https://arxiv.org/abs/2604.15804)).
   Spend one day testing zero-shot cloning quality on existing test/v11
-  source audio. If quality lands at paper-claimed level, **M12 and M13
-  collapse into one week of deployment** instead of a 6-12 month wait.
-  Step-Audio 2 mini remains the parallel fallback if Light's cloning
-  underperforms on Traditional Chinese / Taiwan accent.
+  source audio. **Scope correction: latency / prosody eval, NOT
+  cloning-depth eval.** Even if cloning quality lands at paper-claimed
+  level, no SFT recipe is documented — Qwen-Omni line has a closed
+  codec tokenizer (per [HF discussion #40](https://huggingface.co/Qwen/Qwen2.5-Omni-7B/discussions/40)).
+  M12 / M13 cannot collapse for cloning-depth purposes. They may
+  collapse for **latency + emotion expressivity** purposes.
 
 Update M12 dependencies: **spike first → decide architecture → execute.**
 
@@ -676,29 +816,39 @@ swap the entire pipeline behind the `BaseConversationEngine` interface.
 
 **Dependencies.** M11 + M12 (so the swap is genuinely plug-and-play).
 
-**Watch list (re-ranked 2026-05-28 by relevance to Chinese use case).**
+**Status correction (2026-05-30).** Qwen3.5-Omni-**Light** is open-
+weight on HF as of 2026-03-30 (`Qwen/Qwen3.5-Omni-Light-*`); the
+**Plus** and **Flash** tiers remain API-only. Earlier drafts of this
+roadmap said "weights not open today" — corrected here.
 
-| # | Candidate | Signal | Status |
-|---|---|---|---|
-| 1 | **Step-Audio 2 / Step-Audio 2 mini (StepFun)** | Apache 2.0, native CN, zero-shot cloning via text-audio token interleaving; CER 3.11%, URO-Bench CN 83.3% | **Currently evaluable — primary M12a target** |
-| 2 | **Qwen3.5-Omni-Light** | Open weights on HF as of 2026-03-30; system-prompt-style cloning; zero-shot from 10-30s ref audio | **Currently evaluable — 1-day spike (highest leverage)** |
-| 3 | **Kimi-Audio-7B (Moonshot)** | Built on Qwen 2.5 base — M9 persona LoRA may transfer with adapter surgery; ~14 GB; partial cloning | Evaluable |
-| 4 | **LLaMA-Omni 2 (ICT-CAS)** | Built on Qwen 2.5 + CosyVoice2; 226-583ms latency; cloning inherits from CosyVoice2 | Evaluable |
-| 5 | **GLM-4-Voice-9B (Zhipu/Tsinghua)** | Native CN+EN; instruction-controlled prosody (not ref-audio clone); good for prosody control | Evaluable |
-| 6 | **Step-Audio 2.5 Realtime (StepFun)** | **Closed (API only)** — roleplay-specific RLHF + 10k+ persona training; closest-in-spirit to EverHome | **Reference / quality-ceiling benchmark** (don't use; cite as gold standard) |
-| 7 | Chroma 1.0 (FlashLabs) | English-trained but **architecture is language-agnostic** (correction from earlier roadmap claim — was "English-only"); Chinese fine-tune may be feasible | Watch |
-| 8 | Future Qwen3.5-Omni Plus/Flash open release | If/when QwenLM open-sources Plus/Flash, M12+M13 collapse fully | Watch |
-| 9 | OSS cloning head on Qwen Omni (community or ours) | Architecture-level patch | Speculative |
+**Watch list (re-ranked 2026-05-30 with SFT-on-S2S findings).**
+
+| # | Candidate | Signal | SFT for new speaker? | Status |
+|---|---|---|---|---|
+| 1 | **Step-Audio 2 / Step-Audio 2 mini (StepFun)** | Apache 2.0, native CN, zero-shot cloning via text-audio token interleaving; CER 3.11%, URO-Bench CN 83.3% | **NO** — no SFT recipe; [issue #67](https://github.com/stepfun-ai/Step-Audio2/issues/67) unanswered | **Latency/prosody eval only — M12a target** |
+| 2 | **Qwen3.5-Omni-Light** | Open-weight Light tier (2026-03-30); Plus/Flash API-only; system-prompt-style cloning; zero-shot from 10-30s ref audio | **NO** — closed codec tokenizer (per [HF discussion #40](https://huggingface.co/Qwen/Qwen2.5-Omni-7B/discussions/40)); SFT path undocumented | **Latency/prosody eval — 1-day spike** |
+| 3 | **Kimi-Audio-7B (Moonshot)** | Built on Qwen 2.5 base — M9 persona LoRA may transfer with adapter surgery; ~14 GB; partial cloning | **NO** — single-speaker detokenizer (per [arXiv:2504.18425](https://arxiv.org/abs/2504.18425)); [issue #139](https://github.com/MoonshotAI/Kimi-Audio/issues/139) unanswered | Evaluable for ASR/understanding only |
+| 4 | **LLaMA-Omni 2 (ICT-CAS)** | Built on Qwen 2.5 + CosyVoice2; 226-583ms latency; cloning inherits from CosyVoice2 | Inherits from CosyVoice2 (modular) | Evaluable |
+| 5 | **GLM-4-Voice-9B (Zhipu/Tsinghua)** | Native CN+EN; instruction-controlled prosody (not ref-audio clone); good for prosody control | n/a — no ref-audio clone path | Evaluable |
+| 6 | **Step-Audio 2.5 Realtime (StepFun)** | **Closed (API only)** — roleplay-specific RLHF + 10k+ persona-matrix training; closest-in-spirit to EverHome | n/a (closed) | **Reference / quality-ceiling benchmark** |
+| 7 | Chroma 1.0 (FlashLabs) | English-trained but **architecture is language-agnostic** (correction from earlier roadmap claim — was "English-only"); Chinese fine-tune may be feasible | Unknown | Watch |
+| 8 | Future Qwen3.5-Omni Plus/Flash open release | If/when QwenLM open-sources Plus/Flash, latency-side of M12+M13 collapses; cloning depth still depends on SFT recipe | Unknown — depends on tokenizer access | Watch |
+| 9 | OSS cloning head on Qwen Omni (community or ours) | Architecture-level patch | Speculative | Speculative |
 
 **Triggers to actually migrate.**
 
-1. Model ships with verifiable voice cloning (≥10s reference, recognizable output).
+1. Model ships with verifiable voice cloning **AND a documented
+   SFT/fine-tune recipe for new speakers** (paper benchmarks aren't
+   enough — close-relative recognition requires deepenable cloning).
 2. License is permissive (Apache 2.0 / MIT preferred).
-3. Quality regression against M12 hybrid passes (50-prompt suite).
+3. Quality regression against M12 hybrid + current Qwen3-TTS-LoRA
+   passes (50-prompt suite + per-(persona, listener) blind A/B with
+   family member, per M9.5).
 4. VRAM fits Spark 128 GB unified.
 
-**Until triggers fire:** stay on M12 hybrid. Don't migrate
-speculatively.
+**Until triggers fire:** stay on M12 hybrid for latency; stay on
+Qwen3-TTS-LoRA for cloning. Per `RESEARCH_SFT_S2S.md`, cloning-depth
+migration is 12+ months out, not 6.
 
 **Effort estimate.** 2-4 weeks **once a viable model exists** — most of
 the cost is regression-testing, not integration (interface already
@@ -724,14 +874,26 @@ is the milestone-by-milestone exposure to an S2S pivot in 6 months
 | **M9** OpenCharacter persona LLM | ✓ Data + technique survive. LoRA target model may change (Qwen 3 8B → Step-Audio 2 base → Qwen3.5-Omni base). | Build the data pipeline and eval harness now. Train LoRA against current backbone but design for backbone-swap. |
 | **M10** Multi-listener voice routing | ⚠ First 60% (config, routing, persona × listener matrix) survives. LoRA-swap mechanics may be replaced by S2S `set_speaker_prompt()`. | Build routing logic now, defer deep LoRA-swap until after M12a. |
 | **M11** TTS engine abstraction | ✓✓ **Critical.** This *is* the migration insurance policy. | **Bumped to MEDIUM-HIGH priority. Ship before M10/M12.** |
-| **M12** Qwen2.5-Omni hybrid | ⚠ At risk — Step-Audio 2 mini may be a better target. | Run M12a Step-Audio 2 mini + Qwen3.5-Omni-Light spike before committing M12. |
-| **M13** OSS E2E S2S w/ cloning | The whole point. Was opportunistic; **upgrade to definite if Step-Audio 2 cloning works.** | Run Step-Audio 2 mini Apache-2.0 pilot in parallel with M12. Don't wait. |
+| **M12** Qwen2.5-Omni hybrid | ⚠ At risk — Step-Audio 2 mini may be a better target. | Run M12a Step-Audio 2 mini + Qwen3.5-Omni-Light spike before committing M12. **Re-scoped: latency / prosody eval only, NOT cloning-depth eval** (per `RESEARCH_SFT_S2S.md`). |
+| **M12a** Step-Audio 2 mini + Qwen3.5-Omni-Light spike | ⚠ Partial — latency wins survive, cloning-depth path does not. | **Scope correction: this is a latency / prosody / streaming eval. It cannot collapse the cloning-depth problem** — no OSS Chinese S2S exposes a working SFT recipe for new speakers. Cloning stays on Qwen3-TTS-LoRA. |
+| **M13** OSS E2E S2S w/ cloning | The whole point. Was opportunistic; **stays opportunistic** — no open S2S can be SFT'd today, so cloning-depth migration is 12+ months out, not 6. | Watch Step-Audio 2 / Qwen3.5-Omni for an SFT recipe to drop. Until then, Qwen3-TTS-LoRA remains the cloning path. |
 
-**TTS LoRA freeze recommendation.** Per the migration analysis, the
-shipped Qwen3-TTS LoRA (`talker.model` code_predictor) is the stage
-most likely to be obsoleted by an S2S cutover. **Don't add features**
-to TTS LoRA training after current shipping state; reroute bandwidth
-to M8 RAG / M9 persona LLM where the work compounds across architectures.
+**TTS LoRA stance (updated 2026-05-30 per `RESEARCH_SFT_S2S.md`).**
+Earlier drafts of this doc recommended freezing TTS LoRA feature work.
+**Softened.** The SFT-on-S2S audit found that **no open-weight Chinese
+S2S model supports SFT for new speakers today** (Qwen-Omni codec
+tokenizer is closed; Kimi-Audio detokenizer is single-speaker; Step-
+Audio 2 mini is zero-shot only with no SFT recipe; Qwen3.5-Omni Plus/
+Flash variants are API-only and Light has no documented SFT path).
+Cloning depth via S2S is therefore **12+ months out**, not 6.
+
+Consequence: the shipped Qwen3-TTS LoRA path is **the moat**, not sunk
+cost. **Real `talker.model` LoRA** (per `training_pipeline_deferred`
+item 1) is **upgraded in priority** — it was deferred work; it should
+now be folded into M9.5 / M11 as a first-class deliverable. Zero-shot
+speaker prompts capture gross timbre + average prosody; SFT/LoRA on a
+dedicated TTS is the only architecture in our budget that captures
+close-relative-recognizable micro-features.
 
 ### 4.1 `BaseTTSEngine` (sketched in §M11) — CRITICAL, SHIP BEFORE ANY S2S EVAL
 
@@ -871,6 +1033,13 @@ SKU. Not on near-term roadmap.
 | Qwen3-TTS 1.7B VoiceDesign | huggingface.co/Qwen | All milestones — TTS retained for cloning until M11 swap |
 | **The Making of Digital Ghosts** | [arXiv 2511.20094](https://arxiv.org/pdf/2511.20094) (Nov 2025) | M-Consent — ethical framework for deceased-person modeling |
 | **Digital Doppelgangers (pre-mortem clones)** | [arXiv 2502.21248](https://arxiv.org/html/2502.21248v1) | M-Consent — revocability flow for still-living personas |
+| **CosyVoice 2** | [arXiv 2412.10117](https://arxiv.org/abs/2412.10117) (Dec 2024) | M9.5 — flagship instruction-conditioned TTS paradigm; dual-loss training recipe to prevent speaker drift under instruct |
+| **StyleTTS 2** | [arXiv 2306.07691](https://arxiv.org/abs/2306.07691) | M9.5 — adaptive style transfer via diffusion; preserve-speaker-vary-style pattern |
+| **Bark (Suno-AI)** | [GitHub suno-ai/bark](https://github.com/suno-ai/bark) | M9.5 — style-token approach reference for controllable TTS vocabulary design |
+| **emotion2vec (FunASR)** | [GitHub modelscope/FunASR](https://github.com/modelscope/FunASR) / `iic/emotion2vec_plus_large` | M9.5 — primary auto-labeler for Phase A emotion labeling of recorded corpus |
+| **wav2vec2-emotion** | [HF audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim](https://huggingface.co/audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim) | M9.5 — cross-check emotion classifier |
+| **openSMILE (eGeMAPSv02)** | [audEERING openSMILE](https://github.com/audeering/opensmile) | M9.5 — paralinguistic feature extraction for manual review |
+| **SFT-on-S2S audit (internal)** | `docs/RESEARCH_SFT_S2S.md` (2026-05-28) | M11 / M12a / M13 — no open Chinese S2S supports SFT for new speakers; cloning depth stays on Qwen3-TTS-LoRA for 12+ months |
 
 ---
 
@@ -987,6 +1156,10 @@ strategic side-note). They have no cloning — we do.
 ├─ AUG     ─┘
 │
 ├─ AUG     ─┐
+│           ├─ M9.5 — Instruction-conditioned TTS fine-tuning (emotion2vec labels → mixed-instruct SFT)
+├─ SEP     ─┘
+│
+├─ AUG     ─┐
 │           ├─ M10 — Multi-listener voice routing (build routing, defer LoRA-swap engineering)
 ├─ SEP     ─┘
 │
@@ -1003,11 +1176,64 @@ strategic side-note). They have no cloning — we do.
 
 Milestones M8 and M9 run in parallel (different code paths, share corpus
 from M7). M-Consent and M7 run in parallel (different code surfaces).
-M12a precedes M12 and may obviate it.
+M12a precedes M12 and may obviate it. M9.5 (TTS instruction conditioning)
+sits between M9 and M10 — M10 audible differentiation depends on it.
 
 ---
 
-## 11. Document conventions
+## 11. Demo learnings (2026-05-30)
+
+Surfaced during 06/02 NY Tech Week demo prep. Captured here so the
+roadmap reflects observed behavior, not aspirational design.
+
+- **CustomVoice + per-sentence `instruct` mutual interference.** Passing
+  a varying `instruct` per sentence (Path A — drive emotion via TTS
+  instruct) made the SFT-trained custom_voice drift — each sentence
+  sounded like a different person. Reverted to `instruct=None` +
+  `language="Chinese"`. Listener tone-shift now relies on LLM word
+  choice + tone-chip visual only. **This is the motivating evidence
+  for M9.5** (instruction-conditioned TTS fine-tuning).
+- **Codec prefill matters: `"Chinese"` vs `"auto"` is not equivalent
+  for SFT-trained models.** The SFT model was trained against the
+  `"Chinese"` prefill (4 tokens with `codec_language_id=2055`);
+  switching to `"auto"` prefill (3 tokens, no-think mode) shifted v15's
+  voice to faster / higher pitch / distortion. Beijing-accent fix is
+  actually via `spk_is_dialect=false`, **NOT** via language. This
+  refines the `tts_inference_language_gotcha` memory: `language="auto"`
+  is correct for zero-shot models; **for SFT-trained custom_voice
+  models, match the language prefill used during training**.
+- **Listen-only mode.** New control where ASR fires but LLM doesn't
+  respond — enables a "voice Turing test" demo flow where the audience
+  hears the cloned voice repeat back without conversational pressure.
+  Production code; not yet documented in the WS protocol section of
+  `CLAUDE.md`.
+- **Hybrid disclosure rule.** Persona JSON now has a `disclosure_rule`
+  field; the LLM must disclose AI identity if directly asked but
+  otherwise speaks in first person. This sits between "always
+  disclose" (kills the demo) and "never disclose" (ethical hazard +
+  M-Consent compliance risk). Should be folded into the M-Consent
+  ethical-position deliverable.
+- **EverHome demo persona.** A rich English system prompt with founder
+  bio (ex-Bloomberg, ex-Google), product moat, competitive analysis,
+  and roadmap context was built for the 06/02 audience. This persona
+  is currently dev-only; productizing it (per-deployment "company
+  spokesperson" persona kind) is out of M7-M13 scope but worth
+  tracking.
+
+---
+
+## 12. Demo retrospective (2026-06-02) — placeholder
+
+To be filled post-demo. Expected sections:
+- What worked (technical / audience reaction).
+- What broke (live failures, recovery).
+- What the audience asked about (signal for product positioning).
+- Roadmap deltas (anything from §3 that the demo experience invalidates
+  or reprioritizes).
+
+---
+
+## 13. Document conventions
 
 - **English only** — master branch is English.
 - **Proposed, not committed** — sequencing reshuffles as reality lands.
