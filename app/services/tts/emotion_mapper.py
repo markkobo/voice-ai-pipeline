@@ -141,6 +141,47 @@ EMOTION_TEXT_ENHANCEMENT: dict = {
 
 EMOTION_TAG_PATTERN = re.compile(r'[\[［](?:情感|感情)[:：]\s*(.*?)[\]］]\s*')
 
+
+# Emotion → natural-language instruct strings for Qwen3-TTS voice design
+# (2026-05-30). The TTS engine accepts a free-form text instruct that
+# describes the desired delivery style; passing one materially affects
+# prosody. Path B (text-only enhancement via Chinese particles) was a
+# no-op for English content + the demo persona's English emotion tags.
+# Path A (this map) feeds the TTS its actual instruct parameter so the
+# emotion shift is audible, not just visible on the tone chip.
+EMOTION_TO_INSTRUCT: dict = {
+    # Chinese (xiao_s persona)
+    "撒嬌":  "(coquettish, soft, slightly slower pace, endearing inflection)",
+    "生氣":  "(sharp, raised pitch, clipped delivery, audible frustration)",
+    "開心":  "(happy, bright, faster pace, energetic, positive)",
+    "溫和":  "(gentle, warm, calm, relaxed and reassuring tone)",
+    "幽默":  "(playful, light-hearted, casual, occasional laugh, funny)",
+    "寵溺":  "(gentle, high-pitched, warm and loving, soft delivery)",
+    "毒舌":  "(witty, fast-paced, sarcastic but playful, confident)",
+    "調皮":  "(mischievous, playful, slight giggle, upbeat)",
+    "感動":  "(touched, gentle, slightly emotional, slower)",
+    "認真":  "(serious, focused, clear articulation, steady pace)",
+    # English (everhome_demo persona — demo 2026-06-02)
+    "warm":       "(warm, gentle, calm, reassuring tone)",
+    "focused":    "(clear, confident, slightly faster pace, articulate)",
+    "reflective": "(slower, thoughtful, slightly emotional, contemplative)",
+    "upbeat":     "(energetic, bright, faster pace, positive)",
+    "wry":        "(dry humor, slight smile in voice, slower, knowing)",
+    "gentle":     "(gentle, soft, slower pace, warm)",
+    "playful":    "(playful, light-hearted, casual, occasional laugh)",
+    "angry":      "(sharp, raised pitch, clipped, audible frustration)",
+    DEFAULT_EMOTION: "(natural, conversational, warm and engaging)",
+}
+
+
+def get_instruct_for_emotion(emotion: str) -> str:
+    """Return the instruct string for `emotion` for the TTS engine.
+
+    Falls back to DEFAULT_EMOTION's instruct (a neutral natural-tone
+    description) if `emotion` is unknown.
+    """
+    return EMOTION_TO_INSTRUCT.get(emotion, EMOTION_TO_INSTRUCT.get(DEFAULT_EMOTION, ""))
+
 # New format markers (TAG_START not used directly but kept for reference)
 TAG_START = "[E:"
 

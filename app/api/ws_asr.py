@@ -54,6 +54,7 @@ from app.api._ws_helpers import (
 from app.core.state_manager import StateManager
 from app.services.llm import OpenAIClient, MockLLMClient, PersonaManager, PersonaType
 from app.services.tts import EmotionMapper, enhance_text, get_tts_engine
+from app.services.tts.emotion_mapper import get_instruct_for_emotion
 from app.logging_config import get_logger
 from telemetry import metrics, rag_retrieval_seconds
 
@@ -195,10 +196,23 @@ async def _stream_tts_sentence(
         })
 
         first_chunk_sent = False
+        # 2026-05-30: switch from Path B (text-only enhancement via
+        # Chinese particles) to Path A (natural-language instruct string).
+        # User report msg 1687: emotion tag showed in UI but TTS didn't
+        # audibly shift. Root cause was instruct=None — the engine had
+        # no emotion signal. Now passing get_instruct_for_emotion(emotion)
+        # for each utterance.
+        # Also switched language="Chinese" → "auto": hardcoded "Chinese"
+        # injects codec_language_id["chinese"]=2055 (see
+        # tts_inference_language_gotcha memory) which biases the trained
+        # code_predictor toward Beijing-accent / Mandarin prosody even
+        # for English content. "auto" lets the trained code_predictor +
+        # speaker_embedding fully drive output language and accent.
+        tts_instruct = get_instruct_for_emotion(emotion) if emotion else None
         async for event in engine.generate_streaming(
             text=enhanced_text_content,
-            instruct=None,  # Path B: Use text enhancement, not instruct
-            language="Chinese",
+            instruct=tts_instruct,
+            language="auto",
             reference_audio=reference_audio,
         ):
             if event.event == "audio_chunk" and event.audio_data:
