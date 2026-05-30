@@ -114,6 +114,7 @@ def _enhance_renzhen(t: str) -> str:
     return t
 
 EMOTION_TEXT_ENHANCEMENT: dict = {
+    # Chinese emotion keys (legacy + xiao_s persona)
     "撒嬌": _enhance_sajiao,
     "生氣": _enhance_shengqi,
     "開心": _enhance_kaixin,
@@ -124,6 +125,17 @@ EMOTION_TEXT_ENHANCEMENT: dict = {
     "調皮": _enhance_tiao_pi,
     "感動": _enhance_gandan,
     "認真": _enhance_renzhen,
+    # English emotion keys (everhome_demo persona — 2026-05-30).
+    # Mapped to the closest Chinese enhancement so prosody markers still
+    # apply when the English persona emits [E:warm]content etc.
+    "warm": _enhance_wenhe,
+    "focused": _enhance_renzhen,
+    "reflective": _enhance_gandan,
+    "upbeat": _enhance_kaixin,
+    "wry": _enhance_dushe,
+    "gentle": _enhance_chongni,
+    "playful": _enhance_tiao_pi,
+    "angry": _enhance_shengqi,
     DEFAULT_EMOTION: _enhance_renzhen,  # No enhancement for default
 }
 

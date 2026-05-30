@@ -172,6 +172,14 @@ class PersonaManager:
                 if emotion_instr:
                     parts.append(f"\n\n{emotion_instr}")
 
+                # Disclosure rule (2026-05-30) — for personas that represent
+                # a specific real person (e.g. EverHome demo), this rule
+                # tells the LLM how to handle "are you AI?" questions. Key
+                # ethical guardrail for voice-cloning demos.
+                disclosure = persona_data.get("disclosure_rule", "")
+                if disclosure:
+                    parts.append(f"\n\n[DISCLOSURE RULE]\n{disclosure}")
+
                 base_prompt = "\n".join(parts)
             else:
                 # Fallback to built-in
