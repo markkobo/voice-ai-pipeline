@@ -101,7 +101,7 @@
                 <span>Auto-continue</span>
             </label>
             <label class="auto-continue-toggle" title="Demo Turing-test prep: AI listens silently to what you say (no reply) until you click 'Let AI continue'">
-                <input type="checkbox" id="listenOnlyChk" onchange="onListenOnlyChange()">
+                <input type="checkbox" id="listenOnlyChk" onchange="if(window.onListenOnlyChange)window.onListenOnlyChange();else console.warn('onListenOnlyChange not loaded — hard-refresh page')">
                 <span>🎧 Listen-only</span>
             </label>
             <button id="autoContinueBtn" onclick="autoContinueSpeak()"
