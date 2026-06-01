@@ -78,6 +78,40 @@
     }
     .skip-link:focus { left: 16px; top: 16px; }
 
+    /* Floating "Book a demo" CTA — persistent bottom-right so the
+       single conversion action is always one tap away. */
+    .float-cta {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: var(--accent);
+      color: #1a1424;
+      padding: 14px 22px;
+      border-radius: 999px;
+      font-weight: 600;
+      font-size: 15px;
+      box-shadow: 0 4px 24px rgba(200, 158, 250, 0.35),
+                  0 2px 8px rgba(0, 0, 0, 0.3);
+      text-decoration: none;
+      z-index: 50;
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }
+    .float-cta:hover, .float-cta:focus {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 32px rgba(200, 158, 250, 0.55),
+                  0 4px 12px rgba(0, 0, 0, 0.35);
+      color: #0a0f1a;
+      text-decoration: none;
+    }
+    @media (max-width: 600px) {
+      .float-cta {
+        bottom: 16px;
+        right: 16px;
+        padding: 12px 18px;
+        font-size: 14px;
+      }
+    }
+
     .container {
       max-width: 1080px;
       margin: 0 auto;
@@ -411,6 +445,7 @@
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to main content</a>
+  <a class="float-cta" href="mailto:markkobo@gmail.com?subject=EverHome%20%E2%80%94%20Book%20a%20demo">Book a demo →</a>
 
   <noscript>
     <!-- This site uses no JavaScript. You're seeing the full experience. -->
@@ -504,23 +539,21 @@
           <div class="step">
             <div class="step-num">1</div>
             <h3>Record</h3>
-            <p>30 to 60 minutes of conversation, guided by a prompt
-            list. Sit on the couch. We hand you the questions —
-            family stories, opinions, the small things.</p>
+            <p>An afternoon of conversation. Family stories,
+            opinions, the small things — we hand you the questions.</p>
           </div>
           <div class="step">
             <div class="step-num">2</div>
-            <h3>Add memories <span style="color: var(--accent-cyan); font-size: 12px; letter-spacing: 1px;">(Q3)</span></h3>
+            <h3>Add memories</h3>
             <p>Letters, photo captions, chat exports, favorite books —
             anything that captures how they think and what they
-            remember. Stays on the appliance.</p>
+            remember.</p>
           </div>
           <div class="step">
             <div class="step-num">3</div>
-            <h3>Train &amp; talk</h3>
-            <p>A few hours on a small home appliance — DGX Spark or
-            Mac Mini class. Then talk to them anytime, in their voice,
-            with their memory. Nothing uploaded, ever.</p>
+            <h3>Talk</h3>
+            <p>Talk to them anytime, in their voice, with their
+            memory. Stays at home. Nothing uploaded, ever.</p>
           </div>
         </div>
       </div>
