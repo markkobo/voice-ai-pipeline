@@ -123,13 +123,23 @@ async def health_check():
 
 @app.get("/")
 async def root():
-    """Root endpoint."""
-    return {
-        "message": "Voice AI Pipeline API",
-        "docs": "/docs",
-        "ui": "/ui",
-        "metrics": ":9090/metrics",
-    }
+    """Root → serve the EverHome landing page directly (msg 1815).
+
+    Public visitors typing `everhome.mkk.dev` should land on the
+    marketing site, not a JSON dump. The chat UI stays at `/ui`,
+    docs at `/docs`, metrics at `:9090/metrics`. Anyone hitting `/`
+    via curl can still find those paths inside the HTML or via the
+    nav, but humans see the landing.
+    """
+    fp = _DOCS_DIR / "everhome_landing.html"
+    if not fp.exists():
+        return HTMLResponse(
+            "<p>Landing page not found — fallback API info:</p>"
+            "<ul><li><a href='/ui'>Chat UI</a></li>"
+            "<li><a href='/docs'>API docs</a></li>"
+            "<li><a href='/health'>Health</a></li></ul>"
+        )
+    return HTMLResponse(fp.read_text())
 
 
 # ---------------------------------------------------------------------------
