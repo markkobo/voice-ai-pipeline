@@ -482,6 +482,11 @@ function connect() {
                 // missing field. If a future UI re-adds it, this guard
                 // picks up whatever value it sets.
                 tts_model: (document.getElementById('tts_model') || {}).value || '1.7B',
+                // Carry over listen_only on reconnect — without this, a
+                // dropped WS + reconnect resets the server-side flag and
+                // the user thinks they toggled it ON but the AI replies
+                // anyway. User report msg 1788.
+                listen_only: !!(document.getElementById('listenOnlyChk') && document.getElementById('listenOnlyChk').checked),
             }));
             log('Config sent (worklet deferred to user-gesture)');
         } catch (e) {
@@ -716,9 +721,11 @@ function onVadChange() {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     const vadValue = document.getElementById('vad').value;
     const ttsModelEl = document.getElementById('tts_model');
+    const listenOnly = !!(document.getElementById('listenOnlyChk') && document.getElementById('listenOnlyChk').checked);
     ws.send(JSON.stringify({
         type: 'config',
         audio: { sample_rate: 24000, channels: 1, format: 'pcm' },
+        listen_only: listenOnly,
         persona_id: personaEl.value,
         listener_id: listenerEl.value,
         model: 'gpt-4o-mini',
@@ -999,6 +1006,7 @@ function stopRecordingAndSend() {
 listenerEl.addEventListener('change', () => {
     if (ws && ws.readyState === WebSocket.OPEN) {
         const ttsModelEl = document.getElementById('tts_model');
+        const listenOnly = !!(document.getElementById('listenOnlyChk') && document.getElementById('listenOnlyChk').checked);
         ws.send(JSON.stringify({
             type: 'config',
             audio: { sample_rate: 24000, channels: 1, format: 'pcm' },
@@ -1006,7 +1014,8 @@ listenerEl.addEventListener('change', () => {
             listener_id: listenerEl.value,
             model: 'gpt-4o-mini',
             vad: document.getElementById('vad').value,
-            tts_model: ttsModelEl ? ttsModelEl.value : '1.7B'
+            tts_model: ttsModelEl ? ttsModelEl.value : '1.7B',
+            listen_only: listenOnly,
         }));
     }
     loadVersions();
