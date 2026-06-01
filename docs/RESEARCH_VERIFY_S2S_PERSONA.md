@@ -1,7 +1,7 @@
 # Research Verification + S2S + Persona Followup
 
 **Date:** 2026-05-28
-**Author:** Mark Kobo (research pass for EverHome roadmap)
+**Author:** Mark Ko (research pass for EverHome roadmap)
 **Scope:** Verify Qwen3.5-Omni cloning claim, horizontal-compare Chinese S2S models, deepen persona research, plan pipeline → S2S migration.
 **Out of scope:** Editing `ROADMAP_2026Q3.md` or `RESEARCH_REVIEW_2026Q3.md` (separate update pass).
 

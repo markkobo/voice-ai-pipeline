@@ -1,7 +1,7 @@
 # SFT Fine-Tuning Support on Chinese-capable S2S Models
 
 **Date:** 2026-05-28
-**Author:** Mark Kobo (sub-agent audit, write attempt blocked by sandbox; content captured manually)
+**Author:** Mark Ko (sub-agent audit, write attempt blocked by sandbox; content captured manually)
 **Scope:** Can we SFT-fine-tune any leading Chinese-capable S2S model for **close-relative-recognizable** voice cloning today (vs. zero-shot 10-30 s reference cloning)?
 
 ---

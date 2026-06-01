@@ -34,7 +34,7 @@ product to ship them yet. We ask for a conversation.
 
 ## 2. Voice & tone
 
-Mark Kobo — ex-Bloomberg, ex-Google. **Technical but warm.** Confident
+Mark Ko — ex-Bloomberg, ex-Google. **Technical but warm.** Confident
 on the moat, honest on the roadmap. No hype words ("revolutionary",
 "AI-powered", "the future of"). No emoji. No exclamation points in body
 copy. Headlines may use one well-placed em dash.
@@ -115,7 +115,7 @@ Two-by-two block:
   co-branded deployments. Each gets a per-deployment persona spec.
 
 ### The founder
-Brief bio (Mark Kobo, ex-Bloomberg engineering, ex-Google product). One
+Brief bio (Mark Ko, ex-Bloomberg engineering, ex-Google product). One
 sentence on why he's building this — a personal connection to legacy
 preservation, transitioning from infrastructure work into a
 mission-driven consumer product.
@@ -148,7 +148,7 @@ ethics will read it as a signal that we have thought about the cliff.
 - Contact: `[TODO: email]`
 - GitHub: `[TODO: link]` (will be public after security review)
 - Twitter / X: `[TODO: link]`
-- Copyright Mark Kobo 2026
+- Copyright Mark Ko 2026
 
 ## 4. Brand & visual system
 
