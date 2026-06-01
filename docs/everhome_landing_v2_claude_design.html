@@ -1,0 +1,899 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EverHome — A Time Capsule You Can Talk To</title>
+  <meta name="description" content="Privacy-first voice AI that preserves the people who raised you. Cloned voice, memory of who they were, runs on hardware you own.">
+
+  <!-- Open Graph -->
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="EverHome — A Time Capsule You Can Talk To">
+  <meta property="og:description" content="Privacy-first voice AI that preserves the people who raised you. Cloned voice, memory of who they were, runs on hardware you own.">
+  <meta property="og:image" content="/assets/og-image.png">
+  <meta property="og:url" content="https://everhome.mkk.dev/">
+
+  <!-- Twitter -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="EverHome — A Time Capsule You Can Talk To">
+  <meta name="twitter:description" content="Privacy-first voice AI that preserves the people who raised you.">
+  <meta name="twitter:image" content="/assets/twitter-card.png">
+
+  <style>
+    :root {
+      --bg-from: #1a1424;
+      --bg-to: #0f1828;
+      --surface: rgba(15, 24, 40, 0.7);
+      --surface-strong: rgba(20, 28, 48, 0.9);
+      --text: #e6e6e6;
+      --heading: #f0e6d2;
+      --accent: #c89efa;
+      --accent-cyan: #7ee7ff;
+      --muted: #aab2c5;
+      --border: rgba(200, 158, 250, 0.15);
+      --border-strong: rgba(200, 158, 250, 0.35);
+      --ease: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      scroll-behavior: smooth;
+      scroll-padding-top: 96px;
+    }
+
+    body {
+      margin: 0;
+      padding: 0;
+      background: var(--bg-to);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 17px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+      min-height: 100vh;
+      position: relative;
+      overflow-x: hidden;
+    }
+
+    /* Layered, fixed atmosphere: base diagonal gradient + two soft
+       aurora blooms (purple, cyan) that give the page depth without
+       a single flat fill. Sits behind everything, ignores pointer. */
+    .bg-atmosphere {
+      position: fixed;
+      inset: 0;
+      z-index: -1;
+      pointer-events: none;
+      background:
+        radial-gradient(120% 80% at 12% -5%, rgba(140, 90, 200, 0.28), transparent 55%),
+        radial-gradient(90% 70% at 100% 8%, rgba(60, 150, 190, 0.16), transparent 50%),
+        linear-gradient(155deg, var(--bg-from) 0%, #15172a 45%, var(--bg-to) 100%);
+    }
+
+    a { color: var(--accent); text-decoration: none; transition: color 0.15s ease; }
+    a:hover, a:focus { color: var(--accent-cyan); text-decoration: underline; }
+
+    h1, h2, h3 {
+      color: var(--heading);
+      font-weight: 600;
+      letter-spacing: 0.3px;
+      margin: 0 0 0.6em 0;
+      text-wrap: balance;
+    }
+
+    h1 { font-size: 52px; line-height: 1.06; letter-spacing: -0.5px; }
+    h2 { font-size: 34px; line-height: 1.18; margin-top: 0; letter-spacing: -0.2px; }
+    h3 { font-size: 20px; line-height: 1.3; }
+
+    p { margin: 0 0 1em 0; text-wrap: pretty; }
+
+    .skip-link {
+      position: absolute;
+      left: -9999px;
+      background: var(--accent);
+      color: #1a1424;
+      padding: 8px 16px;
+      font-weight: 600;
+      z-index: 100;
+    }
+    .skip-link:focus { left: 16px; top: 16px; }
+
+    /* Floating "Book a demo" CTA — persistent bottom-right so the
+       single conversion action is always one tap away. */
+    .float-cta {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: var(--accent);
+      color: #1a1424;
+      padding: 14px 22px;
+      border-radius: 999px;
+      font-weight: 600;
+      font-size: 15px;
+      box-shadow: 0 4px 24px rgba(200, 158, 250, 0.35),
+                  0 2px 8px rgba(0, 0, 0, 0.3);
+      text-decoration: none;
+      z-index: 50;
+      transition: transform 0.25s var(--ease), box-shadow 0.25s var(--ease);
+      animation: ctaRise 0.6s var(--ease) 0.8s both;
+    }
+    .float-cta::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      box-shadow: 0 0 0 0 rgba(200, 158, 250, 0.5);
+      animation: ctaPulse 3.2s ease-out infinite;
+    }
+    .float-cta:hover, .float-cta:focus {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 32px rgba(200, 158, 250, 0.55),
+                  0 4px 12px rgba(0, 0, 0, 0.35);
+      color: #0a0f1a;
+      text-decoration: none;
+    }
+    @keyframes ctaPulse {
+      0%   { box-shadow: 0 0 0 0 rgba(200, 158, 250, 0.45); }
+      70%  { box-shadow: 0 0 0 16px rgba(200, 158, 250, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(200, 158, 250, 0); }
+    }
+    @keyframes ctaRise {
+      from { opacity: 0; transform: translateY(20px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    @media (max-width: 600px) {
+      .float-cta {
+        bottom: 16px;
+        right: 16px;
+        padding: 12px 18px;
+        font-size: 14px;
+      }
+    }
+
+    .container {
+      max-width: 1080px;
+      margin: 0 auto;
+      padding: 0 32px;
+    }
+
+    section {
+      padding: 104px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    section:last-of-type { border-bottom: none; }
+
+    /* Header / Nav */
+    header.site-header {
+      padding: 22px 0;
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      background: rgba(15, 20, 36, 0.72);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      z-index: 10;
+    }
+    .nav {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+    }
+    .brand {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--heading);
+      letter-spacing: 1px;
+    }
+    .brand .dot { color: var(--accent); }
+    .nav-links {
+      display: flex;
+      gap: 24px;
+      font-size: 15px;
+    }
+    .nav-links a {
+      color: var(--muted);
+      text-decoration: none;
+      position: relative;
+    }
+    .nav-links a::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      bottom: -4px;
+      width: 100%;
+      height: 1px;
+      background: var(--accent);
+      transform: scaleX(0);
+      transform-origin: left;
+      transition: transform 0.25s var(--ease);
+    }
+    .nav-links a:hover { color: var(--heading); }
+    .nav-links a:hover::after { transform: scaleX(1); }
+
+    /* Hero */
+    .hero {
+      padding: 120px 0 104px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .hero-grid {
+      display: grid;
+      grid-template-columns: 1.05fr 0.95fr;
+      gap: 56px;
+      align-items: center;
+    }
+    .hero-copy { animation: heroIn 0.9s var(--ease) both; }
+    .hero h1 {
+      max-width: 16ch;
+      margin-bottom: 24px;
+    }
+    .hero h1 .grad {
+      background: linear-gradient(100deg, var(--accent) 10%, var(--accent-cyan) 90%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+      color: transparent;
+    }
+    .hero .subhead {
+      font-size: 22px;
+      color: var(--muted);
+      max-width: 52ch;
+      margin-bottom: 40px;
+      line-height: 1.5;
+    }
+    .cta-row {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 14px 28px;
+      border-radius: 8px;
+      font-size: 16px;
+      font-weight: 600;
+      letter-spacing: 0.3px;
+      transition: transform 0.18s var(--ease), background 0.2s ease, border-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
+      border: 1px solid transparent;
+      cursor: pointer;
+    }
+    .btn-primary {
+      background: linear-gradient(120deg, var(--accent), #b389f5);
+      color: #1a1424;
+      box-shadow: 0 6px 20px rgba(200, 158, 250, 0.28);
+    }
+    .btn-primary:hover, .btn-primary:focus {
+      background: linear-gradient(120deg, var(--accent-cyan), var(--accent));
+      color: #0a0f1a;
+      text-decoration: none;
+      transform: translateY(-2px);
+      box-shadow: 0 10px 28px rgba(126, 231, 255, 0.3);
+    }
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.02);
+      color: var(--heading);
+      border-color: var(--border-strong);
+    }
+    .btn-secondary:hover, .btn-secondary:focus {
+      border-color: var(--accent);
+      color: var(--accent);
+      text-decoration: none;
+      transform: translateY(-2px);
+    }
+
+    /* ===== Hero visual: a "time capsule" you can talk to =====
+       Concentric echo rings (time radiating outward) wrapped around a
+       living voice waveform. Built only from circles + bars. */
+    .capsule {
+      position: relative;
+      aspect-ratio: 1 / 1;
+      width: 100%;
+      max-width: 440px;
+      margin: 0 auto;
+      display: grid;
+      place-items: center;
+      animation: heroIn 1s var(--ease) 0.15s both;
+    }
+    .capsule .glow {
+      position: absolute;
+      width: 78%;
+      height: 78%;
+      border-radius: 50%;
+      background: radial-gradient(circle at 50% 45%, rgba(200, 158, 250, 0.35), rgba(126, 231, 255, 0.12) 45%, transparent 70%);
+      filter: blur(8px);
+      animation: glowBreathe 6s ease-in-out infinite;
+    }
+    .capsule .ring {
+      position: absolute;
+      border-radius: 50%;
+      border: 1px solid var(--border-strong);
+      opacity: 0;
+      animation: echo 4.5s ease-out infinite;
+    }
+    .capsule .ring.r1 { width: 36%; height: 36%; animation-delay: 0s; }
+    .capsule .ring.r2 { width: 36%; height: 36%; animation-delay: 1.5s; }
+    .capsule .ring.r3 { width: 36%; height: 36%; animation-delay: 3s; }
+    /* Static dial rings that frame the capsule */
+    .capsule .dial {
+      position: absolute;
+      border-radius: 50%;
+      border: 1px solid var(--border);
+    }
+    .capsule .dial.d1 { width: 58%; height: 58%; }
+    .capsule .dial.d2 { width: 82%; height: 82%; border-style: dashed; border-color: rgba(200, 158, 250, 0.12); }
+    .capsule .dial.d3 { width: 100%; height: 100%; border-color: rgba(126, 231, 255, 0.10); }
+    /* Orbiting marker on the outer dial — a slow hand of a clock */
+    .capsule .orbit {
+      position: absolute;
+      width: 82%;
+      height: 82%;
+      animation: spin 18s linear infinite;
+    }
+    .capsule .orbit::before {
+      content: "";
+      position: absolute;
+      top: -4px;
+      left: 50%;
+      width: 7px;
+      height: 7px;
+      margin-left: -3.5px;
+      border-radius: 50%;
+      background: var(--accent-cyan);
+      box-shadow: 0 0 12px var(--accent-cyan);
+    }
+    /* The waveform — a voice signature at the core */
+    .wave {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      height: 30%;
+      z-index: 2;
+    }
+    .wave .bar {
+      width: 5px;
+      border-radius: 3px;
+      background: linear-gradient(180deg, var(--accent-cyan), var(--accent));
+      transform-origin: center;
+      animation: talk 1.5s ease-in-out infinite;
+      will-change: transform;
+    }
+
+    @keyframes heroIn {
+      from { opacity: 0; transform: translateY(18px) scale(0.985); }
+      to   { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    @keyframes echo {
+      0%   { opacity: 0.55; transform: scale(1); }
+      80%  { opacity: 0; transform: scale(2.6); }
+      100% { opacity: 0; transform: scale(2.6); }
+    }
+    @keyframes glowBreathe {
+      0%, 100% { opacity: 0.8; transform: scale(1); }
+      50%      { opacity: 1; transform: scale(1.05); }
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes talk {
+      0%, 100% { transform: scaleY(0.35); }
+      50%      { transform: scaleY(1); }
+    }
+
+    /* Generic sections */
+    .section-eyebrow {
+      color: var(--accent);
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      margin-bottom: 14px;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .section-eyebrow::before {
+      content: "";
+      width: 22px;
+      height: 1px;
+      background: var(--accent);
+      opacity: 0.7;
+    }
+    .lede {
+      font-size: 20px;
+      color: var(--muted);
+      max-width: 60ch;
+      margin-bottom: 32px;
+      line-height: 1.5;
+    }
+
+    /* Problem section */
+    .problem-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 32px;
+      margin-top: 48px;
+    }
+    .problem-grid.two {
+      grid-template-columns: repeat(2, 1fr);
+      gap: 28px;
+      margin-top: 52px;
+    }
+    .problem-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 28px;
+    }
+    .problem-card h3 { color: var(--accent); margin-bottom: 12px; }
+    .problem-card p { color: var(--text); margin: 0; }
+
+    /* --- Refined "Why it matters" pillar cards --- */
+    .pillars {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 28px;
+      margin-top: 52px;
+    }
+    .pillar {
+      position: relative;
+      background: linear-gradient(180deg, rgba(28, 24, 44, 0.65), rgba(15, 24, 40, 0.55));
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 38px 34px 34px;
+      overflow: hidden;
+      transition: transform 0.3s var(--ease), border-color 0.3s ease, box-shadow 0.3s ease;
+    }
+    .pillar::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 3px;
+      background: linear-gradient(90deg, var(--accent), var(--accent-cyan));
+      transform: scaleX(0);
+      transform-origin: left;
+      transition: transform 0.4s var(--ease);
+    }
+    .pillar:hover {
+      transform: translateY(-4px);
+      border-color: var(--border-strong);
+      box-shadow: 0 18px 40px rgba(0, 0, 0, 0.32);
+    }
+    .pillar:hover::before { transform: scaleX(1); }
+    .pillar .pillar-index {
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      color: var(--accent-cyan);
+      font-variant-numeric: tabular-nums;
+    }
+    .pillar .pillar-icon {
+      width: 46px;
+      height: 46px;
+      margin: 18px 0 22px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      border: 1px solid var(--border-strong);
+      background: radial-gradient(circle at 40% 35%, rgba(200, 158, 250, 0.22), transparent 70%);
+    }
+    .pillar .pillar-icon span {
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--accent), var(--accent-cyan));
+    }
+    .pillar.privacy .pillar-icon span {
+      border-radius: 4px;
+      background: transparent;
+      border: 2px solid var(--accent-cyan);
+      width: 15px;
+      height: 18px;
+      border-top-left-radius: 9px;
+      border-top-right-radius: 9px;
+    }
+    .pillar h3 {
+      font-size: 23px;
+      color: var(--heading);
+      margin-bottom: 14px;
+      letter-spacing: -0.2px;
+    }
+    .pillar p { color: var(--text); margin: 0; font-size: 16.5px; line-height: 1.62; }
+
+    /* Solution */
+    .solution-bullets {
+      list-style: none;
+      padding: 0;
+      margin: 36px 0 0 0;
+    }
+    .solution-bullets li {
+      padding: 18px 0 18px 40px;
+      border-bottom: 1px solid var(--border);
+      position: relative;
+      transition: padding-left 0.25s var(--ease);
+    }
+    .solution-bullets li:last-child { border-bottom: none; }
+    .solution-bullets li::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 50%;
+      width: 22px;
+      height: 1px;
+      background: var(--accent);
+      transition: width 0.25s var(--ease), background 0.25s ease;
+    }
+    .solution-bullets li:hover { padding-left: 50px; }
+    .solution-bullets li:hover::before { width: 32px; background: var(--accent-cyan); }
+    .solution-bullets strong { color: var(--heading); font-weight: 600; }
+
+    /* How it works */
+    .steps {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 24px;
+      margin-top: 48px;
+    }
+    .step {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 32px 26px;
+      position: relative;
+      transition: transform 0.3s var(--ease), border-color 0.3s ease;
+    }
+    .step:hover { transform: translateY(-4px); border-color: var(--border-strong); }
+    .step-num {
+      display: grid;
+      place-items: center;
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--accent), #b389f5);
+      color: #1a1424;
+      font-weight: 700;
+      margin-bottom: 18px;
+      box-shadow: 0 4px 14px rgba(200, 158, 250, 0.3);
+    }
+    .step h3 { margin-bottom: 8px; }
+    .step p { color: var(--muted); margin: 0; font-size: 15px; }
+
+    /* Ethics */
+    .ethics-list {
+      list-style: none;
+      padding: 0;
+      margin: 36px 0 0 0;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    .ethics-list li {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 22px 24px;
+      font-size: 15px;
+      transition: border-color 0.3s ease, transform 0.3s var(--ease);
+    }
+    .ethics-list li:hover { border-color: var(--border-strong); transform: translateY(-3px); }
+    .ethics-list strong { color: var(--accent-cyan); display: block; margin-bottom: 6px; font-size: 16px; }
+
+    /* Footer */
+    footer.site-footer {
+      padding: 48px 0;
+      color: var(--muted);
+      font-size: 14px;
+      border-top: 1px solid var(--border);
+    }
+    .footer-grid {
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      flex-wrap: wrap;
+    }
+    .footer-grid a { color: var(--muted); }
+    .footer-grid a:hover { color: var(--accent); }
+    .footer-brand { color: var(--heading); font-weight: 600; }
+
+    /* Closing CTA band */
+    .closing-cta {
+      text-align: center;
+      padding: 104px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .closing-cta h2 { margin-bottom: 16px; }
+    .closing-cta p { color: var(--muted); max-width: 50ch; margin: 0 auto 32px auto; }
+    .closing-cta .cta-row { justify-content: center; }
+
+    /* ===== Scroll reveal (progressive enhancement) ===== */
+    .js .reveal {
+      opacity: 0;
+      transform: translateY(26px);
+      transition: opacity 0.7s var(--ease), transform 0.7s var(--ease);
+      will-change: opacity, transform;
+    }
+    .js .reveal.in { opacity: 1; transform: none; }
+    .js .reveal.d1 { transition-delay: 0.08s; }
+    .js .reveal.d2 { transition-delay: 0.16s; }
+    .js .reveal.d3 { transition-delay: 0.24s; }
+
+    /* Responsive */
+    @media (max-width: 600px) {
+      .container { padding: 0 20px; }
+      section { padding: 64px 0; }
+      .hero { padding: 64px 0 56px 0; }
+      .hero-grid { grid-template-columns: 1fr; gap: 44px; }
+      .capsule { max-width: 300px; order: -1; }
+      h1 { font-size: 34px; }
+      h2 { font-size: 25px; }
+      .hero .subhead { font-size: 18px; }
+      .lede { font-size: 17px; }
+      .problem-grid, .steps, .ethics-list, .pillars { grid-template-columns: 1fr; }
+      .cta-row { flex-direction: column; align-items: stretch; }
+      .btn { justify-content: center; text-align: center; }
+      .nav-links { display: none; }
+    }
+
+    @media (max-width: 900px) and (min-width: 601px) {
+      .problem-grid, .steps { grid-template-columns: 1fr; }
+      .hero-grid { grid-template-columns: 1fr 0.8fr; gap: 36px; }
+      .capsule { max-width: 340px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after {
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.001ms !important;
+      }
+      .js .reveal { opacity: 1; transform: none; }
+    }
+  </style>
+</head>
+<body>
+  
+
+  <div class="bg-atmosphere" aria-hidden="true"></div>
+
+  <a class="skip-link" href="#main">Skip to main content</a>
+  <a class="float-cta" href="/cdn-cgi/l/email-protection#4825293a2323272a27082f25292124662b2725773b3d2a222d2b3c750d3e2d3a0027252d6d7a786d0d7a6d70786d717c6d7a780a2727236d7a78296d7a782c2d2527">Book a demo →</a>
+
+  <header class="site-header">
+    <div class="container nav">
+      <div class="brand">EVERHOME<span class="dot">.</span></div>
+      <nav class="nav-links" aria-label="Primary">
+        <a href="#why">Why it matters</a>
+        <a href="#solution">Solution</a>
+        <a href="#how">How it works</a>
+        <a href="#ethics">Ethics</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+
+    <!-- Hero -->
+    <section class="hero" data-screen-label="Hero">
+      <div class="container">
+        <div class="hero-grid">
+          <div class="hero-copy">
+            <h1>A <span class="grad">Time Capsule</span> You Can Talk To.</h1>
+            <p class="subhead">
+              Privacy-first voice AI that preserves the people who raised you.
+              Built for families. Runs on your hardware.
+            </p>
+            <div class="cta-row">
+              <a class="btn btn-primary" href="https://everhome.mkk.dev/ui?demo=1">Talk to it</a>
+              <a class="btn btn-secondary" href="/cdn-cgi/l/email-protection#305d51425b5b5f525f70575d51595c1e535f5d0f4345525a5553440d75465542785f5d551502001575021508001509041502007d555544595e5715020062554145554344">Request a meeting</a>
+            </div>
+          </div>
+
+          <!-- Time-capsule waveform visual -->
+          <div class="capsule" aria-hidden="true">
+            <div class="dial d3"></div>
+            <div class="dial d2"></div>
+            <div class="dial d1"></div>
+            <div class="orbit"></div>
+            <div class="glow"></div>
+            <div class="ring r1"></div>
+            <div class="ring r2"></div>
+            <div class="ring r3"></div>
+            <div class="wave" id="wave"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Why this matters -->
+    <section id="why" data-screen-label="Why it matters">
+      <div class="container">
+        <div class="section-eyebrow reveal">Why it matters</div>
+        <h2 class="reveal d1">The most personal legacy you can leave.</h2>
+        <p class="lede reveal d2">
+          Your voice, your stories, the wisdom you want to pass down —
+          EverHome captures all of it together, on hardware you own.
+          Your legacy stays exactly where it should: at home.
+        </p>
+        <div class="pillars">
+          <div class="pillar legacy reveal d1">
+            <div class="pillar-index">01</div>
+            <div class="pillar-icon"><span></span></div>
+            <h3>A legacy made of everything</h3>
+            <p>Voice and tone preserved exactly. Stories, memories,
+            opinions, and the wisdom you want to pass down — captured
+            intentionally. Together, the full picture. Not a generic
+            AI with your name attached.</p>
+          </div>
+          <div class="pillar privacy reveal d2">
+            <div class="pillar-index">02</div>
+            <div class="pillar-icon"><span></span></div>
+            <h3>Privacy by design</h3>
+            <p>Lives on hardware you own. Never uploaded to a cloud.
+            Never shared with another AI service. Never used to train
+            someone else's model. Personal in the original sense of
+            the word.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Solution -->
+    <section id="solution" data-screen-label="Solution">
+      <div class="container">
+        <div class="section-eyebrow reveal">The solution</div>
+        <h2 class="reveal d1">30 to 60 minutes. Then forever.</h2>
+        <p class="lede reveal d2">
+          EverHome turns recorded conversation into a voice AI clone
+          that your family can talk to forever, on hardware you own.
+        </p>
+        <ul class="solution-bullets reveal d2">
+          <li><strong>A cloned voice close relatives recognize.</strong></li>
+          <li><strong>Memory of who they were.</strong></li>
+          <li><strong>Runs on a small box in your home.</strong></li>
+        </ul>
+        <p class="reveal d3" style="margin-top: 40px; color: var(--muted); font-size: 17px;">
+          <a href="/cdn-cgi/l/email-protection#83eee2f1e8e8ece1ecc3e4eee2eaefade0eceebcf0f6e1e9e6e0f7bec6f5e6f1cbeceee6a6b1b3a6c6b1a6bbb3a6bab7a6b1b3c1ecece8a6b1b3e2a6b1b3e7e6eeec" style="color: var(--accent);">Book a demo →</a> to see how.
+        </p>
+      </div>
+    </section>
+
+    <!-- How it works -->
+    <section id="how" data-screen-label="How it works">
+      <div class="container">
+        <div class="section-eyebrow reveal">How it works</div>
+        <h2 class="reveal d1">An afternoon to record. A lifetime to talk.</h2>
+        <div class="steps">
+          <div class="step reveal d1">
+            <div class="step-num">1</div>
+            <h3>Record</h3>
+            <p>An afternoon of conversation. Family stories,
+            opinions, the small things — we hand you the questions.</p>
+          </div>
+          <div class="step reveal d2">
+            <div class="step-num">2</div>
+            <h3>Add memories</h3>
+            <p>Letters, photo captions, chat exports, favorite books —
+            anything that captures how they think and what they
+            remember.</p>
+          </div>
+          <div class="step reveal d3">
+            <div class="step-num">3</div>
+            <h3>Talk</h3>
+            <p>Talk to them anytime, in their voice, with their
+            memory. Stays at home. Nothing uploaded, ever.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Ethics -->
+    <section id="ethics" data-screen-label="Ethics">
+      <div class="container">
+        <div class="section-eyebrow reveal">Ethical guardrails</div>
+        <h2 class="reveal d1">The cliff is real. We've thought about it.</h2>
+        <p class="lede reveal d2">Voice cloning a deceased relative is powerful
+        and easily misused. Four non-negotiable guardrails ship before
+        any commercial release.</p>
+        <ul class="ethics-list">
+          <li class="reveal d1">
+            <strong>Consent capture</strong>
+            The recorded person must opt in on camera before training
+            begins. No exceptions.
+          </li>
+          <li class="reveal d2">
+            <strong>Disclosure rule</strong>
+            The AI reveals it is AI if directly asked. The system
+            prompt enforces this; the model is trained around it.
+          </li>
+          <li class="reveal d1">
+            <strong>Audit trail</strong>
+            Every training event logged. Every inference logged.
+            Exportable on demand to the consent holder.
+          </li>
+          <li class="reveal d2">
+            <strong>Watermarking</strong>
+            Generated audio carries an inaudible mark so a clone cannot
+            be passed off as the real person in evidentiary or legal
+            contexts.
+          </li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- Closing CTA -->
+    <section class="closing-cta" data-screen-label="Closing CTA">
+      <div class="container">
+        <h2 class="reveal">Hear what it sounds like.</h2>
+        <p class="reveal d1">The demo is live. It takes about ninety seconds to try and
+        does not require an account.</p>
+        <div class="cta-row reveal d2">
+          <a class="btn btn-primary" href="https://everhome.mkk.dev/ui?demo=1">Talk to it</a>
+          <a class="btn btn-secondary" href="/cdn-cgi/l/email-protection#7f121e0d1414101d103f18121e1613511c1012400c0a1d151a1c0b423a091a0d3710121a5a4d4f5a3a4d5a474f5a464b5a4d4f2f1e0d0b111a0d0c17160f5a4d4f36110e0a160d06">Partner with us</a>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-grid">
+      <div>
+        <span class="footer-brand">EVERHOME</span> ·
+        Built by <a href="/cdn-cgi/l/email-protection#4e232f3c2525212c210e29232f2722602d2123">Mark Kobo</a> ·
+        © 2026
+      </div>
+      <div>
+        <a href="https://github.com/markkobo/voice-ai-pipeline">GitHub</a> ·
+        <a href="/cdn-cgi/l/email-protection#452824372e2e2a272a052228242c296b262a28">Contact</a>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    // Mark JS as available so reveal styles apply only when we can run them.
+    document.documentElement.classList.add('js');
+
+    // Build the voice waveform: bars with varied heights + staggered
+    // timing so it reads as a living signal, not a metronome.
+    (function () {
+      var wave = document.getElementById('wave');
+      if (!wave) return;
+      var heights = [0.35, 0.6, 0.85, 1, 0.7, 0.45, 0.9, 1, 0.55, 0.75, 1, 0.4, 0.65, 0.5];
+      var frag = document.createDocumentFragment();
+      for (var i = 0; i < heights.length; i++) {
+        var bar = document.createElement('span');
+        bar.className = 'bar';
+        var h = heights[i];
+        bar.style.height = (28 + h * 64) + 'px';
+        bar.style.animationDelay = (-(i % 7) * 0.13).toFixed(2) + 's';
+        bar.style.animationDuration = (1.3 + (i % 4) * 0.18).toFixed(2) + 's';
+        bar.style.opacity = (0.55 + h * 0.45).toFixed(2);
+        frag.appendChild(bar);
+      }
+      wave.appendChild(frag);
+    })();
+
+    // Scroll reveal — fade/slide sections in as they enter the viewport.
+    (function () {
+      var els = document.querySelectorAll('.reveal');
+      if (!('IntersectionObserver' in window) || !els.length) {
+        els.forEach(function (el) { el.classList.add('in'); });
+        return;
+      }
+      var io = new IntersectionObserver(function (entries) {
+        entries.forEach(function (e) {
+          if (e.isIntersecting) {
+            e.target.classList.add('in');
+            io.unobserve(e.target);
+          }
+        });
+      }, { threshold: 0.12, rootMargin: '0px 0px -8% 0px' });
+      els.forEach(function (el) { io.observe(el); });
+    })();
+  </script>
+
+
+</body></html>

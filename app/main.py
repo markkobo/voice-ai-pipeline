@@ -211,6 +211,17 @@ async def landing_page():
     return HTMLResponse(fp.read_text())
 
 
+@app.get("/landing-v2", response_class=HTMLResponse)
+@app.get("/landing-v2/", response_class=HTMLResponse)
+async def landing_page_v2():
+    """Serve the Claude Design-polished version side-by-side with /landing
+    so the user can A/B preview both versions before deciding."""
+    fp = _DOCS_DIR / "everhome_landing_v2_claude_design.html"
+    if not fp.exists():
+        return HTMLResponse("<p>Landing v2 not found.</p>", status_code=404)
+    return HTMLResponse(fp.read_text())
+
+
 @app.get("/docs-md/{name}", response_class=HTMLResponse)
 async def docs_view(name: str):
     """Render a single repo doc file as phone-friendly HTML."""
