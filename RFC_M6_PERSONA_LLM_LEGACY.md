@@ -638,6 +638,143 @@ human eval (M8 §4.0 §5). Promote whichever wins.
 | Audio watermarking robustness | Meta AudioSeal (2024) field performance after MP3 64kbps + room re-record |
 | Browser audio API breakage | Safari/Chrome release notes for ScriptProcessorNode removal |
 
+### 11.9 — M12a pulled to top of queue (Gemini review 2026-06-03)
+
+Gemini 2.5 Pro review (transcript at
+`docs/REVIEW_GEMINI25PRO_2026-06-03.md`) flagged this more aggressively
+than GPT-5: M12a (Qwen3.5-Omni-Light + Step-Audio 2 mini cloning eval
+spike) is a 1-day investigation that has the potential to **invalidate
+or reshape M11, M12, and M13**. Pushing it to August means weeks of
+TTS abstraction and hybrid-pipeline work might be superseded by a
+single discovery.
+
+**Action.** Move M12a to **first task after D-Retro** (target: this
+week). One-day spike, measurable outcomes:
+- Run zero-shot cloning on each candidate with a 30-second Mark sample.
+- Score against the same human-eval rubric M9 will use (close-relative
+  recognition A/B).
+- Decision tree: if cloning depth matches Qwen3-TTS-LoRA → fast-track
+  M13 evaluation, defer M8.5/M11 polish. If clearly below → confirm
+  current TTS-LoRA path, no roadmap change.
+
+### 11.10 — M9 split: ship local LLM faster (Gemini review 2026-06-03)
+
+Gemini observed: M8.5 is a 3-4 week TTS research milestone that
+**blocks M9** under the current plan. That delays the fundamental
+privacy promise (local LLM, no OpenAI in the request path) by 2-3
+months.
+
+**Action.** Split M9 into two:
+- **M9.1 — Local Qwen 3 8B + simple persona LoRA** (~2 weeks). Ships
+  the local-LLM value. Persona LoRA trained without M8.5's locked
+  emotion vocabulary — uses our current emotion tag set as-is. May
+  need to re-train when M8.5 ships, but the *deployment infrastructure*
+  (vLLM, model serving, latency tuning, OpenAI swap-out) is the long
+  pole and ships independently. **Privacy moat closes here, not at
+  M9.2.**
+- **M9.2 — Rich persona LoRA with locked vocabulary** (~3-4 weeks,
+  after M8.5). Re-train with emotion2vec-anchored vocabulary. Hot-swap
+  the adapter on the live local LLM. No infra change.
+
+**Why this matters:** the local-LLM moat is what makes the "100%
+on-box" claim true. Shipping it 2-3 months earlier de-risks the demo
+narrative and the B2B sales motion.
+
+### 11.11 — M7 split: minimal ingest unblocks M8 (Gemini review 2026-06-03)
+
+Gemini observed: M7 is 2-3 weeks because it supports 7 input formats
+(txt, md, pdf, epub, docx, photos, chat exports). M8 only needs *some*
+content to be useful.
+
+**Action.** Split M7:
+- **M7.1 — Minimal ingest** (~3-5 days): `.txt`, `.md`, `.pdf` only.
+  Unblocks M8.
+- **M7.2 — Full ingest** (~2 weeks): epub, docx, photos (PaddleOCR-VL),
+  chat exports. Ships after M8 is wired and proven.
+
+**Why this matters:** M8 is the value-delivery milestone (cross-session
+memory). Waiting for the full M7 just to start M8 wastes ~1.5 weeks
+when 80% of corpus value (text, PDFs of letters, emails saved as PDF)
+already covers the typical first family's input.
+
+### 11.12 — Strategic reframe: corpus is the moat, not just the clone
+
+Gemini's most-quoted finding: **"The Real Moat is the Corpus, Not the
+Clone."** A competitor could cede voice-cloning depth, use a "good
+enough" zero-shot model, and focus entirely on making it easy for a
+family to build a complete authentic memory graph. If they get the
+M7/M8/M9 pipeline 10x better than us, families may not care that the
+voice is slightly off.
+
+**Implication:** voice cloning depth is a NECESSARY condition (otherwise
+the product fails the recognition test) but it is NOT the SUFFICIENT
+moat. The sufficient moat is the **per-family curated corpus + memory
+graph + persona model** — the asset that takes years of family
+participation to build and cannot be copied between vendors.
+
+**Action.**
+- Update PROJECT_BRIEF.md §1 to frame the moat as
+  "voice cloning depth × curated family corpus + memory graph", not
+  voice alone.
+- Treat M7 + M8 + M9 as **co-equal moat investments** with M10/M11,
+  not as plumbing.
+- The "data curator" role / onboarding UX (the part most likely to
+  bottleneck adoption) gets a dedicated milestone before any commercial
+  launch. Tentative name: **M-Onboarding** — guided multi-session
+  data-collection app, family-member-friendly UX, not just
+  `POST /api/corpus/upload`.
+
+### 11.13 — M10 is the research-publication opportunity
+
+User observation (msg 1971): most of the roadmap is implementing
+existing papers. M10 (multi-listener voice routing) might be where the
+project actually has **novel research contribution potential**.
+
+**Why M10 is unusually publishable:**
+
+- The wider TTS literature treats voice cloning as **per-speaker** and
+  emotion as the secondary axis. **Per-LISTENER adaptation from the
+  same speaker** — i.e., the same person adapting voice when speaking
+  to a child vs a colleague vs an elder — is rarer in published work
+  (Interspeech / ICASSP). Closest related: persona-aware TTS,
+  code-switching, dialog-adaptive prosody. None directly study
+  speaker × listener × LoRA composition.
+- EverHome has structurally rare training data: the recording pipeline
+  naturally captures **the same speaker speaking to multiple known
+  relationships** (per-listener prompts in `/ui/recordings`). Most
+  academic TTS datasets do not have this axis labeled.
+- The (speaker, listener) → LoRA composition is novel as engineering
+  — could be presented as a method paper.
+
+**Candidate paper framing:**
+- Title (working): "Listener-Adaptive Voice Cloning via Per-Relationship
+  LoRA Composition on Family-Scale Audio"
+- Venue: Interspeech 2027 (deadline ~March 2027) or ICASSP 2027
+  (deadline ~Sept 2026). ICASSP if M10 ships by August 2026; Interspeech
+  if later.
+- Contributions: (1) the per-listener LoRA composition method;
+  (2) a release-the-method-not-the-data approach with a synthetic
+  evaluation set (real family data stays on the box per privacy moat);
+  (3) the close-relative-recognition human-eval rubric itself (no
+  published benchmark exists per `RESEARCH_SFT_S2S.md`).
+
+**Implication for M10 design.** Build M10 with the publication in
+mind from day one:
+- Document the LoRA-composition algorithm precisely (not just "we
+  train per-listener").
+- Run controlled ablations: single-LoRA-per-listener vs
+  composition-at-inference vs interpolation. Pick whichever produces
+  the publishable result.
+- Capture training metadata (per-listener data hours, A/B win rates)
+  that a reviewer would ask for.
+- Reserve a small held-out family-recognition test set with consenting
+  participants for the human eval section.
+
+**Risk:** if M10 is also the moat, publishing the method tells
+competitors how to do it. **Mitigation:** the data + per-family corpus
+is the durable moat (per §11.12). The method becoming public IS the
+academic contribution; the moat doesn't depend on method obscurity.
+
 ### 11.8 — D-Retro bucket (2026-06-02 demo learnings)
 
 Captured fixes from demo prep + day-of that need to be locked in with

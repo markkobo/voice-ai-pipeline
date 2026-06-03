@@ -20,10 +20,20 @@ personal data leaves it. The 小S (and now Mark) famous-figure pipeline is
 the **validation path** for this same appliance, not a separate product.
 
 Buyers: (1) B2C diaspora Chinese families preserving an elder. (2) B2B2C
-eldercare / hospice / memorial-service providers. **Voice-cloning depth
-at close-relative-recognition quality is the moat** — not zero-shot
-10-second clones. SFT/LoRA on dedicated TTS, not omni S2S models that
-can't fine-tune new speakers.
+eldercare / hospice / memorial-service providers.
+
+**The moat = voice cloning depth × curated family corpus + memory graph.**
+Voice cloning at close-relative recognition is NECESSARY (the product
+fails its recognition test otherwise) but not SUFFICIENT. The
+durable, hard-to-copy asset is the per-family corpus + memory graph +
+persona model that takes years of family participation to build. A
+competitor who ships better corpus/memory tooling with worse cloning
+can outcompete a competitor who ships better cloning with worse
+corpus/memory tooling. Treat M7 (ingest) + M8 (memory RAG) + M9
+(persona LLM) as co-equal moat investments with M10/M11 — not as
+plumbing for the voice layer. Cloning approach: SFT/LoRA on dedicated
+TTS, not omni S2S models that can't fine-tune new speakers (per
+`docs/RESEARCH_SFT_S2S.md`).
 
 ---
 

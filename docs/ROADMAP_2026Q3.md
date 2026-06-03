@@ -1153,16 +1153,43 @@ strategic side-note). They have no cloning — we do.
 
 ## 10. Sequencing at a glance
 
-> **Updated 2026-06-03 per GPT-5 review** (full transcript at
-> `docs/REVIEW_GPT5_2026-06-03.md`, action items in
-> `RFC_M6_PERSONA_LLM_LEGACY.md` §11). Changes from prior version:
+> **Updated 2026-06-03 per GPT-5 + Gemini 2.5 Pro reviews** (transcripts
+> at `docs/REVIEW_GPT5_2026-06-03.md` + `docs/REVIEW_GEMINI25PRO_2026-06-03.md`,
+> action items in `RFC_M6_PERSONA_LLM_LEGACY.md` §11). Changes from
+> prior version:
+>
+> From GPT-5:
 > - **D-Retro** inserted right after M-Demo to harden 06/02 fixes.
 > - **License audit** ships as a blocker before M7 ingest code lands.
-> - **AudioWorklet migration** added to D-Retro (mic capture path).
+>   DONE — see `docs/THIRD_PARTY_LICENSE_AUDIT.md`. Hard blockers:
+>   PersonaHub (cc-by-nc-sa) and LLaMA-Omni 2 weights (research-only).
+> - **AudioWorklet migration** — added to D-Retro then DEFERRED per
+>   user (upload-mode is current path).
 > - **M-Consent UI gates M7 ingest UI** (was parallel; now serial-at-UI).
-> - **M8a thin-slice memory** inserted before M8 (3-5 days, derisks).
 > - **M11 BaseTTSEngine** broadens scope to include VoxCPM 2 +
 >   CosyVoice 2 as first-class backends.
+>
+> From Gemini 2.5 Pro (this iteration):
+> - **M12a pulled to top of queue** (1-day spike, after D-Retro) — its
+>   outcome can reshape M11/M12/M13.
+> - **M9 split** into M9.1 (local Qwen 3 8B + simple LoRA, 2 weeks,
+>   privacy moat closes here) → M9.2 (rich LoRA with M8.5 vocabulary,
+>   3-4 weeks, hot-swap on running infra).
+> - **M7 split** into M7.1 (txt/md/pdf minimal, 3-5d, unblocks M8) →
+>   M7.2 (epub/docx/photos/chat exports, ~2w, after M8 wired).
+> - **Strategic reframe:** moat = cloning depth × curated corpus +
+>   memory graph. M7+M8+M9 are co-equal moat investments. Per-family
+>   data + memory is the durable hard-to-copy asset; cloning depth is
+>   necessary but not sufficient. See PROJECT_BRIEF §1.
+> - **M10 is the publication opportunity.** Per-listener LoRA
+>   composition from the same speaker is rare in TTS literature;
+>   EverHome has structurally unusual training data (per-listener
+>   labeled recordings). Build M10 publication-ready from day one
+>   (controlled ablations, documented method, held-out family eval).
+>   See RFC §11.13.
+> - **M-Onboarding** added as a pre-launch milestone — guided
+>   multi-session data-collection app; the "data curator" UX is
+>   currently the largest under-addressed gap (Gemini D-1 finding).
 
 ```
 2026
@@ -1172,19 +1199,21 @@ strategic side-note). They have no cloning — we do.
 ├─ JUN 02  ─┘  ← NY Tech Week demo
 │
 ├─ JUN 03  ─┐
-│           ├─ D-Retro (1-2 days)
+│           ├─ D-Retro (DONE 2026-06-03)
 │           │   · Contract tests for ASR hallucination filter, listen-only,
-│           │     empty-asr handling, language directive, cache-buster
+│           │     empty-asr handling, language directive, cache-buster ✓
 │           │   · [DEFERRED] ScriptProcessorNode → AudioWorkletProcessor —
-│           │     upload-mode is current path; revisit if Safari/iOS or
-│           │     live-browser-capture re-enters critical path
-│           │   · §12 retrospective writeup
+│           │     upload-mode is current path
+│           │   · §12 retrospective writeup ✓
+│           │   · License audit ✓ (THIRD_PARTY_LICENSE_AUDIT.md;
+│           │     blockers: PersonaHub, LLaMA-Omni 2 weights)
 │           │
-│           ├─ License audit (~1 day, BLOCKER for M7 + M9)
-│           │   · docs/THIRD_PARTY_LICENSE_AUDIT.md
-│           │   · PersonaHub / OpenCharacter / MinerU 2.5-Pro / emotion2vec /
-│           │     CosyVoice / VoxCPM — confirm commercial-use OK or list
-│           │     synthetic-in-house fallback
+│           ├─ M12a — Cloning eval spike (1 day, NEXT after D-Retro)
+│           │   · Qwen3.5-Omni-Light zero-shot cloning on 30s Mark sample
+│           │   · Step-Audio 2 mini zero-shot cloning
+│           │   · A/B against current Qwen3-TTS-LoRA via human eval rubric
+│           │   · Decision tree: collapse M11/M12/M13 if cloning matches;
+│           │     confirm current path if clearly below
 │           │
 │           ├─ Unlearning design spike (1 day, M-Consent prework)
 │           │   · SISA-shard granularity decision (USENIX Security 2019)
@@ -1197,7 +1226,8 @@ strategic side-note). They have no cloning — we do.
 │
 ├─ JUN     ─┐
 │           ├─ M-Consent UI ships FIRST (gates M7 ingest UI server-side)
-│           ├─ M7 — Text / ebook / image ingestion (PaddleOCR-VL + MinerU 2.5-Pro)
+│           ├─ M7.1 — Minimal ingest (3-5d): .txt / .md / .pdf only
+│           │      · Unblocks M8; 80% of typical first-family corpus
 │           │      · POST /api/corpus/ingest checks consent record exists
 ├─ JUL     ─┘
 │
@@ -1220,11 +1250,26 @@ strategic side-note). They have no cloning — we do.
 │              · Real talker.model LoRA pulled forward as Week-0 subtask
 │
 ├─ JUL     ─┐
-│           ├─ M9 — OpenCharacter persona LoRA + Qwen 3 8B local + CharacterEval gate
-├─ AUG     ─┘    ← LLM trained to emit only M8.5 vocabulary tags
+│           ├─ M9.1 — Local Qwen 3 8B + simple persona LoRA (~2 weeks)
+│           │      · Ships local-LLM deployment infra (vLLM, serving,
+│           │        latency, OpenAI swap-out) — **privacy moat closes here**
+│           │      · Uses current emotion vocab (pre-M8.5); may re-train later
+│           │
+├─ AUG     ─┘
 │
 ├─ AUG     ─┐
-│           ├─ M10 — Multi-listener voice routing (build routing, defer LoRA-swap engineering)
+│           ├─ M9.2 — Rich persona LoRA with M8.5 vocabulary (~3-4 weeks)
+│           │      · Re-train with emotion2vec-anchored vocab
+│           │      · Hot-swap on running local LLM (no infra change)
+│           │
+├─ SEP     ─┘
+│
+├─ AUG     ─┐
+│           ├─ M10 — Multi-listener voice routing (PUBLICATION-CANDIDATE)
+│           │      · Per-(speaker,listener) LoRA composition — rare in TTS lit
+│           │      · Build publication-ready from day one (ablations,
+│           │        held-out family eval, documented method).
+│           │      · Target venue: ICASSP 2027 or Interspeech 2027.
 ├─ SEP     ─┘
 │
 ├─ AUG     ─┐
@@ -1236,15 +1281,25 @@ strategic side-note). They have no cloning — we do.
 │           ├─ M12 — Hybrid pipeline (winner from M12a bake-off)
 ├─ OCT     ─┘   — IF M12a spikes inconclusive
 │
+├─ Q3 +     M-Onboarding — guided multi-session data-collection app
+│              (the "data curator" UX; pre-launch blocker)
+│              Per Gemini D-1 finding — currently the largest
+│              under-addressed product gap.
+│
+├─ Q3 +     M7.2 — Full ingest (epub, docx, photos, chat exports)
+│              Ships after M8.1 + M8.2 wired and proven on M7.1 inputs
+│
 └─ Q4 +     M13 — OSS E2E S2S migration (Step-Audio 2 primary; Chroma watch)
 ```
 
 **Hard dependency edges:**
-- M-Consent UI **gates** M7 (server-side consent check before any ingest)
-- License audit **blocks** M7 + M9 code (do BEFORE either ships)
-- D-Retro contract tests **gate** M7 (locks 06/02 fixes from regression)
+- M-Consent UI **gates** M7.1 (server-side consent check before any ingest)
+- License audit **blocked** M7 + M9 code — DONE 2026-06-03
+- D-Retro contract tests **gate** M7.1 (locks 06/02 fixes from regression)
+- M7.1 **precedes** M8 (minimal corpus to retrieve from). M7.2 ships after M8 proven.
 - M8.1 / M8.2 / M8.3 are sequential within M8 (each commit additive on prior)
-- M8.5 **blocks** M9 (persona LLM must emit only M8.5 vocabulary)
+- M8.5 **blocks** M9.2 (rich LoRA needs locked vocabulary). M8.5 does NOT block M9.1.
+- M9.1 **precedes** M9.2 (hot-swap on same infra)
 - M11 abstraction **precedes** M10 + M12 (swap-ready scaffolding first)
 
 **Parallelizable edges:**
