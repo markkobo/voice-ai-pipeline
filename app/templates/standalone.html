@@ -4,9 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Voice AI — EverHome Lab</title>
-    <link rel="stylesheet" href="/static/css/_status_bar.css">
-    <link rel="stylesheet" href="/static/css/standalone.css">
-    <script src="/static/js/_status_bar.js" defer></script>
+    <link rel="stylesheet" href="/static/css/_status_bar.css?v={{ asset_version }}">
+    <link rel="stylesheet" href="/static/css/standalone.css?v={{ asset_version }}">
+    <script src="/static/js/_status_bar.js?v={{ asset_version }}" defer></script>
 </head>
 <body>
     {% include "_status_bar.html" %}
@@ -44,7 +44,8 @@
             <div class="config-item">
                 <label>Persona</label>
                 <select id="persona">
-                    <option value="xiao_s" selected>Xiao S</option>
+                    <option value="test" selected>EverHome Demo (Mark)</option>
+                    <option value="xiao_s">Xiao S</option>
                     <option value="caregiver">Caregiver</option>
                     <option value="elder_gentle">Elder — Gentle</option>
                     <option value="elder_playful">Elder — Playful</option>
@@ -65,6 +66,14 @@
                     <option value="low">Low</option>
                     <option value="medium" selected>Medium</option>
                     <option value="high">High</option>
+                </select>
+            </div>
+            <div class="config-item">
+                <label>Reply Language</label>
+                <select id="language">
+                    <option value="auto" selected>Auto</option>
+                    <option value="chinese">中文</option>
+                    <option value="english">English</option>
                 </select>
             </div>
         </div>
@@ -137,7 +146,7 @@
         </div>
     </div>
 
-    <script src="/static/js/standalone.js" defer></script>
+    <script src="/static/js/standalone.js?v={{ asset_version }}" defer></script>
     <script>
         // EverHome splash — show on initial demo-mode load. Dismissed by
         // any click (overlay or start button); stays dismissed for the

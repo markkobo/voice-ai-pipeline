@@ -487,6 +487,7 @@ function connect() {
                 // the user thinks they toggled it ON but the AI replies
                 // anyway. User report msg 1788.
                 listen_only: !!(document.getElementById('listenOnlyChk') && document.getElementById('listenOnlyChk').checked),
+                language: (document.getElementById('language') || {}).value || 'auto',
             }));
             log('Config sent (worklet deferred to user-gesture)');
         } catch (e) {
@@ -730,9 +731,17 @@ function onVadChange() {
         listener_id: listenerEl.value,
         model: 'gpt-4o-mini',
         vad: vadValue,
-        tts_model: ttsModelEl ? ttsModelEl.value : '1.7B'
+        tts_model: ttsModelEl ? ttsModelEl.value : '1.7B',
+        language: (document.getElementById('language') || {}).value || 'auto',
     }));
     log('VAD sensitivity changed to: ' + vadValue);
+}
+
+function onLanguageChange() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    resendConfig('language changed');
+    const v = (document.getElementById('language') || {}).value || 'auto';
+    log('Reply language set to: ' + v);
 }
 
 function handleMessage(msg) {
@@ -740,7 +749,34 @@ function handleMessage(msg) {
 
     if (msg.type === 'asr_result') {
         log('ASR result: is_final=' + msg.is_final + ' text=' + (msg.text || '(empty)'));
-        addMessage('user', msg.text || '(no text)');
+        const hasText = !!(msg.text && msg.text.trim());
+
+        // Only add a user bubble when there's real text. Empty asr_result is
+        // a signal that VAD/ASR fired on silence — don't pollute the chat.
+        if (hasText) {
+            addMessage('user', msg.text);
+        }
+
+        const listenOnly = !!(document.getElementById('listenOnlyChk') && document.getElementById('listenOnlyChk').checked);
+
+        // Two cases where no LLM will follow this asr_result:
+        //   (a) listen-only mode — server intentionally skips LLM
+        //   (b) empty text — silence guard / hallucination filter caught it
+        // In both cases the client must escape THINKING itself, since no
+        // llm_start/llm_done is coming. Auto-continue re-arms the mic;
+        // otherwise we fall back to READY so the user can press start.
+        // The ASR-side hallucination filter (engine.py) keeps bg-noise
+        // re-arm from producing fake transcripts.
+        if ((listenOnly || !hasText) && state === STATE.THINKING) {
+            document.getElementById('thinkingIndicator').style.display = 'none';
+            const reason = listenOnly ? 'listen_only no-llm' : 'empty asr (silence)';
+            if (autoContinueChk && autoContinueChk.checked) {
+                log('Auto-continue: re-arming mic (' + reason + ')');
+                startRecording();
+            } else {
+                transition(STATE.READY, reason);
+            }
+        }
     }
 
     if (msg.type === 'vad_commit') {
@@ -1016,15 +1052,22 @@ listenerEl.addEventListener('change', () => {
             vad: document.getElementById('vad').value,
             tts_model: ttsModelEl ? ttsModelEl.value : '1.7B',
             listen_only: listenOnly,
+            language: (document.getElementById('language') || {}).value || 'auto',
         }));
     }
     loadVersions();
 });
 
+const _langEl = document.getElementById('language');
+if (_langEl) {
+    _langEl.addEventListener('change', onLanguageChange);
+}
+
 function resendConfig(reason) {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     const ttsModelEl = document.getElementById('tts_model');
     const listenOnly = !!(document.getElementById('listenOnlyChk') && document.getElementById('listenOnlyChk').checked);
+    const language = (document.getElementById('language') || {}).value || 'auto';
     ws.send(JSON.stringify({
         type: 'config',
         audio: { sample_rate: 24000, channels: 1, format: 'pcm' },
@@ -1034,8 +1077,9 @@ function resendConfig(reason) {
         vad: document.getElementById('vad').value,
         tts_model: ttsModelEl ? ttsModelEl.value : '1.7B',
         listen_only: listenOnly,
+        language: language,
     }));
-    log('Config resent (' + reason + '): persona=' + personaEl.value + ' listener=' + listenerEl.value + ' listen_only=' + listenOnly);
+    log('Config resent (' + reason + '): persona=' + personaEl.value + ' listener=' + listenerEl.value + ' listen_only=' + listenOnly + ' language=' + language);
 }
 
 // Toggle listen-only mode mid-session. When ON, ASR fires but LLM does NOT
@@ -1260,7 +1304,7 @@ async function loadPersonasIntoSelect() {
         const data = await res.json();
         const personas = data.personas || [];
         if (personas.length === 0) return;
-        const prev = personaEl.value || 'xiao_s';
+        const prev = personaEl.value || 'test';
         personaEl.innerHTML = '';
         for (const p of personas) {
             const opt = document.createElement('option');
@@ -1268,9 +1312,10 @@ async function loadPersonasIntoSelect() {
             opt.textContent = p.name || p.persona_id;
             personaEl.appendChild(opt);
         }
-        // Restore previous selection if it still exists, else default to xiao_s, else first.
+        // Restore previous selection if it still exists, else default to the
+        // EverHome Demo (Mark) persona, then xiao_s, then first available.
         const has = (id) => personas.some(p => p.persona_id === id);
-        personaEl.value = has(prev) ? prev : (has('xiao_s') ? 'xiao_s' : personas[0].persona_id);
+        personaEl.value = has(prev) ? prev : (has('test') ? 'test' : (has('xiao_s') ? 'xiao_s' : personas[0].persona_id));
         log(`Loaded ${personas.length} personas into dropdown`);
     } catch (e) {
         log('Failed to load personas: ' + e.message);

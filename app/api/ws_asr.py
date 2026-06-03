@@ -428,6 +428,25 @@ async def run_llm_stream(
     if system_prompt_suffix:
         system_prompt = system_prompt + "\n\n" + system_prompt_suffix
 
+    # Language directive — UI dropdown lets user pin the reply language so
+    # a Chinese-trained voice doesn't get forced into unnatural fast English.
+    _state = state_manager.get_session(session_id)
+    _lang = getattr(_state, "language", None) if _state else None
+    if _lang == "chinese":
+        system_prompt = (
+            system_prompt
+            + "\n\nLANGUAGE: Reply ONLY in Traditional Chinese (繁體中文). "
+              "Do NOT use English words or sentences. Even if the user speaks "
+              "English, your reply must be in Chinese."
+        )
+    elif _lang == "english":
+        system_prompt = (
+            system_prompt
+            + "\n\nLANGUAGE: Reply ONLY in American English. "
+              "Do NOT mix Chinese characters in. Even if the user speaks "
+              "Chinese, your reply must be in English."
+        )
+
     # Multi-turn memory — splice the rolling history between the system
     # prompt and the new user turn. Without this, OpenAI API forgets every
     # prior turn (it's stateless). Cap is enforced inside state_manager
@@ -760,7 +779,9 @@ async def websocket_endpoint(websocket: WebSocket):
                             f"[{session_id}] Config: audio={payload.get('audio')}, "
                             f"persona={payload.get('persona_id')}, "
                             f"listener={payload.get('listener_id')}, "
-                            f"model={payload.get('model')}"
+                            f"model={payload.get('model')}, "
+                            f"language={payload.get('language')}, "
+                            f"listen_only={payload.get('listen_only')}"
                         )
                         # Legacy tts_model preference (0.6B/1.7B picker) was
                         # removed 2026-05-20 — server always uses the active
@@ -818,12 +839,17 @@ async def websocket_endpoint(websocket: WebSocket):
                         # VAD commit — finalize audio and run ASR
                         asr_result = await state_manager.commit_utterance(session_id)
 
-                        # Skip if ASR returned empty (don't send to client)
+                        # Always send asr_result so the client can transition
+                        # out of THINKING. Empty text (silence guard, ASR
+                        # hallucination filter) means we skip the LLM but
+                        # the client still needs the signal — without it
+                        # the FSM gets stuck in THINKING forever.
+                        await safe_send_text(websocket, asr_result)
+
                         if not asr_result.get("text"):
-                            log.info(f"[{session_id}] ASR empty, skipping")
+                            log.info(f"[{session_id}] ASR empty — sent signal, skipping LLM")
                             continue
 
-                        await safe_send_text(websocket, asr_result)
                         log.info(f"[{session_id}] ASR done: {asr_result.get('text', '')[:50]}")
 
                         # Get session config

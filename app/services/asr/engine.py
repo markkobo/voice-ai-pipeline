@@ -151,6 +151,45 @@ class Qwen3ASR(BaseASR):
 
         print(f"[ASR] result={result}, text='{text}'")
 
+        # Hallucination filter — Qwen3-ASR (like Whisper-family models) emits
+        # a fixed set of stock phrases when fed near-silent audio. We've
+        # observed these specifically on demo-day with quiet phone mics
+        # (2026-06-02). Peak amplitude is the better discriminator than
+        # mean_abs: real speech reliably exceeds max_abs > 0.15 even when
+        # whispered, but mic noise (AGC noise floor) tops out around 0.1.
+        # Empirical observations from 2026-06-02 demo prep:
+        #   real "嗯。"     max=1.000, mean_abs=0.028  → kept
+        #   real "Okay..." max=0.187, mean_abs=0.005  → kept
+        #   halluc "The."  max=0.086, mean_abs=0.008  → drop
+        #   halluc "《大明宫词》" max=0.109, mean_abs=0.009 → drop
+        #   halluc "speed dough..." max=0.009, mean_abs=0.0005 → drop
+        audio_peak = max(abs(audio_min), abs(audio_max))
+        if text:
+            stripped = text.strip().rstrip(".!?,。！？，").lower()
+            HALLUCINATION_TEXTS = {
+                "the first was the first to be built",
+                "the",
+                "thank you",
+                "thanks for watching",
+                "bye",
+                "you",
+                "thanks",
+                "so",
+                "okay",
+                "ok",
+                ".",
+                "",
+                "《大明宫词》",
+                "大明宫词",
+            }
+            if stripped in HALLUCINATION_TEXTS:
+                print(f"[ASR] HALLUCINATION DROPPED: '{text}' (peak={audio_peak:.3f} mean_abs={audio_mean:.4f})")
+                text = ""
+            elif audio_peak < 0.12:
+                # Peak below real-speech floor → silence/noise.
+                print(f"[ASR] SILENCE DROPPED: '{text}' (peak={audio_peak:.3f} mean_abs={audio_mean:.4f})")
+                text = ""
+
         return {
             "text": text,
             "asr_inference_ms": inference_time

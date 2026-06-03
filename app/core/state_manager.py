@@ -121,6 +121,15 @@ class SessionState:
         # just said.
         self.listen_only: bool = False
 
+        # Language directive (2026-06-02) — when set, server injects a
+        # "respond in {language}" instruction into the LLM system prompt.
+        # None / "auto" means no override (LLM decides based on persona +
+        # user input). Concrete options: "chinese", "english".
+        # Motivation: TTS LoRA trained on Chinese audio produces unnatural
+        # fast-paced English; UI dropdown lets the user pin language to
+        # match the voice training.
+        self.language: Optional[str] = None
+
 
 # Max (user, assistant) pairs kept in SessionState.conversation_history.
 # 20 pairs ≈ 40 messages ≈ comfortably under gpt-4o-mini's 128k context
@@ -239,6 +248,11 @@ class StateManager:
         # as no-change, explicit false as disable).
         if "listen_only" in config:
             state.listen_only = bool(config.get("listen_only"))
+
+        # Language directive (per-config; "auto"/null = no override).
+        if "language" in config:
+            lang = config.get("language")
+            state.language = lang.lower() if isinstance(lang, str) and lang.lower() not in ("auto", "") else None
 
         # TTS model — legacy field (was 0.6B/1.7B base picker, removed
         # 2026-05-20 when SFT/LoRA shipped: the server now always uses the
