@@ -408,22 +408,83 @@ External review by GPT-5 (full transcript at `docs/REVIEW_GPT5_2026-06-03.md`)
 surfaced five high-confidence corrections to the M6/M7/M8/M9 plan. Captured
 here so the RFC stays the source of truth.
 
-### 11.1 — License audit BEFORE M7/M9 starts (blocker)
+### 11.1 — License audit BEFORE M7/M9 starts (DONE 2026-06-03)
 
-PersonaHub (Tencent) and many HF "OpenCharacter" derivative datasets ship
-under CC BY-NC or NC-like terms — **not legal for commercial persona-LoRA
-training**. MinerU 2.5-Pro and emotion2vec also have license clauses that
-drift across HF/ModelScope mirrors.
+Audit complete: `docs/THIRD_PARTY_LICENSE_AUDIT.md`. Results: 14 of 20
+items clean (Apache-2.0 / MIT), 4 MAYBE need second-pass, **2 hard
+blockers** confirmed.
 
-**Action.** Before any M7 ingest code or M9 training code lands, produce
-`docs/THIRD_PARTY_LICENSE_AUDIT.md` listing every dataset and model in
-the planned stack with: source URL, current LICENSE text, commercial-use
-verdict, and a fallback if the license excludes us. If PersonaHub is
-out, generate persona corpora in-house via the Open Character Training
-pipeline (arXiv:2511.01689) instead of touching NC data.
+#### Hard blocker #1 — PersonaHub (M9 SFT data path)
 
-**Why now.** Building M7/M9 first and discovering license issues during
-B2B sale prep would require corpus and model rebuilds.
+**Status:** Confirmed `cc-by-nc-sa-4.0` on
+https://huggingface.co/datasets/proj-persona/PersonaHub. Dataset card
+explicitly: "intended for research purposes only." **Cannot be used to
+train any LoRA / model that ships in the commercial product.**
+
+**Fallback plan — M9 SFT data generation (in priority order):**
+
+1. **Primary: synthesize our own persona seed corpus.** Use Qwen 3 8B
+   (Apache-2.0, confirmed item #11) as the generator, conditioned on
+   demographic templates we author in-house. Each persona seed = a
+   structured template (age, occupation, region, family role, speaking
+   register, sample memories from M7-ingested corpus) → Qwen 3 8B
+   produces ~50-200 turns of in-character dialogue per seed. Then apply
+   the OpenCharacter recipe (Constitutional AI + introspective dialogue
+   → SFT → DPO; method only, no Salesforce data) on top.
+
+2. **Do not use the Salesforce `xywang1/OpenCharacter` 326K dataset
+   directly** — it is derived from PersonaHub and therefore inherits
+   the NC restriction (verify the HF card from a logged-in session
+   before assuming otherwise; web-fetch returned 401 during audit).
+
+3. **Treat PersonaHub itself as research-time inspiration only** —
+   never ship weights derived from it. Acceptable to read the dataset
+   to design our own template schema; not acceptable to use rows as
+   training pairs.
+
+4. **Data-provenance hygiene:** every training run logs
+   `(seed_template_hash, generator_model_id, generator_model_license)`
+   into the training metadata so we can prove all SFT pairs trace
+   back to commercially-cleared inputs. Add to M9 training-job
+   metadata schema as a hard requirement.
+
+#### Hard blocker #2 — LLaMA-Omni 2 model weights (M12 candidate)
+
+**Status:** Code Apache-2.0, **weights research-only**:
+"Our model is intended for academic research purposes only and may NOT
+be used for commercial purposes." Commercial license via
+`fengyang@ict.ac.cn`.
+
+**Fallback plan — M12 hybrid pipeline:**
+
+- LLaMA-Omni 2 is structurally just a wrapper around CosyVoice 2
+  (Apache-2.0, item #4) on the TTS side and Qwen 2.5 on the LLM side.
+  **Build the same hybrid directly from those Apache-2.0 components
+  without LLaMA-Omni 2 weights** — same architecture, same quality
+  ceiling, clean license.
+- Drop LLaMA-Omni 2 from the M12 / M13 commercial candidate list.
+  Keep as a research-time eval if useful, but do not ship.
+
+#### MAYBE items requiring second-pass before milestone gates
+
+| Item | Action | Gate it blocks |
+|---|---|---|
+| Qwen3-TTS 12Hz 0.6B VoiceDesign | Open HF card, confirm `apache-2.0` | M11 ship |
+| IndexTTS-2 | Read repo `LICENSE` + `LICENSE_ZH.txt` verbatim; assume restricted until written confirmation from indexspeech@bilibili.com | M11 ship |
+| Kimi-Audio-7B weights | Logged-in HF check of `moonshotai/Kimi-Audio-7B` + `-Instruct` cards | M12 ship |
+| emotion2vec weights | Fetch ModelScope `iic/emotion2vec_plus_large` page; check for non-commercial clause | M8.5 kickoff |
+| MinerU 2.5 custom license | Read `LICENSE.md` from repo verbatim | M7 ship |
+| Salesforce `xywang1/OpenCharacter` 326K | Logged-in HF check; almost certainly NC by inheritance from PersonaHub | M9 SFT data planning |
+
+#### Ongoing compliance hygiene
+
+- Snapshot every shipped dependency's verbatim license file into
+  `data/compliance/LICENSE_<item>_<date>.txt` at the moment of model
+  swap, so a future audit can prove what was in the box at any
+  point in time.
+- Re-run the audit when adding any new model / dataset to the stack.
+  This audit is point-in-time (2026-06-03); upstream licenses CAN
+  change.
 
 ### 11.2 — Mic capture: ScriptProcessorNode → AudioWorkletProcessor (DEFERRED 2026-06-03)
 

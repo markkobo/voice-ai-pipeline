@@ -11,6 +11,14 @@ set -a
 # shellcheck disable=SC1091
 source "${PROJECT_ROOT}/.env" 2>/dev/null || true
 set +a
+# Provider env-var aliases. The `llm` plugins use their own names that
+# diverge from the conventional ones in .env:
+#   - llm-gemini wants LLM_GEMINI_KEY, not GEMINI_API_KEY
+# Alias so the user can keep the canonical names in .env without having
+# to know each plugin's quirks.
+if [[ -n "${GEMINI_API_KEY:-}" && -z "${LLM_GEMINI_KEY:-}" ]]; then
+    export LLM_GEMINI_KEY="${GEMINI_API_KEY}"
+fi
 if [[ -x "${PROJECT_ROOT}/.venv/bin/llm" ]]; then
     exec "${PROJECT_ROOT}/.venv/bin/llm" "$@"
 else
