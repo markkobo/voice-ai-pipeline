@@ -457,24 +457,87 @@ the persona has no current consent record for that source_kind.
 Engineering can proceed in parallel; only the user-facing flow is
 gated.
 
-### 11.4 — Insert M8a (minimal memory) before M8 full ID-RAG
+### 11.4 — M8 incremental delivery (revised 2026-06-03 per user direction)
 
-The ID-RAG + HippoRAG 2 + ConversationMemory stack in §3 Phase 1/2 is
-ambitious — 2-3 weeks if everything works. GPT-5 recommends a
-thin-slice first.
+GPT-5 originally recommended an M8a thin slice before full M8.
+**User pushback was right:** the thin slice is not throwaway code —
+BGE-M3 + LanceDB schema + retrieve API + prompt injection
+infrastructure is required regardless of single-index vs ID-RAG.
+M8 full = M8a + additive layers, not parallel work.
 
-**Action.** New milestone **M8a — Minimal Memory** (3-5 days):
-- BGE-M3 embeddings over corpus chunks
-- LanceDB vector store
-- Single-index retrieval (no identity graph yet)
-- Transparent citation surface ("from doc X dated Y")
-- Wired into `ws_asr.py` LLM call with budget-aware token cap
-- Defines the latency baseline + integration shape that full M8
-  builds on
+**Revised plan:** ship M8 as **three incremental commits inside one
+milestone**, each independently reviewable + reversible + user-visible.
+Same total effort (2-3 weeks), same end state, lower review risk per
+commit.
 
-**Why.** Derisks integration cost. If M8a takes 5 days but ID-RAG
-takes 3 weeks, we ship usable memory sooner and learn what doesn't
-work in production before the larger investment.
+| Commit | Days | User-visible behavior | Locks |
+|---|---|---|---|
+| M8.1 — embeddings + retrieve + injection | 3-5 | AI cites corpus ("根據你 2024-03 的 email...") | LanceDB schema, retrieval-injection shape in ws_asr.py, latency budget |
+| M8.2 — identity graph + HippoRAG multi-hop | ~7 | AI connects facts (mom + medication + appointment) | Graph schema, multi-hop retriever |
+| M8.3 — conversation memory + consolidation (A-MEM / Mem0 layer) | 3-5 | Cross-session memory ("上次你問了...") | Decay / promotion / consolidation rules |
+
+**Why this beats the original "M8a thin-slice"** framing:
+- Each commit ships user-visible value (not just plumbing).
+- No throwaway code — M8.2 and M8.3 are additive on M8.1.
+- Reviewable surface area per commit stays small.
+- User can A/B turn off later stages if they regress quality.
+
+Update ROADMAP §10 accordingly — replace "M8a → M8" with the three
+M8.x commits.
+
+#### MongoDB AI memory taxonomy — what we borrow
+
+Inspiration from MongoDB's *Bringing Attention to Memory in AI Agents
+and Agentic Systems* (https://www.mongodb.com/resources/basics/artificial-intelligence/agent-memory),
+researched 2026-06-03. MongoDB's writeup is conceptual (no schema), but
+the **memory taxonomy is worth borrowing as a naming + organization
+convention** even though our stack stays LanceDB + BGE-M3 (not Atlas
+Vector Search + Voyage).
+
+MongoDB distinguishes:
+- **Short-term:** Working Memory (active scratchpad), Semantic Cache
+  (query/response reuse), Shared Memory (cross-agent workspace)
+- **Long-term:** Episodic (specific events), Semantic (facts/concepts),
+  Procedural (workflows/skills), Associative (links/connections)
+
+**Three M8 deltas this drives:**
+
+1. **Split into separate LanceDB tables by memory type, not one blob.**
+   - `memory_episodic` — per-conversation-turn records (timestamp,
+     speaker, raw transcript). Source of the "AI remembers what was
+     said" experience.
+   - `memory_semantic` — extracted facts about the persona ("mom's
+     birthday is March 12", "father loved jazz"). M7 ingest produces
+     these.
+   - `memory_procedural` — learned behavioral patterns ("mom prefers
+     Hakka greetings on weekends", "father always starts stories with
+     a metaphor"). Emerges from M8.3 consolidation.
+   - Per-type retention + decay policies become explicit, not implicit
+     in one global "memory" column.
+
+2. **Promote "Associative Memory" to a first-class layer.** This maps
+   onto HippoRAG 2's neighborhood graph (planned for M8.2) but framed
+   as a memory *type*, not just a retrieval trick. Better mental model
+   for explaining to family users why the box "remembers connections."
+
+3. **Semantic Cache as tier-0 before LLM call.** Cheap latency win that
+   *also* reduces cloud-LLM exposure during the Phase-1 OpenAI window
+   (privacy-adjacent benefit). Cache key = (persona_id, listener_id,
+   normalized ASR text); cache hit returns prior LLM reply directly,
+   skip OpenAI round-trip. Add to M8.1 if cheap; defer to M8.3 if not.
+
+**What we do NOT borrow:**
+- Atlas Vector Search (cloud-managed, violates on-box rule). LanceDB
+  stays.
+- Voyage embeddings (non-Chinese-native). BGE-M3 stays per
+  [[chinese-support-stack]] memory.
+- "Single document, all memory inside" pattern — LanceDB scan
+  performance would degrade and per-type decay policies become hard.
+
+**Schema implication for M8.1:** the embedding/retrieve API should take
+a `memory_type` parameter from day one even if only `episodic` is wired
+up. Adding the parameter later forces a callsite migration; baking it
+in now is free.
 
 ### 11.5 — Unlearning design spike for M-Consent (1 day)
 

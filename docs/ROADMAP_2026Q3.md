@@ -1206,13 +1206,13 @@ strategic side-note). They have no cloning — we do.
 │                CosyVoice2Engine (all first-class, A/B-able)
 │
 ├─ JUN-JUL ─┐
-│           ├─ M8a — Minimal memory (3-5 days, thin slice)
-│           │      · BGE-M3 + LanceDB + single-index retrieval
-│           │      · Wired into ws_asr.py with citation surface
-│           │      · Latency baseline for M8 full to beat
-│           │
-│           ├─ M8 — Memory RAG (ID-RAG + HippoRAG 2 + A-MEM/Mem0)
-├─ AUG     ─┘     · Builds on M8a integration shape
+│           ├─ M8 — Memory RAG (incremental, 3 commits inside one milestone)
+│           │      · M8.1 (3-5d): embeddings + LanceDB + retrieve + ws_asr injection
+│           │           ⇒ AI cites corpus ("根據你的 email...")
+│           │      · M8.2 (~7d): identity graph + HippoRAG multi-hop
+│           │           ⇒ AI connects facts (mom + medication + appointment)
+│           │      · M8.3 (3-5d): conversation memory + consolidation (A-MEM / Mem0)
+├─ AUG     ─┘           ⇒ Cross-session memory ("上次你問了...")
 │
 ├─ JUN-JUL ─┐
 │           ├─ M8.5 — Instruction-conditioned TTS fine-tuning (emotion2vec labels → mixed-instruct SFT)
@@ -1243,7 +1243,7 @@ strategic side-note). They have no cloning — we do.
 - M-Consent UI **gates** M7 (server-side consent check before any ingest)
 - License audit **blocks** M7 + M9 code (do BEFORE either ships)
 - D-Retro contract tests **gate** M7 (locks 06/02 fixes from regression)
-- M8a **precedes** M8 (M8 builds on M8a's integration shape)
+- M8.1 / M8.2 / M8.3 are sequential within M8 (each commit additive on prior)
 - M8.5 **blocks** M9 (persona LLM must emit only M8.5 vocabulary)
 - M11 abstraction **precedes** M10 + M12 (swap-ready scaffolding first)
 
