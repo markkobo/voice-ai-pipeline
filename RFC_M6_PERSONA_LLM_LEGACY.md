@@ -400,3 +400,137 @@ defensible.
 | Memory Sessions | First-class Phase 4 feature, not nice-to-have; manifest gap-driven prompts; story-shaped not introspective |
 | Family UI scope | Two modes: Mode A elder self-recording driven by Memory Sessions; Mode B family-member conversation |
 
+---
+
+## 11. GPT-5 review action items (2026-06-03)
+
+External review by GPT-5 (full transcript at `docs/REVIEW_GPT5_2026-06-03.md`)
+surfaced five high-confidence corrections to the M6/M7/M8/M9 plan. Captured
+here so the RFC stays the source of truth.
+
+### 11.1 — License audit BEFORE M7/M9 starts (blocker)
+
+PersonaHub (Tencent) and many HF "OpenCharacter" derivative datasets ship
+under CC BY-NC or NC-like terms — **not legal for commercial persona-LoRA
+training**. MinerU 2.5-Pro and emotion2vec also have license clauses that
+drift across HF/ModelScope mirrors.
+
+**Action.** Before any M7 ingest code or M9 training code lands, produce
+`docs/THIRD_PARTY_LICENSE_AUDIT.md` listing every dataset and model in
+the planned stack with: source URL, current LICENSE text, commercial-use
+verdict, and a fallback if the license excludes us. If PersonaHub is
+out, generate persona corpora in-house via the Open Character Training
+pipeline (arXiv:2511.01689) instead of touching NC data.
+
+**Why now.** Building M7/M9 first and discovering license issues during
+B2B sale prep would require corpus and model rebuilds.
+
+### 11.2 — Mic capture: ScriptProcessorNode → AudioWorkletProcessor (M-Demo+1)
+
+Current `app/static/js/standalone.js` captures via `ScriptProcessorNode`
++ `onaudioprocess`. MDN marks this API deprecated since 2020. Safari/iOS
+and WeChat in-app browser will break it at any release. The intermittent
+"low RMS on phone" symptoms from 2026-05-20 onward are partly attributable
+to this deprecated path interacting badly with mobile AGC.
+
+**Action.** Migrate to `AudioWorkletProcessor` + `SharedArrayBuffer`
+ring-buffer for PCM transport. Test on Safari/iOS, Chrome Android,
+WeChat in-app browser before declaring done. Track in `D-Retro` bucket
+(see ROADMAP §12).
+
+### 11.3 — M-Consent gates M7 (sequencing change)
+
+Original plan ran M-Consent parallel to M7. GPT-5 review (correctly)
+flags that this lets users upload a corpus before a consent record
+exists — which under NO FAKES Act / EU AI Act / CA AB 1836 creates
+retroactive unlearning obligations we can't satisfy with monolithic
+LoRAs.
+
+**Action.** Re-sequence: **M-Consent UI ships in front of M7 corpus
+ingest UI.** Server-side check: `POST /api/corpus/ingest` fails if
+the persona has no current consent record for that source_kind.
+Engineering can proceed in parallel; only the user-facing flow is
+gated.
+
+### 11.4 — Insert M8a (minimal memory) before M8 full ID-RAG
+
+The ID-RAG + HippoRAG 2 + ConversationMemory stack in §3 Phase 1/2 is
+ambitious — 2-3 weeks if everything works. GPT-5 recommends a
+thin-slice first.
+
+**Action.** New milestone **M8a — Minimal Memory** (3-5 days):
+- BGE-M3 embeddings over corpus chunks
+- LanceDB vector store
+- Single-index retrieval (no identity graph yet)
+- Transparent citation surface ("from doc X dated Y")
+- Wired into `ws_asr.py` LLM call with budget-aware token cap
+- Defines the latency baseline + integration shape that full M8
+  builds on
+
+**Why.** Derisks integration cost. If M8a takes 5 days but ID-RAG
+takes 3 weeks, we ship usable memory sooner and learn what doesn't
+work in production before the larger investment.
+
+### 11.5 — Unlearning design spike for M-Consent (1 day)
+
+Current LoRA training is monolithic — revocation = full retrain.
+GPT-5 cites SISA training (Bourtoule et al., USENIX Security 2019) as
+the pattern: shard training data, train per-shard adapters, drop the
+shard whose data was revoked + retrain only that shard.
+
+**Action.** 1-day design spike attached to M-Consent kickoff:
+- Decide shard granularity (per-recording-session? per-week?)
+- Estimate per-shard retrain cost on A10G
+- Publish revocation SLA (e.g., "revoked segment removed from
+  synthesized output within 7 days")
+- Surface honestly in UI per `feedback_fail_loud`
+
+### 11.6 — Broaden M11 BaseTTSEngine to first-class VoxCPM 2 + CosyVoice 2
+
+§3 Phase 3 listed Qwen3-TTS only with IndexTTS-2 as fallback. GPT-5
+review notes that **VoxCPM 2 (OpenBMB/Tsinghua, late-2025/2026) and
+CosyVoice 2/3 are advancing fast**. If either ships a robust per-speaker
+LoRA recipe matching our cloning depth, the Qwen3-TTS moat is at risk
+within 6-12 months.
+
+**Action.** When M11 BaseTTSEngine ships, include `VoxCPM2Engine` and
+`CosyVoice2Engine` as warm-backup implementations (not just stubs). A/B
+against current Qwen3-TTS-LoRA path on the close-relative-recognition
+human eval (M8 §4.0 §5). Promote whichever wins.
+
+### 11.7 — Track / re-examine items (no immediate action, monitor)
+
+| Item | Watch trigger |
+|---|---|
+| Qwen3.5-Omni Talker SFT recipe | HF release page, paper updates to arXiv:2604.15804 |
+| Step-Audio 2 mini fine-tune recipe | GitHub stepfun-ai/Step-Audio2 issue #67 close |
+| Big-platform "legacy voice" feature (Apple/Google) | Apple Personal Voice + on-device LLM news |
+| EU AI Act audible-disclosure mandates | Track delegated acts, NY/TX state bills |
+| Audio watermarking robustness | Meta AudioSeal (2024) field performance after MP3 64kbps + room re-record |
+| Browser audio API breakage | Safari/Chrome release notes for ScriptProcessorNode removal |
+
+### 11.8 — D-Retro bucket (2026-06-02 demo learnings)
+
+Captured fixes from demo prep + day-of that need to be locked in with
+tests and documented in roadmap §12 retrospective:
+
+1. ASR hallucination filter (Qwen3-ASR emits "The first was the first
+   to be built.", "《大明宫词》", short stock phrases on silence).
+   Filter at `app/services/asr/engine.py` recognize() — known-text
+   set + peak<0.12 silence guard.
+2. Listen-only mode: server skips LLM but client was stuck in THINKING
+   because no llm_start/llm_done arrived. Server now always sends
+   asr_result; client transitions to READY (or re-arms via
+   auto-continue) on empty/listen-only.
+3. UI Language dropdown (auto/中文/English) — server injects LANGUAGE
+   directive into system prompt. Persona JSON no longer hard-codes
+   English-only.
+4. Cache-busting `?v={mtime}` on `/static/js/*.js` — Cloudflare edge
+   was caching JS for 4 hours, browsers kept old bundle.
+5. Persona dropdown defaults to "test" (EverHome Demo / Mark) so
+   demo path doesn't need clicking.
+
+**Action.** Add contract tests for each (silence guard, hallucination
+filter, empty-asr handling, language directive). Capture in roadmap
+§12 retrospective. 1-2 days work.
+

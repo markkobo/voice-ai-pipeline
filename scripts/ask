@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# ask — thin wrapper around `llm` that auto-sources the project's .env so
+# OPENAI_API_KEY / GEMINI_API_KEY don't need to live in the shell environment.
+# Usage:
+#   ask -m gpt-5 "plan the M8 RAG schema"
+#   git diff | ask -m gpt-5 -s "Code review. Flag real bugs only."
+#   ask -m gemini-2.5-pro-preview-05-06 -a docs/ROADMAP_2026Q3.md "what's missing?"
+set -euo pipefail
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+set -a
+# shellcheck disable=SC1091
+source "${PROJECT_ROOT}/.env" 2>/dev/null || true
+set +a
+if [[ -x "${PROJECT_ROOT}/.venv/bin/llm" ]]; then
+    exec "${PROJECT_ROOT}/.venv/bin/llm" "$@"
+else
+    exec llm "$@"
+fi

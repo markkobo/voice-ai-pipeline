@@ -1153,6 +1153,17 @@ strategic side-note). They have no cloning — we do.
 
 ## 10. Sequencing at a glance
 
+> **Updated 2026-06-03 per GPT-5 review** (full transcript at
+> `docs/REVIEW_GPT5_2026-06-03.md`, action items in
+> `RFC_M6_PERSONA_LLM_LEGACY.md` §11). Changes from prior version:
+> - **D-Retro** inserted right after M-Demo to harden 06/02 fixes.
+> - **License audit** ships as a blocker before M7 ingest code lands.
+> - **AudioWorklet migration** added to D-Retro (mic capture path).
+> - **M-Consent UI gates M7 ingest UI** (was parallel; now serial-at-UI).
+> - **M8a thin-slice memory** inserted before M8 (3-5 days, derisks).
+> - **M11 BaseTTSEngine** broadens scope to include VoxCPM 2 +
+>   CosyVoice 2 as first-class backends.
+
 ```
 2026
 │
@@ -1160,20 +1171,51 @@ strategic side-note). They have no cloning — we do.
 │           ├─ M-Demo polish (USB mic, retrain SFT, fallback recording)
 ├─ JUN 02  ─┘  ← NY Tech Week demo
 │
+├─ JUN 03  ─┐
+│           ├─ D-Retro (1-2 days)
+│           │   · Contract tests for ASR hallucination filter, listen-only,
+│           │     empty-asr handling, language directive, cache-buster
+│           │   · ScriptProcessorNode → AudioWorkletProcessor migration
+│           │   · §12 retrospective writeup
+│           │
+│           ├─ License audit (~1 day, BLOCKER for M7 + M9)
+│           │   · docs/THIRD_PARTY_LICENSE_AUDIT.md
+│           │   · PersonaHub / OpenCharacter / MinerU 2.5-Pro / emotion2vec /
+│           │     CosyVoice / VoxCPM — confirm commercial-use OK or list
+│           │     synthetic-in-house fallback
+│           │
+│           ├─ Unlearning design spike (1 day, M-Consent prework)
+│           │   · SISA-shard granularity decision (USENIX Security 2019)
+│           │   · Per-shard A10G retrain cost estimate
+│           │   · Revocation SLA draft
+│           │
+│           └─ Release tracking automation (small)
+│               · Watch script: HF/arXiv/GitHub poll for VoxCPM, CosyVoice,
+│                 GLM-4-Voice, Kimi-Audio, Qwen3.5-Omni
+│
 ├─ JUN     ─┐
-│           ├─ M-Consent (consent / revocation / watermark / audit) — parallel to M7
+│           ├─ M-Consent UI ships FIRST (gates M7 ingest UI server-side)
 │           ├─ M7 — Text / ebook / image ingestion (PaddleOCR-VL + MinerU 2.5-Pro)
+│           │      · POST /api/corpus/ingest checks consent record exists
 ├─ JUL     ─┘
 │
 │           ★ M11 — TTS engine abstraction (BUMPED priority — ship here, before M10/M12)
+│              · BaseTTSEngine + Qwen3TTSEngine + VoxCPM2Engine +
+│                CosyVoice2Engine (all first-class, A/B-able)
 │
-├─ JUL     ─┐
+├─ JUN-JUL ─┐
+│           ├─ M8a — Minimal memory (3-5 days, thin slice)
+│           │      · BGE-M3 + LanceDB + single-index retrieval
+│           │      · Wired into ws_asr.py with citation surface
+│           │      · Latency baseline for M8 full to beat
+│           │
 │           ├─ M8 — Memory RAG (ID-RAG + HippoRAG 2 + A-MEM/Mem0)
-├─ AUG     ─┘
+├─ AUG     ─┘     · Builds on M8a integration shape
 │
-├─ JUN     ─┐
+├─ JUN-JUL ─┐
 │           ├─ M8.5 — Instruction-conditioned TTS fine-tuning (emotion2vec labels → mixed-instruct SFT)
 ├─ JUL     ─┘    ← locks emotion vocabulary; BLOCKS M9
+│              · Real talker.model LoRA pulled forward as Week-0 subtask
 │
 ├─ JUL     ─┐
 │           ├─ M9 — OpenCharacter persona LoRA + Qwen 3 8B local + CharacterEval gate
@@ -1186,19 +1228,27 @@ strategic side-note). They have no cloning — we do.
 ├─ AUG     ─┐
 │           ├─ M12a — Step-Audio 2 mini eval + Qwen3.5-Omni-Light cloning spike
 ├─ SEP     ─┘    (highest-leverage single action; may collapse M12+M13)
+│              · Also bake-off Kimi-Audio-7B + LLaMA-Omni 2 as M12 base candidates
 │
 ├─ SEP     ─┐
-│           ├─ M12 — Hybrid pipeline (Qwen 2.5 Omni 7B + IndexTTS-2/Qwen3-TTS)
+│           ├─ M12 — Hybrid pipeline (winner from M12a bake-off)
 ├─ OCT     ─┘   — IF M12a spikes inconclusive
 │
 └─ Q4 +     M13 — OSS E2E S2S migration (Step-Audio 2 primary; Chroma watch)
 ```
 
-M-Consent and M7 run in parallel (different code surfaces). M8.5 (TTS
-instruction conditioning) sits between M8 and M9 and **blocks M9** —
-the persona LLM must learn to emit only the emotion vocabulary M8.5
-locks. M8 and M8.5 can run in parallel (different code paths, share
-corpus from M7). M12a precedes M12 and may obviate it.
+**Hard dependency edges:**
+- M-Consent UI **gates** M7 (server-side consent check before any ingest)
+- License audit **blocks** M7 + M9 code (do BEFORE either ships)
+- D-Retro contract tests **gate** M7 (locks 06/02 fixes from regression)
+- M8a **precedes** M8 (M8 builds on M8a's integration shape)
+- M8.5 **blocks** M9 (persona LLM must emit only M8.5 vocabulary)
+- M11 abstraction **precedes** M10 + M12 (swap-ready scaffolding first)
+
+**Parallelizable edges:**
+- M-Consent backend + M7 engine work (only the UI gating is serial)
+- M8 + M8.5 (different code paths, share M7 corpus)
+- M12a may run alongside M9/M10 (different person if team grows)
 
 ---
 
@@ -1243,14 +1293,70 @@ roadmap reflects observed behavior, not aspirational design.
 
 ---
 
-## 12. Demo retrospective (2026-06-02) — placeholder
+## 12. Demo retrospective (2026-06-02)
 
-To be filled post-demo. Expected sections:
-- What worked (technical / audience reaction).
-- What broke (live failures, recovery).
-- What the audience asked about (signal for product positioning).
-- Roadmap deltas (anything from §3 that the demo experience invalidates
-  or reprioritizes).
+Demo shipped. NY Tech Week audience ~80-90 vibe-coding-curious. 8 minutes,
+2nd of 2 demoers, persona = "EverHome Demo (Mark)". Recording produced
+post-demo via Loom Chrome-tab capture (Share-tab-audio path).
+
+### What worked
+
+- **Voice clone reveal landed.** Audience reacted at the "let AI continue"
+  moment when the AI continued the founder's spoken intro in his voice.
+- **Persona / listener switch** showed observable tone difference between
+  Child / Reporter / Friend with same voice.
+- **Disclosure moment** — "Are you a real person?" → AI confirmed clone
+  identity. Got nods from audience; sets up M-Consent narrative naturally.
+- **Cloudflare named tunnel** (`everhome.mkk.dev`) held the whole demo;
+  no 524 timeouts despite the longer TTS preview calls.
+- **Single-page chat UI** without Gradio was fast enough; no first-paint
+  hiccups on the conference WiFi.
+
+### What broke (and was fixed live or pre-demo)
+
+| Symptom | Root cause | Fix |
+|---|---|---|
+| ASR fired "The first was the first to be built." on silence | Qwen3-ASR (Whisper-family) hallucinates on near-silent buffers | Hallucination-text set + peak-amplitude<0.12 silence guard in `engine.py recognize()` |
+| Listen-only mode stuck in "AI thinking…" forever after first turn | Server skipped LLM but never sent any signal → client FSM had no transition trigger | Server always sends `asr_result` even when empty; client re-arms mic on listen-only / empty-asr |
+| Language dropdown changes didn't reach server | Browser cached `standalone.js` for 4 hours (Cloudflare edge `max-age=14400` overrode our `no-cache` middleware) | Added `?v={mtime}` query string to script tag; bumps on every deploy |
+| English replies sound fast / flat (not founder's flow) | TTS LoRA trained on Chinese audio only — prosody is Chinese, mapped onto English tokens | Deferred fix; Mark to record English audio when time allows. Workaround: UI Language dropdown lets the user pin to Chinese for natural prosody |
+| Persona dropdown defaulted to xiao_s on demo machine | HTML hardcoded default + JS fallback both prefer xiao_s | Both changed to default to `test` (EverHome Demo / Mark) |
+| ASR hallucinations bled into LLM call | Server forwarded any non-empty ASR text to LLM | Empty-text drop in `commit_utterance` handler + hallucination filter |
+
+### What the audience asked about
+
+- "Is the voice really running locally?" — yes; on the GPU box, not a
+  cloud API. (Currently true for TTS only; LLM is still OpenAI until M9.)
+- "Privacy?" — confirms B2B compliance angle is what they zero in on.
+  Reinforces M-Consent priority.
+- "How much?" — no price asked-and-told (consumer-appliance range, no
+  subscription, no fees). Validates appliance positioning.
+- "Why you?" — short ex-Bloomberg / ex-Google + personal motivation.
+  Don't oversell.
+
+### Roadmap deltas (this section's writeup)
+
+Captured in detail in §10 and `RFC_M6_PERSONA_LLM_LEGACY.md` §11:
+
+- **D-Retro bucket** (this section's fixes) → contract tests + AudioWorklet
+  migration. 1-2 days. Locked in before M7 starts.
+- **License audit** is a blocker before M7 / M9. ~1 day.
+- **M-Consent UI gates M7** (was parallel, now serial-at-UI-layer).
+- **M8a thin-slice memory** (3-5 days) inserted before full M8.
+- **Unlearning design spike** (SISA training pattern) as M-Consent prework.
+- **M11 BaseTTSEngine** broadens to include VoxCPM 2 + CosyVoice 2 as
+  first-class backends (not stubs).
+
+### Anti-pattern observed
+
+I (Claude) shipped a server-side `RMS < 0.005` silence guard in
+`state_manager.commit_utterance` mid-demo that dropped real phone-mic
+speech (low AGC output) → empty ASR → client stuck in THINKING. Reverted
+within minutes. Lesson: **buffer-averaged RMS is the wrong discriminator
+for silence vs speech with AGC-amplified mobile audio.** Peak amplitude
+in the ASR engine + known-text filter on the output is the working
+discriminator (validated against `《大明宫词》` peak=0.086 and `Hi, I'm Mark...`
+peak=0.517 in the live log).
 
 ---
 
