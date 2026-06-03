@@ -1,6 +1,7 @@
 """ASR (Automatic Speech Recognition) engine module."""
 import asyncio
 import logging
+import re
 import time
 import numpy as np
 import struct
@@ -8,6 +9,52 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
+
+
+# Peak amplitude below which we treat the whole buffer as silence/noise.
+# Empirically 0.12 separates AGC'd mic-noise floor (~0.09) from real
+# speech (>=0.15 even whispered). See engine.py:158-165 for the demo-day
+# observation set. Real-speech-low-AGC is the false-negative risk; we
+# accept it because the alternative (letting ASR hallucinations through)
+# is worse for downstream LLM behavior.
+_SILENCE_PEAK_THRESHOLD = 0.12
+
+# Stock phrases Qwen3-ASR / Whisper-family models emit when fed silent
+# audio. Dropped ONLY when peak is also below silence threshold — a loud
+# "Okay" or "Thank you" is real speech and must pass through.
+_HALLUCINATION_TEXTS = frozenset({
+    "the first was the first to be built",
+    "the",
+    "thank you",
+    "thanks for watching",
+    "bye",
+    "you",
+    "thanks",
+    "so",
+    "okay",
+    "ok",
+    ".",
+    "",
+    "大明宫词",
+    "小猪佩奇",
+})
+
+# Punctuation set used for normalization before comparing against
+# _HALLUCINATION_TEXTS. Covers ASCII, CJK fullwidth, and the CJK title
+# brackets («》「」『』〈〉【】) that wrap stock phrases like 《大明宫词》.
+_HALLUC_NORMALIZE_STRIP = " .!?,;:。！？，；：…《》「」『』〈〉【】（）()[]\"'`"
+
+
+def _normalize_for_halluc_match(text: str) -> str:
+    """Lowercase + strip wrapping punctuation + collapse whitespace.
+    Empty result is intentional — caller checks against _HALLUCINATION_TEXTS
+    which includes the empty string for the case where ASR returns "."
+    style noise tokens."""
+    if not text:
+        return ""
+    stripped = text.strip().strip(_HALLUC_NORMALIZE_STRIP)
+    stripped = re.sub(r"\s+", " ", stripped)
+    return stripped.lower()
 
 
 def set_asr_training_lock(active: bool) -> None:
@@ -152,43 +199,27 @@ class Qwen3ASR(BaseASR):
         print(f"[ASR] result={result}, text='{text}'")
 
         # Hallucination filter — Qwen3-ASR (like Whisper-family models) emits
-        # a fixed set of stock phrases when fed near-silent audio. We've
-        # observed these specifically on demo-day with quiet phone mics
-        # (2026-06-02). Peak amplitude is the better discriminator than
-        # mean_abs: real speech reliably exceeds max_abs > 0.15 even when
-        # whispered, but mic noise (AGC noise floor) tops out around 0.1.
+        # a fixed set of stock phrases when fed near-silent audio. The
+        # discriminator is **peak amplitude**, not the text. Real loud "Okay"
+        # peaks easily above 0.12; the same word emerging from a silent
+        # buffer is a hallucination that peaks below 0.12. The known-text
+        # set is a secondary signal: when peak is borderline AND the text
+        # is in the stock-phrase set, drop. When peak is comfortably above
+        # the speech floor, keep — even if the text matches a stock phrase.
         # Empirical observations from 2026-06-02 demo prep:
-        #   real "嗯。"     max=1.000, mean_abs=0.028  → kept
-        #   real "Okay..." max=0.187, mean_abs=0.005  → kept
-        #   halluc "The."  max=0.086, mean_abs=0.008  → drop
-        #   halluc "《大明宫词》" max=0.109, mean_abs=0.009 → drop
-        #   halluc "speed dough..." max=0.009, mean_abs=0.0005 → drop
+        #   real "嗯。"     peak=1.000, mean_abs=0.028  → kept
+        #   real "Hi I'm Mark..." peak=0.517, mean_abs=0.022 → kept
+        #   halluc "The."  peak=0.086, mean_abs=0.008  → drop (peak<0.12)
+        #   halluc "《大明宫词》" peak=0.109, mean_abs=0.009 → drop (peak<0.12)
+        #   halluc "speed dough..." peak=0.009, mean_abs=0.0005 → drop (peak<0.12)
         audio_peak = max(abs(audio_min), abs(audio_max))
-        if text:
-            stripped = text.strip().rstrip(".!?,。！？，").lower()
-            HALLUCINATION_TEXTS = {
-                "the first was the first to be built",
-                "the",
-                "thank you",
-                "thanks for watching",
-                "bye",
-                "you",
-                "thanks",
-                "so",
-                "okay",
-                "ok",
-                ".",
-                "",
-                "《大明宫词》",
-                "大明宫词",
-            }
-            if stripped in HALLUCINATION_TEXTS:
+        if text and audio_peak < _SILENCE_PEAK_THRESHOLD:
+            stripped = _normalize_for_halluc_match(text)
+            if stripped in _HALLUCINATION_TEXTS:
                 print(f"[ASR] HALLUCINATION DROPPED: '{text}' (peak={audio_peak:.3f} mean_abs={audio_mean:.4f})")
-                text = ""
-            elif audio_peak < 0.12:
-                # Peak below real-speech floor → silence/noise.
+            else:
                 print(f"[ASR] SILENCE DROPPED: '{text}' (peak={audio_peak:.3f} mean_abs={audio_mean:.4f})")
-                text = ""
+            text = ""
 
         return {
             "text": text,
