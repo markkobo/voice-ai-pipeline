@@ -1175,7 +1175,9 @@ strategic side-note). They have no cloning — we do.
 │           ├─ D-Retro (1-2 days)
 │           │   · Contract tests for ASR hallucination filter, listen-only,
 │           │     empty-asr handling, language directive, cache-buster
-│           │   · ScriptProcessorNode → AudioWorkletProcessor migration
+│           │   · [DEFERRED] ScriptProcessorNode → AudioWorkletProcessor —
+│           │     upload-mode is current path; revisit if Safari/iOS or
+│           │     live-browser-capture re-enters critical path
 │           │   · §12 retrospective writeup
 │           │
 │           ├─ License audit (~1 day, BLOCKER for M7 + M9)

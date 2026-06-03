@@ -425,7 +425,7 @@ pipeline (arXiv:2511.01689) instead of touching NC data.
 **Why now.** Building M7/M9 first and discovering license issues during
 B2B sale prep would require corpus and model rebuilds.
 
-### 11.2 — Mic capture: ScriptProcessorNode → AudioWorkletProcessor (M-Demo+1)
+### 11.2 — Mic capture: ScriptProcessorNode → AudioWorkletProcessor (DEFERRED 2026-06-03)
 
 Current `app/static/js/standalone.js` captures via `ScriptProcessorNode`
 + `onaudioprocess`. MDN marks this API deprecated since 2020. Safari/iOS
@@ -433,10 +433,15 @@ and WeChat in-app browser will break it at any release. The intermittent
 "low RMS on phone" symptoms from 2026-05-20 onward are partly attributable
 to this deprecated path interacting badly with mobile AGC.
 
-**Action.** Migrate to `AudioWorkletProcessor` + `SharedArrayBuffer`
-ring-buffer for PCM transport. Test on Safari/iOS, Chrome Android,
-WeChat in-app browser before declaring done. Track in `D-Retro` bucket
-(see ROADMAP §12).
+**Status: DEFERRED (2026-06-03 user direction).** Current path uses
+upload-mode for the demo workflow, not live browser capture in the
+critical path. Risk of break-during-migration outweighs benefit while
+the API is still working in Chrome desktop. Revisit when (a) we see a
+real Safari/iOS user case, (b) we add live browser-capture personas
+back into the primary product flow, or (c) MDN/Chrome deprecates the
+API to "removed".
+
+Tracked here; not actioned now.
 
 ### 11.3 — M-Consent gates M7 (sequencing change)
 
