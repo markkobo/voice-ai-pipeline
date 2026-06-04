@@ -18,7 +18,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, ConfigDict
 
 from app.api._dependencies import get_corpus_service, get_ingestion_service
@@ -31,6 +31,13 @@ from app.api._errors import (
     CorpusTooLargeError,
     InvalidCorpusIdError,
     UnsupportedCorpusFormatError,
+)
+from app.api.consent import get_consent_service
+from app.services.consent import (
+    ConsentService,
+    NoActiveConsentError,
+    ConsentRecordRevokedError,
+    ConsentRecordExpiredError,
 )
 from app.services.corpus import (
     CorpusItem,
@@ -96,7 +103,28 @@ async def api_upload_corpus(
     persona_speaker_alias: Optional[str] = Form(None),
     notes: Optional[str] = Form(None),
     service: CorpusService = Depends(get_corpus_service),
+    consent: ConsentService = Depends(get_consent_service),
 ) -> UploadResponse:
+    # M-Consent gate: refuse upload unless an active consent record
+    # covers persona_id for purpose=rag_corpus. RFC §M-Consent + GPT-5
+    # review §11.3: M-Consent UI gates M7 ingest UI server-side so we
+    # don't accumulate corpus data we may not be allowed to process.
+    try:
+        consent.assert_allowed(persona_id, purpose="rag_corpus")
+    except NoActiveConsentError:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"No consent record covers persona {persona_id!r} for "
+                f"purpose 'rag_corpus'. Create one via POST /api/consent/ "
+                f"before uploading."
+            ),
+        )
+    except ConsentRecordRevokedError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ConsentRecordExpiredError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+
     file_bytes = await file.read()
     try:
         item = service.upload(
