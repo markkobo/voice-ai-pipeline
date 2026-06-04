@@ -170,6 +170,17 @@ class JsonConsentRepository:
                 rec = self.get_or_none(persona_id, consent_id)
                 if rec is not None:
                     out.append(rec)
+                else:
+                    # Index entry but no record on disk = inconsistent
+                    # state (mid-write crash, manual rm, etc.). Surface
+                    # loudly per `feedback_fail_loud` memory + Gemini
+                    # review f28120b §latent-3.
+                    log.warning(
+                        "Inconsistent consent state: persona=%s consent_id=%s "
+                        "in index but record file missing",
+                        persona_id,
+                        consent_id,
+                    )
         # Stable order — newest first by created_at.
         out.sort(key=lambda r: r.created_at, reverse=True)
         return out

@@ -109,23 +109,35 @@ async def api_upload_corpus(
     # covers persona_id for purpose=rag_corpus. RFC §M-Consent + GPT-5
     # review §11.3: M-Consent UI gates M7 ingest UI server-side so we
     # don't accumulate corpus data we may not be allowed to process.
-    try:
-        consent.assert_allowed(persona_id, purpose="rag_corpus")
-    except NoActiveConsentError:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                f"No consent record covers persona {persona_id!r} for "
-                f"purpose 'rag_corpus'. Create one via POST /api/consent/ "
-                f"before uploading."
-            ),
-        )
-    except ConsentRecordRevokedError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-    except ConsentRecordExpiredError as e:
-        raise HTTPException(status_code=403, detail=str(e))
+    #
+    # We check TWICE — once early (fast-fail before reading the body)
+    # and once immediately before the disk write (tightens the TOCTTOU
+    # window flagged in Gemini review of f28120b). Consent could be
+    # revoked between the two checks; the second check ensures we don't
+    # write data committed BEFORE the revocation but AFTER it was visible.
+    def _check_consent() -> None:
+        try:
+            consent.assert_allowed(persona_id, purpose="rag_corpus")
+        except NoActiveConsentError:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"No consent record covers persona {persona_id!r} for "
+                    f"purpose 'rag_corpus'. Create one via POST /api/consent/ "
+                    f"before uploading."
+                ),
+            )
+        except ConsentRecordRevokedError as e:
+            raise HTTPException(status_code=403, detail=str(e))
+        except ConsentRecordExpiredError as e:
+            raise HTTPException(status_code=403, detail=str(e))
 
+    _check_consent()
     file_bytes = await file.read()
+    # Re-check after the body is in memory — file uploads can take
+    # seconds for large files; consent could be revoked in that window.
+    _check_consent()
+
     try:
         item = service.upload(
             persona_id=persona_id,

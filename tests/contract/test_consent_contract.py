@@ -263,3 +263,108 @@ class TestCorpusUploadGate:
         )
         r = self._upload(client)
         assert r.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Expired-consent path (Gemini review f28120b §tests-1)
+# ---------------------------------------------------------------------------
+class TestExpiredConsent:
+    def test_expired_consent_blocks_check(self, client):
+        """A consent record with expires_at in the past returns
+        allowed=false even though status is still 'active' on disk
+        (expiry is computed at read time)."""
+        from datetime import datetime, timedelta, timezone
+        payload = _make_consent_payload(
+            expires_at=(datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+        )
+        client.post("/api/consent/", json=payload)
+        r = client.get("/api/consent/test/check", params={"purpose": "rag_corpus"})
+        assert r.json()["allowed"] is False, r.text
+
+    def test_expired_consent_blocks_upload(self, client):
+        from datetime import datetime, timedelta, timezone
+        payload = _make_consent_payload(
+            expires_at=(datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+        )
+        client.post("/api/consent/", json=payload)
+        r = client.post(
+            "/api/corpus/upload",
+            files={"file": ("notes.txt", b"x", "text/plain")},
+            data={"persona_id": "test", "kind": "text"},
+        )
+        assert r.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Recording-ID specific consent (Gemini review f28120b §tests-2)
+# ---------------------------------------------------------------------------
+class TestRecordingScopedConsent:
+    """When recording_id is set, the consent only applies to that
+    recording. A persona-wide consent (recording_id=None) is the
+    fallback."""
+
+    def test_persona_wide_consent_covers_specific_recording_query(self, client):
+        """A consent with recording_id=None covers ANY recording_id query."""
+        client.post("/api/consent/", json=_make_consent_payload())  # recording_id=None by default
+        r = client.get(
+            "/api/consent/test/check",
+            params={"purpose": "rag_corpus", "recording_id": "rec_xyz"},
+        )
+        assert r.json()["allowed"] is True
+
+    def test_recording_specific_consent_does_not_cover_other_recording(self, client):
+        payload = _make_consent_payload()
+        payload["recording_id"] = "rec_A"
+        client.post("/api/consent/", json=payload)
+        # Asking about rec_B → not covered
+        r = client.get(
+            "/api/consent/test/check",
+            params={"purpose": "rag_corpus", "recording_id": "rec_B"},
+        )
+        assert r.json()["allowed"] is False
+
+    def test_recording_specific_consent_covers_its_own_recording(self, client):
+        payload = _make_consent_payload()
+        payload["recording_id"] = "rec_A"
+        client.post("/api/consent/", json=payload)
+        r = client.get(
+            "/api/consent/test/check",
+            params={"purpose": "rag_corpus", "recording_id": "rec_A"},
+        )
+        assert r.json()["allowed"] is True
+
+
+# ---------------------------------------------------------------------------
+# Post-mortem expiry cap (Gemini review f28120b §tests-3)
+# ---------------------------------------------------------------------------
+class TestPostMortemExpiryCap:
+    def test_post_mortem_with_71_year_expiry_rejected(self, client):
+        from datetime import datetime, timedelta, timezone
+        payload = _make_consent_payload(
+            relationship="estate_executor",
+            persona_state="post_mortem",
+            expires_at=(datetime.now(timezone.utc) + timedelta(days=365 * 71)).isoformat(),
+        )
+        r = client.post("/api/consent/", json=payload)
+        assert r.status_code == 400, r.text
+        assert "70-year cap" in r.text or "AB 1836" in r.text
+
+    def test_post_mortem_with_50_year_expiry_accepted(self, client):
+        from datetime import datetime, timedelta, timezone
+        payload = _make_consent_payload(
+            relationship="estate_executor",
+            persona_state="post_mortem",
+            expires_at=(datetime.now(timezone.utc) + timedelta(days=365 * 50)).isoformat(),
+        )
+        r = client.post("/api/consent/", json=payload)
+        assert r.status_code == 201, r.text
+
+    def test_pre_mortem_with_unbounded_expiry_accepted(self, client):
+        """Pre-mortem consents have no expiry cap (the persona is
+        still alive to revoke). Only post-mortem hits the 70-year cap."""
+        from datetime import datetime, timedelta, timezone
+        payload = _make_consent_payload(
+            expires_at=(datetime.now(timezone.utc) + timedelta(days=365 * 100)).isoformat(),
+        )
+        r = client.post("/api/consent/", json=payload)
+        assert r.status_code == 201, r.text

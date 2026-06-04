@@ -210,13 +210,15 @@ class ConsentService:
                 f"purpose={purpose!r}"
             )
 
-        # Among candidates, find the freshest ACTIVE one.
-        active = [
-            r for r in candidates
-            if r.current_status(now) == ConsentStatus.ACTIVE
-        ]
+        # Among candidates, find the freshest ACTIVE one. Sort here so
+        # the service doesn't depend on repository.list() ordering
+        # (Gemini review f28120b §latent-2 — fragile coupling).
+        active = sorted(
+            (r for r in candidates if r.current_status(now) == ConsentStatus.ACTIVE),
+            key=lambda r: r.created_at,
+            reverse=True,
+        )
         if active:
-            # Most recent first (list() already sorts desc by created_at).
             return active[0]
 
         # No active — surface the most informative failure.
