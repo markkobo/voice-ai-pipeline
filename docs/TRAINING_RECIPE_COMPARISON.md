@@ -169,3 +169,116 @@ is still correct but our implementation of the injection needs adjustment.
 3. If no, document the limitation in `RFC_M6_PERSONA_LLM_LEGACY.md` and
    accept that V12-class fine-tunes will sound somewhat like the
    speaker but with a residual Mandarin default accent.
+
+---
+
+## Gemini 2.5 Pro review revisions (2026-06-09)
+
+Full review at `docs/REVIEW_V13_PLAN_GEMINI_2026-06-09.md`. Diagnosis
+confirmed correct (full talker is where accent lives, frozen talker
+leaks Mainland prior). Five plan changes BEFORE we touch implementation:
+
+### Change 1 — try LoRA on talker FIRST, full SFT only as fallback
+
+Full-talker SFT is "the sledgehammer" — most likely path to catastrophic
+forgetting. Try LoRA on the talker's attention + FFN layers first
+(mirrors our successful M9 LoRA approach for persona LLMs). Only escalate
+to full SFT if LoRA's prosody/accent capacity is insufficient.
+
+### Change 2 — DO NOT use Qwen3-ASR for transcripts
+
+Circular bias: Qwen3-ASR has its own Mainland accent priors. Transcribing
+our Taiwan-accented speaker with Qwen3-ASR risks getting transcripts
+where Taiwan vocabulary has been "normalized" to Mainland equivalents.
+Training on those transcripts would reinforce the exact problem we're
+trying to fix.
+
+**Use human-verified transcripts.** The cheapest path: hand-transcribe a
+small batch (50-100 chunks, ~30 min of work) to bootstrap the dataset,
+then expand later. Or use Whisper (different bias geometry) and
+spot-check.
+
+### Change 3 — verify the LR=1e-7 hyperparameter against actual script
+
+Their `1e-7` is 100x below the conventional default. Could be a typo in
+their config that they never noticed, OR genuinely necessary because
+full-talker gradients explode at higher rates. **Open their actual
+training script (not just the config) and confirm the LR is what runs.**
+If it's actually `1e-5`, our analysis was wrong; if it's actually `1e-7`,
+note the instability that drove them there.
+
+### Change 4 — speaker-embedding position 6 is brittle reverse-engineering
+
+The `input_codec_embedding[:, 6, :]` injection point is not documented in
+the official Qwen3-TTS code; it's something the external repo found by
+inspection. Could break silently on the next Qwen3-TTS release. Before
+relying on this:
+- Pin the exact Qwen3-TTS version we use
+- Document the position-6 dependency as a known fragility
+- Plan a regression test: train V13.1 on Qwen3-TTS-snapshot-N, then
+  retrain V13.2 on Qwen3-TTS-snapshot-N+1 and compare. If outputs
+  diverge, the injection point needs adjustment.
+
+### Change 5 — n=10 A/B test is statistically weak
+
+n=10 with 7/10 win = p≈0.17 (not significant). Bump to **n ≥ 30**
+prompts for the blind A/B (split: 15 Taiwan-vocab, 15 generic). With
+n=30 and the same 70% win-rate, p≈0.02 → defensible call.
+
+### Change 6 — additional failure modes to watch for
+
+Beyond "talker forgets base model on out-of-domain prompts" already in
+the risk table:
+
+- **Loss of linguistic coherence** on complex grammar / long sentences
+  (small SFT corpus often = simple spoken sentences only)
+- **Acoustic quality collapse** — artifacts, higher noise floor on
+  in-domain prompts
+- **Prosodic monotony** — model overfits to narrow emotional range in
+  the training set
+- **Punctuation blindness** — model forgets how to interpret commas,
+  question marks, etc., produces run-on sentences
+
+Add explicit smoke tests for each: 5 long sentences, 5 with varied
+punctuation, 5 with explicit emotion tags. Compare V13 vs V12 + base
+Qwen3-TTS on each.
+
+### Change 7 — DO THIS FIRST: 1-hour gradient check (kills or confirms V13)
+
+Before any data pipeline work, run a minimal script:
+
+1. One hand-transcribed `(text, audio)` pair
+2. Implement the proposed `sft_text` forward + backward pass
+3. Verify:
+   - `talker.model.layers[i].weight.grad` is not None and non-zero for
+     multiple layers
+   - Speaker-embedding injection at position 6 doesn't cause NaNs
+   - Loss decreases monotonically over ~10 training steps
+4. If gradients don't flow OR model is unstable, V13 is **dead on
+   arrival** — no point building the ASR / dataset / hyperparameter
+   tuning around a training loop that doesn't work.
+
+This is the cheapest possible test of the core hypothesis. ~1 hour of
+work to know whether to invest the next 3-5 days.
+
+---
+
+## Revised "what to do TODAY" (after Gemini review)
+
+1. **(1 hour) Gradient check.** Implement the V13 forward+backward on
+   one hand-transcribed sample. Verify talker layer gradients + injection
+   point stability. **If this fails, stop — V13 is dead.**
+2. **(1 hour) Read external repo's actual training script** (not just
+   config). Confirm whether LR=1e-7 is real and whether they apply LoRA
+   somewhere we missed.
+3. **(if step 1 + 2 pass) Hand-transcribe 50-100 chunks** of existing
+   Mark recordings. ~30-60 min of human work; dramatically lower data-
+   bias risk vs ASR-transcribed.
+4. **(if all of above) Implement LoRA-on-talker first** (not full SFT).
+   Train V13-lora vs V13-sft head-to-head on a small subset before
+   committing to full runs.
+5. **n=30 blind A/B**, not n=10, with Taiwan-vocab / generic / complex-
+   grammar / varied-punctuation buckets.
+
+Total revised effort: 5-7 days (was 3-5), but ~80% lower risk of
+silently wasting the time.
