@@ -164,9 +164,16 @@ def proposed_forward(
     outputs = talker(inputs_embeds=inputs_embeds, labels=labels)
     main_loss = outputs.loss
 
-    # 8. Sub-talker auxiliary loss on a single codec frame mid-utterance.
-    #    Use the (rough) mean of inputs_embeds along time as talker_hidden_states.
-    talker_hidden = inputs_embeds.mean(dim=1)  # (B, hidden)
+    # 8. Sub-talker auxiliary loss — use the talker's ACTUAL output
+    #    hidden state, not an input-embedding approximation (Gemini
+    #    review of fbe85f2 §2). Qwen3TTSTalkerOutputWithPast carries
+    #    `past_hidden=hidden_states[:, -1:, :]` (modeling_qwen3_tts.py:1740)
+    #    — the last-timestep hidden state from the talker's transformer
+    #    body. Semantically: this is what the model would use to predict
+    #    the NEXT codec frame, which is exactly what
+    #    forward_sub_talker_finetune is teaching.
+    talker_hidden = outputs.past_hidden.squeeze(1)  # (B, hidden)
+
     # forward_sub_talker_finetune wants (B, num_code_groups) for codec_ids.
     mid = codec_ids.shape[1] // 2
     one_frame_codecs = codec_ids[:, mid, :].to(device)
@@ -193,6 +200,8 @@ def main() -> int:
     p.add_argument("--grad_accum", type=int, default=4)
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--lora_rank", type=int, default=16)
+    p.add_argument("--lora_alpha", type=int, default=None,
+                   help="LoRA alpha. Default: 2 * lora_rank (PEFT convention)")
     p.add_argument("--max_records", type=int, default=None,
                    help="cap on number of records for trial run")
     p.add_argument("--ref_audio", type=str, default=None,
@@ -239,11 +248,12 @@ def main() -> int:
         p_.requires_grad_(False)
 
     # Apply LoRA to the talker
-    log.info("Applying LoRA (rank=%d)...", args.lora_rank)
+    lora_alpha = args.lora_alpha if args.lora_alpha is not None else 2 * args.lora_rank
+    log.info("Applying LoRA (rank=%d, alpha=%d)...", args.lora_rank, lora_alpha)
     from peft import LoraConfig, get_peft_model
     lora_cfg = LoraConfig(
         r=args.lora_rank,
-        lora_alpha=2 * args.lora_rank,
+        lora_alpha=lora_alpha,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
                         "gate_proj", "up_proj", "down_proj"],
         lora_dropout=0.0,
@@ -399,7 +409,7 @@ def main() -> int:
         "grad_accum": args.grad_accum,
         "lr": args.lr,
         "lora_rank": args.lora_rank,
-        "lora_alpha": 2 * args.lora_rank,
+        "lora_alpha": lora_alpha,
         "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj",
                            "gate_proj", "up_proj", "down_proj"],
         "dataset_records": len(dataset.records),
