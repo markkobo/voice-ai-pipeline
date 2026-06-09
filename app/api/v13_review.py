@@ -144,11 +144,17 @@ async def api_v13_verdicts(persona: str = Query(...)):
 
 
 @router.get("/api/v13_review/ab_smoke")
-async def api_v13_ab_smoke(persona: str = Query("test")):
+async def api_v13_ab_smoke(
+    persona: str = Query("test"),
+    version: str = Query("v13.1-lora"),
+):
     """List the V12 + V13 audio pairs produced by scripts/v13_ab_smoke.py."""
-    ab_dir = _persona_root(persona) / "ab_smoke"
+    # Try version-tagged subdir first, then legacy unversioned dir.
+    ab_dir = _persona_root(persona) / f"ab_smoke_{version}"
     if not ab_dir.exists():
-        raise HTTPException(404, f"no ab_smoke output for {persona}")
+        ab_dir = _persona_root(persona) / "ab_smoke"
+    if not ab_dir.exists():
+        raise HTTPException(404, f"no ab_smoke output for {persona} (tried both ab_smoke_{version} and ab_smoke)")
     pairs = {}
     for wav in sorted(ab_dir.glob("*.wav")):
         # Files: <idx>_<label>_v12.wav and <idx>_<label>_v13.wav
@@ -182,20 +188,32 @@ async def api_v13_ab_smoke(persona: str = Query("test")):
 
 
 @router.get("/api/v13_review/ab_audio/{persona}/{filename}")
-async def api_v13_ab_audio(persona: str, filename: str):
+async def api_v13_ab_audio(
+    persona: str,
+    filename: str,
+    version: str = Query("v13.1-lora"),
+):
     """Serve a WAV from the ab_smoke directory."""
-    full = _persona_root(persona) / "ab_smoke" / filename
+    # Try version-tagged, fall back to legacy
+    candidates = [
+        _persona_root(persona) / f"ab_smoke_{version}" / filename,
+        _persona_root(persona) / "ab_smoke" / filename,
+    ]
+    full = next((p for p in candidates if p.exists()), None)
+    if full is None:
+        raise HTTPException(404, "not found")
     try:
         full.resolve().relative_to(_persona_root(persona).resolve())
     except ValueError:
         raise HTTPException(400, "invalid path")
-    if not full.exists():
-        raise HTTPException(404, "not found")
     return FileResponse(str(full), media_type="audio/wav")
 
 
 @router.get("/ui/v13_ab", response_class=HTMLResponse)
-async def ui_v13_ab(persona: str = Query("test")):
+async def ui_v13_ab(
+    persona: str = Query("test"),
+    version: str = Query("v13.1-lora"),
+):
     """Side-by-side V12 vs V13 listening + blind A/B picker."""
     html = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><title>V13 A/B · __PERSONA__</title>
@@ -216,8 +234,8 @@ audio{width:100%}
 .pick button.v12{background:#3a5a3a}
 </style></head>
 <body>
-<h1>V13 A/B — V12 (current production) vs V13 (full talker LoRA)</h1>
-<div class="meta">Persona <code>__PERSONA__</code>. Listen to both, mark which one sounds more like Mark.</div>
+<h1>V13 A/B — V12 (current production) vs <span id="ver">__VERSION__</span></h1>
+<div class="meta">Persona <code>__PERSONA__</code>, version <code>__VERSION__</code>. Listen to both, mark which one sounds more like Mark.</div>
 <div class="note">
 <strong>⚠ Heads-up:</strong> Every V13 clip is exactly <strong>15.92 s</strong> — generation hit the
 <code>max_new_tokens=200</code> cap because the V13 LoRA did NOT learn to emit the codec EOS token. So
@@ -228,9 +246,10 @@ expect V13 to start with the right utterance and then keep going past where it s
 
 <script>
 const persona = new URLSearchParams(location.search).get("persona") || "__PERSONA__";
+const version = new URLSearchParams(location.search).get("version") || "__VERSION__";
 let picks = {};
 async function init(){
-  const res = await fetch(`/api/v13_review/ab_smoke?persona=${encodeURIComponent(persona)}`);
+  const res = await fetch(`/api/v13_review/ab_smoke?persona=${encodeURIComponent(persona)}&version=${encodeURIComponent(version)}`);
   const data = await res.json();
   if(!data.pairs || data.pairs.length === 0){
     document.getElementById("content").innerHTML = `<div class="card">No A/B output for ${persona}. Run scripts/v13_ab_smoke.py first.</div>`;
@@ -239,8 +258,8 @@ async function init(){
   const html = data.pairs.map(p => `
     <div class="card" data-key="${p.key}">
       <div class="text">${p.text} <span style="color:#666;font-size:.8rem">(${p.key})</span></div>
-      <div class="row"><label>V12</label><audio controls preload="none" src="/api/v13_review/ab_audio/${encodeURIComponent(persona)}/${encodeURIComponent(p.v12)}"></audio></div>
-      <div class="row"><label>V13</label><audio controls preload="none" src="/api/v13_review/ab_audio/${encodeURIComponent(persona)}/${encodeURIComponent(p.v13)}"></audio></div>
+      <div class="row"><label>V12</label><audio controls preload="none" src="/api/v13_review/ab_audio/${encodeURIComponent(persona)}/${encodeURIComponent(p.v12)}?version=${encodeURIComponent(version)}"></audio></div>
+      <div class="row"><label>V13</label><audio controls preload="none" src="/api/v13_review/ab_audio/${encodeURIComponent(persona)}/${encodeURIComponent(p.v13)}?version=${encodeURIComponent(version)}"></audio></div>
       <div class="pick">
         <button class="v12" onclick="pick('${p.key}','v12',event)">V12 sounds more like me</button>
         <button class="v13" onclick="pick('${p.key}','v13',event)">V13 sounds more like me</button>
@@ -259,7 +278,7 @@ function pick(key, choice, ev){
 init();
 </script>
 </body></html>"""
-    return html.replace("__PERSONA__", persona)
+    return html.replace("__PERSONA__", persona).replace("__VERSION__", version)
 
 
 @router.get("/ui/v13_review", response_class=HTMLResponse)

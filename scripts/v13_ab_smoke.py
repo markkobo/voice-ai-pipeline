@@ -228,7 +228,8 @@ def main() -> int:
         return 1
     log.info("V13 ref: %s", ref_path)
 
-    out_dir = ROOT / "data/training" / f"{args.persona}_v13" / "ab_smoke"
+    # Use a version-tagged subdir so V13 and V13.1 results don't collide.
+    out_dir = ROOT / "data/training" / f"{args.persona}_v13" / f"ab_smoke_{args.v13_version}"
     out_dir.mkdir(parents=True, exist_ok=True)
     log.info("Output dir: %s", out_dir)
 

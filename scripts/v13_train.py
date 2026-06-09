@@ -202,6 +202,12 @@ def main() -> int:
     p.add_argument("--lora_rank", type=int, default=16)
     p.add_argument("--lora_alpha", type=int, default=None,
                    help="LoRA alpha. Default: 2 * lora_rank (PEFT convention)")
+    p.add_argument("--target_modules", type=str,
+                   default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
+                   help="comma-separated module names to wrap with LoRA")
+    p.add_argument("--layers_to_transform", type=str, default=None,
+                   help="comma-separated layer indices (e.g. '20,21,22,23,24,25,26,27' "
+                        "for last 8 of 28). None = all layers.")
     p.add_argument("--max_records", type=int, default=None,
                    help="cap on number of records for trial run")
     p.add_argument("--ref_audio", type=str, default=None,
@@ -249,17 +255,26 @@ def main() -> int:
 
     # Apply LoRA to the talker
     lora_alpha = args.lora_alpha if args.lora_alpha is not None else 2 * args.lora_rank
-    log.info("Applying LoRA (rank=%d, alpha=%d)...", args.lora_rank, lora_alpha)
+    target_modules = [m.strip() for m in args.target_modules.split(",") if m.strip()]
+    layers_to_transform = (
+        [int(x) for x in args.layers_to_transform.split(",")] if args.layers_to_transform else None
+    )
+    log.info("Applying LoRA: rank=%d, alpha=%d, target_modules=%s, layers=%s",
+             args.lora_rank, lora_alpha, target_modules,
+             layers_to_transform if layers_to_transform else "all")
     from peft import LoraConfig, get_peft_model
-    lora_cfg = LoraConfig(
+    lora_cfg_kwargs = dict(
         r=args.lora_rank,
         lora_alpha=lora_alpha,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                        "gate_proj", "up_proj", "down_proj"],
+        target_modules=target_modules,
         lora_dropout=0.0,
         bias="none",
         task_type="CAUSAL_LM",
     )
+    if layers_to_transform is not None:
+        lora_cfg_kwargs["layers_to_transform"] = layers_to_transform
+        lora_cfg_kwargs["layers_pattern"] = "layers"
+    lora_cfg = LoraConfig(**lora_cfg_kwargs)
     model.talker = get_peft_model(model.talker, lora_cfg)
     trainable = sum(p.numel() for p in model.talker.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.talker.parameters())
@@ -410,8 +425,8 @@ def main() -> int:
         "lr": args.lr,
         "lora_rank": args.lora_rank,
         "lora_alpha": lora_alpha,
-        "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj",
-                           "gate_proj", "up_proj", "down_proj"],
+        "target_modules": target_modules,
+        "layers_to_transform": layers_to_transform,
         "dataset_records": len(dataset.records),
         "dataset_jsonl": str(jsonl_path.relative_to(ROOT)),
         "ref_audio": str(ref_path.relative_to(ROOT)),
