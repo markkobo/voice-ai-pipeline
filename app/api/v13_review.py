@@ -143,6 +143,125 @@ async def api_v13_verdicts(persona: str = Query(...)):
     return {"persona": persona, "counts": counts, "bad": bad_rows[-20:]}  # last 20 bad
 
 
+@router.get("/api/v13_review/ab_smoke")
+async def api_v13_ab_smoke(persona: str = Query("test")):
+    """List the V12 + V13 audio pairs produced by scripts/v13_ab_smoke.py."""
+    ab_dir = _persona_root(persona) / "ab_smoke"
+    if not ab_dir.exists():
+        raise HTTPException(404, f"no ab_smoke output for {persona}")
+    pairs = {}
+    for wav in sorted(ab_dir.glob("*.wav")):
+        # Files: <idx>_<label>_v12.wav and <idx>_<label>_v13.wav
+        name = wav.stem
+        if name.endswith("_v12"):
+            key = name[:-4]; col = "v12"
+        elif name.endswith("_v13"):
+            key = name[:-4]; col = "v13"
+        else:
+            continue
+        pairs.setdefault(key, {})[col] = wav.name
+    # Stable order by idx prefix
+    out = []
+    for key in sorted(pairs.keys()):
+        if "v12" in pairs[key] and "v13" in pairs[key]:
+            out.append({"key": key,
+                        "v12": pairs[key]["v12"],
+                        "v13": pairs[key]["v13"]})
+    # Map prompt idx → prompt text (kept in sync with v13_ab_smoke.py)
+    prompt_text = {
+        "01_taiwan_short":     "好啦，不要生氣嘛。",
+        "02_taiwan_narrative": "我每次想起阿嬤，就想起她炒菜的時候哼的那首歌。",
+        "03_taiwan_casual":    "那個齁，我跟你講，這件事其實沒那麼複雜啦。",
+        "04_generic_short":    "今天天氣很好。",
+        "05_generic_long":     "我們正在開發一個讓家人可以保留長輩聲音的系統。",
+        "06_english_short":    "Hi, how was your day?",
+    }
+    for p in out:
+        p["text"] = prompt_text.get(p["key"], "")
+    return {"persona": persona, "pairs": out}
+
+
+@router.get("/api/v13_review/ab_audio/{persona}/{filename}")
+async def api_v13_ab_audio(persona: str, filename: str):
+    """Serve a WAV from the ab_smoke directory."""
+    full = _persona_root(persona) / "ab_smoke" / filename
+    try:
+        full.resolve().relative_to(_persona_root(persona).resolve())
+    except ValueError:
+        raise HTTPException(400, "invalid path")
+    if not full.exists():
+        raise HTTPException(404, "not found")
+    return FileResponse(str(full), media_type="audio/wav")
+
+
+@router.get("/ui/v13_ab", response_class=HTMLResponse)
+async def ui_v13_ab(persona: str = Query("test")):
+    """Side-by-side V12 vs V13 listening + blind A/B picker."""
+    html = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>V13 A/B · __PERSONA__</title>
+<style>
+body{font-family:system-ui,-apple-system,sans-serif;background:#0f1828;color:#e6e6e6;margin:0;padding:24px;max-width:860px;margin:auto}
+h1{color:#c89efa;font-size:1.4rem;margin:0 0 8px}
+.meta{color:#888;font-size:.85rem;margin-bottom:24px}
+.note{background:#3a2820;border-left:3px solid #c89efa;padding:10px 14px;margin-bottom:20px;font-size:.85rem;line-height:1.5}
+.card{background:#1d2a3a;border-radius:12px;padding:18px;margin-bottom:14px}
+.text{font-size:1.05rem;line-height:1.5;color:#fff;margin-bottom:14px;padding:10px;background:#0f1828;border-radius:6px}
+.row{display:grid;grid-template-columns:60px 1fr;gap:10px;align-items:center;margin-bottom:8px}
+.row label{color:#888;font-weight:600;font-size:.85rem}
+audio{width:100%}
+.pick{margin-top:10px;display:flex;gap:8px}
+.pick button{flex:1;padding:8px 14px;border:none;border-radius:6px;cursor:pointer;font-size:.9rem;font-weight:600;background:#2a3a5a;color:#fff}
+.pick button.picked{background:#c89efa;color:#0f1828}
+.pick button.v13{background:#5a3a6a}
+.pick button.v12{background:#3a5a3a}
+</style></head>
+<body>
+<h1>V13 A/B — V12 (current production) vs V13 (full talker LoRA)</h1>
+<div class="meta">Persona <code>__PERSONA__</code>. Listen to both, mark which one sounds more like Mark.</div>
+<div class="note">
+<strong>⚠ Heads-up:</strong> Every V13 clip is exactly <strong>15.92 s</strong> — generation hit the
+<code>max_new_tokens=200</code> cap because the V13 LoRA did NOT learn to emit the codec EOS token. So
+expect V13 to start with the right utterance and then keep going past where it should stop. Judge the
+<em>first few seconds</em> only — that's where the accent/timbre signal is.
+</div>
+<div id="content">Loading…</div>
+
+<script>
+const persona = new URLSearchParams(location.search).get("persona") || "__PERSONA__";
+let picks = {};
+async function init(){
+  const res = await fetch(`/api/v13_review/ab_smoke?persona=${encodeURIComponent(persona)}`);
+  const data = await res.json();
+  if(!data.pairs || data.pairs.length === 0){
+    document.getElementById("content").innerHTML = `<div class="card">No A/B output for ${persona}. Run scripts/v13_ab_smoke.py first.</div>`;
+    return;
+  }
+  const html = data.pairs.map(p => `
+    <div class="card" data-key="${p.key}">
+      <div class="text">${p.text} <span style="color:#666;font-size:.8rem">(${p.key})</span></div>
+      <div class="row"><label>V12</label><audio controls preload="none" src="/api/v13_review/ab_audio/${encodeURIComponent(persona)}/${encodeURIComponent(p.v12)}"></audio></div>
+      <div class="row"><label>V13</label><audio controls preload="none" src="/api/v13_review/ab_audio/${encodeURIComponent(persona)}/${encodeURIComponent(p.v13)}"></audio></div>
+      <div class="pick">
+        <button class="v12" onclick="pick('${p.key}','v12',event)">V12 sounds more like me</button>
+        <button class="v13" onclick="pick('${p.key}','v13',event)">V13 sounds more like me</button>
+        <button onclick="pick('${p.key}','tie',event)">About the same</button>
+      </div>
+    </div>`).join("");
+  document.getElementById("content").innerHTML = html;
+}
+function pick(key, choice, ev){
+  picks[key] = choice;
+  const card = ev.target.closest(".card");
+  card.querySelectorAll(".pick button").forEach(b => b.classList.remove("picked"));
+  ev.target.classList.add("picked");
+  console.log("picks:", picks);
+}
+init();
+</script>
+</body></html>"""
+    return html.replace("__PERSONA__", persona)
+
+
 @router.get("/ui/v13_review", response_class=HTMLResponse)
 async def ui_v13_review(persona: str = Query("test")):
     """Single-page reviewer. No build step — vanilla HTML + JS."""
