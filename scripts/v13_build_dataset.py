@@ -124,26 +124,43 @@ def silence_split_one(wav_path: Path, out_dir: Path) -> list[Path]:
     return out_paths
 
 
-def transcribe_one(client, chunk_path: Path) -> Optional[str]:
-    """Whisper-3 transcribe a single chunk. Returns None on failure."""
-    try:
-        with open(chunk_path, "rb") as f:
-            resp = client.audio.transcriptions.create(
-                model=WHISPER_MODEL,
-                file=f,
-                language=WHISPER_LANGUAGE,
-                # Per OpenAI docs: small `prompt` helps Whisper bias
-                # toward Traditional Chinese / Taiwanese vocabulary.
-                # The actual training audio is Mark speaking Mandarin
-                # with Taiwan accent, mixing in English technical
-                # terms. Bias prompt covers that.
-                prompt="這是一段台灣口音的中英文混合對話，包含技術名詞。",
+def transcribe_one(client, chunk_path: Path, max_retries: int = 4) -> Optional[str]:
+    """Whisper-3 transcribe a single chunk with exponential backoff
+    on transient errors (rate limit, network, 5xx). Returns None only
+    after retries exhausted. Gemini review f28120b §latent-1."""
+    import time
+    for attempt in range(max_retries + 1):
+        try:
+            with open(chunk_path, "rb") as f:
+                resp = client.audio.transcriptions.create(
+                    model=WHISPER_MODEL,
+                    file=f,
+                    language=WHISPER_LANGUAGE,
+                    # Per OpenAI docs: small `prompt` helps Whisper bias
+                    # toward Traditional Chinese / Taiwanese vocabulary.
+                    # The actual training audio is Mark speaking Mandarin
+                    # with Taiwan accent, mixing in English technical
+                    # terms. Bias prompt covers that.
+                    prompt="這是一段台灣口音的中英文混合對話，包含技術名詞。",
+                )
+            text = (resp.text or "").strip()
+            return text if text else None
+        except Exception as e:
+            err_str = str(e).lower()
+            # Transient signals: rate-limit (429), 5xx, timeout/connection.
+            transient = (
+                "rate" in err_str or "429" in err_str
+                or "500" in err_str or "502" in err_str or "503" in err_str or "504" in err_str
+                or "timeout" in err_str or "connection" in err_str
             )
-        text = (resp.text or "").strip()
-        return text if text else None
-    except Exception as e:
-        log.error("    transcribe failed for %s: %s", chunk_path.name, e)
-        return None
+            if attempt < max_retries and transient:
+                wait = 2 ** attempt
+                log.warning("    transient error for %s (attempt %d): %s — retrying in %ds",
+                            chunk_path.name, attempt + 1, e, wait)
+                time.sleep(wait)
+                continue
+            log.error("    transcribe failed for %s: %s", chunk_path.name, e)
+            return None
 
 
 def build_dataset(persona: str, max_chunks: Optional[int] = None) -> int:
@@ -194,6 +211,17 @@ def build_dataset(persona: str, max_chunks: Optional[int] = None) -> int:
 
     from dotenv import load_dotenv
     load_dotenv(ROOT / ".env")
+    # Fail-fast on missing API key. Without this check, every chunk
+    # transcription silently fails with a delayed authentication
+    # error and the script reports "failed=N" but no clear root cause.
+    # Gemini review f28120b §bugs-1.
+    import os
+    if not os.environ.get("OPENAI_API_KEY"):
+        log.error(
+            "OPENAI_API_KEY not set. Put it in .env at the project root "
+            "or export it in the shell before running this script."
+        )
+        return 2
     from openai import OpenAI
     client = OpenAI()
 
