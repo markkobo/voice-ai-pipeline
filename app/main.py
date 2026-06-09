@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app.api import ws_asr, tts_stream, standalone_ui, recordings, recordings_ui, training, training_ui, personas, listeners
-from app.api import _system, corpus, consent
+from app.api import _system, corpus, consent, v13_review
 from app.api._errors import register_error_handlers
 
 # Jinja2 + StaticFiles wiring (RFC_M6 Phase 0-pre — dev-UI refactor).
@@ -98,6 +98,7 @@ app.include_router(listeners.router)
 app.include_router(_system.router)
 app.include_router(corpus.router)
 app.include_router(consent.router)
+app.include_router(v13_review.router)
 
 # Wire DomainError → HTTP handlers (single source of truth for error responses).
 register_error_handlers(app)
