@@ -51,6 +51,9 @@ YOUTUBE_HALLUCINATION_SUBSTRINGS = [
     "歡迎訂閱",
     "感謝您的觀看",
     "字幕由Amara.org社區提供",
+    # User-flagged Bads from /ui/v13_review on 2026-06-09:
+    "以上言論不代表本台立場",
+    "請保存在你設計的網頁",
 ]
 
 # Optional second-pass filter: trivially short transcripts. NOT enabled
@@ -95,6 +98,23 @@ def filter_jsonl(src: Path, dst: Path) -> tuple[int, int, dict[str, int]]:
     return kept, dropped, reasons
 
 
+def load_user_bad_audios(persona: str) -> set[str]:
+    """Read /ui/v13_review verdicts.csv and return the set of audio rel-paths
+    the user marked 'bad'. These are dropped on top of the pattern filter."""
+    csv_path = ROOT / "data/training" / f"{persona}_v13" / "verdicts.csv"
+    if not csv_path.exists():
+        return set()
+    import csv as _csv
+    bads: set[str] = set()
+    with open(csv_path) as f:
+        for row in _csv.DictReader(f):
+            if row.get("verdict") == "bad":
+                bads.add(row["audio"])
+    if bads:
+        log.info("Loaded %d user-flagged Bad audios from verdicts.csv", len(bads))
+    return bads
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--persona", required=True)
@@ -106,6 +126,8 @@ def main() -> int:
         ("train_prepared.jsonl", "train_prepared_filtered.jsonl"),
     ]
 
+    user_bads = load_user_bad_audios(args.persona)
+
     for src_name, dst_name in sources:
         src = out_root / src_name
         dst = out_root / dst_name
@@ -113,6 +135,28 @@ def main() -> int:
             log.warning("source not found, skipping: %s", src)
             continue
         kept, dropped, reasons = filter_jsonl(src, dst)
+        # Second pass: drop user-flagged bads.
+        if user_bads:
+            import json as _json
+            keep_lines = []
+            ubad_dropped = 0
+            with open(dst) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    rec = _json.loads(line)
+                    if rec["audio"] in user_bads:
+                        ubad_dropped += 1
+                        continue
+                    keep_lines.append(line)
+            with open(dst, "w", encoding="utf-8") as f:
+                for line in keep_lines:
+                    f.write(line + "\n")
+            if ubad_dropped:
+                reasons[f"user_verdict_bad"] = ubad_dropped
+                kept -= ubad_dropped
+                dropped += ubad_dropped
         log.info("%s → %s: kept=%d, dropped=%d", src_name, dst_name, kept, dropped)
         for r, c in sorted(reasons.items(), key=lambda kv: -kv[1]):
             log.info("    %4d  %s", c, r)
